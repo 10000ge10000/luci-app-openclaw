@@ -157,38 +157,33 @@ restart_gateway() {
 	echo ""
 	echo -e "  ${YELLOW}正在重启 Gateway...${NC}"
 
-	# 修复配置文件权限 (json_set 以 root 运行可能改变了权限)
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-	chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+	# 修复数据目录权限 (root 用户操作可能改变了文件属主)
+	chown -R openclaw:openclaw "$OC_DATA" 2>/dev/null || true
 
-	# 获取 gateway 进程 PID: 优先用 ubus (procd 记录的最准确)
-	local gw_pid=""
-	gw_pid=$(ubus call service list '{"name":"openclaw"}' 2>/dev/null | jsonfilter -e '$.openclaw.instances.gateway.pid' 2>/dev/null) || true
-
-	if [ -z "$gw_pid" ] || ! kill -0 "$gw_pid" 2>/dev/null; then
-		# ubus 取不到，尝试 pidfile
-		gw_pid=$(cat /var/run/openclaw.pid 2>/dev/null)
-	fi
-
-	if [ -z "$gw_pid" ] || ! kill -0 "$gw_pid" 2>/dev/null; then
-		# pidfile 也无效，按端口查找
-		local port=$(json_get gateway.port)
-		port=${port:-18789}
-		gw_pid=$(get_pid_by_port "$port")
-	fi
-
-	if [ -n "$gw_pid" ] && kill -0 "$gw_pid" 2>/dev/null; then
-		kill "$gw_pid" 2>/dev/null
-	else
-		# 找不到进程，后台启动 (避免 init.d restart 杀死 PTY 进程)
-		/etc/init.d/openclaw start >/dev/null 2>&1 &
-	fi
-
-	# procd respawn 需要约 5 秒，gateway 启动约 3-5 秒
-	local port=$(json_get gateway.port)
+	local port
+	port=$(json_get gateway.port)
 	port=${port:-18789}
+
+	# ── 使用 init.d restart_gateway: 只重启 Gateway 实例，不影响 PTY 终端 ──
+	# 发 SIGTERM 给 gateway 进程，procd 自动 respawn，避免 crash loop 计数累积
+	/etc/init.d/openclaw restart_gateway >/dev/null 2>&1
+
+	# ── 等待端口监听，最多 45 秒 (Node.js 冷启动需要 10-15 秒) ──
 	echo -e "  ${YELLOW}⏳ Gateway 启动中，请稍候...${NC}"
 	local waited=0
+	while [ $waited -lt 45 ]; do
+		sleep 2
+		waited=$((waited + 2))
+		if check_port_listening "$port"; then
+			echo -e "  ${GREEN}✅ Gateway 已重启成功${NC}"
+			return 0
+		fi
+	done
+
+	# ── 超时仍未就绪: 可能是 procd crash loop 保护触发，用 start 解除 ──
+	echo -e "  ${YELLOW}⏳ 正在尝试再次启动...${NC}"
+	/etc/init.d/openclaw start >/dev/null 2>&1 &
+	waited=0
 	while [ $waited -lt 20 ]; do
 		sleep 2
 		waited=$((waited + 2))
@@ -197,6 +192,7 @@ restart_gateway() {
 			return 0
 		fi
 	done
+
 	echo -e "  ${RED}❌ Gateway 可能未正常启动${NC}"
 	echo -e "  ${CYAN}   查看日志: logread -e openclaw${NC}"
 }
