@@ -69,6 +69,7 @@
 			<tr><td>运行状态</td><td id="oc-st-status"><span class="oc-badge oc-badge-unknown">加载中...</span></td></tr>
 			<tr><td>网关服务</td><td id="oc-st-gateway">-</td></tr>
 			<tr><td>配置终端</td><td id="oc-st-pty">-</td></tr>
+			<tr><td>活跃模型</td><td id="oc-st-model">-</td></tr>
 			<tr><td>进程 PID</td><td id="oc-st-pid">-</td></tr>
 			<tr><td>内存占用</td><td id="oc-st-mem">-</td></tr>
 			<tr><td>运行时间</td><td id="oc-st-uptime">-</td></tr>
@@ -112,6 +113,13 @@
 				}
 
 				document.getElementById('oc-st-pid').textContent = d.pid || '-';
+
+				var modelEl = document.getElementById('oc-st-model');
+				if (d.active_model) {
+					modelEl.innerHTML = '<code style="padding:2px 8px;background:#f0f3f6;border-radius:4px;font-size:12px;">' + d.active_model + '</code>';
+				} else {
+					modelEl.textContent = '未配置';
+				}
 
 				var memEl = document.getElementById('oc-st-mem');
 				if (d.memory_kb > 0) {

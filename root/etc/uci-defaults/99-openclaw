@@ -33,8 +33,16 @@ chown -R openclaw:openclaw /opt/openclaw 2>/dev/null || true
 # 生成随机 Token (如果尚未设置)
 CURRENT_TOKEN=$(uci -q get openclaw.main.token)
 if [ -z "$CURRENT_TOKEN" ]; then
-	TOKEN=$(head -c 24 /dev/urandom | hexdump -e '24/1 "%02x"' 2>/dev/null || openssl rand -hex 24 2>/dev/null || echo "changeme_$(date +%s)")
+	TOKEN=$(head -c 24 /dev/urandom | hexdump -e '24/1 "%02x"' 2>/dev/null || dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 48)
 	uci set openclaw.main.token="$TOKEN"
+	uci commit openclaw
+fi
+
+# 生成 PTY Token (如果尚未设置)
+CURRENT_PTY_TOKEN=$(uci -q get openclaw.main.pty_token)
+if [ -z "$CURRENT_PTY_TOKEN" ]; then
+	PTY_TOKEN=$(head -c 24 /dev/urandom | hexdump -e '24/1 "%02x"' 2>/dev/null || dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 48)
+	uci set openclaw.main.pty_token="$PTY_TOKEN"
 	uci commit openclaw
 fi
 

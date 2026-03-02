@@ -6,7 +6,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-openclaw
-PKG_VERSION:=1.0.0
+PKG_VERSION:=$(strip $(shell cat $(CURDIR)/VERSION 2>/dev/null || echo "1.0.0"))
 PKG_RELEASE:=1
 
 PKG_MAINTAINER:=10000ge10000 <10000ge10000@users.noreply.github.com>

@@ -73,6 +73,9 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 	<span class="label">网关地址：</span>
 	<span class="value" id="oc-console-addr">-</span>
 	<span class="sep">|</span>
+	<span class="label">活跃模型：</span>
+	<span class="value" id="oc-console-model" style="color:#555;">-</span>
+	<span class="sep">|</span>
 	<span class="label">状态：</span>
 	<span id="oc-console-status-text">检查中...</span>
 	<a id="oc-console-open-btn" class="btn-open" href="#" target="_blank" rel="noopener" style="display:none;">
@@ -99,6 +102,7 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 	var container = document.getElementById('oc-console-container');
 	var loading = document.getElementById('oc-console-loading');
 	var addrEl = document.getElementById('oc-console-addr');
+	var modelEl = document.getElementById('oc-console-model');
 	var statusTextEl = document.getElementById('oc-console-status-text');
 	var openBtn = document.getElementById('oc-console-open-btn');
 
@@ -124,6 +128,9 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 				try {
 					var d = JSON.parse(x.responseText);
 					var url = getConsoleUrl();
+					if (d.active_model) {
+						modelEl.textContent = d.active_model;
+					}
 					if (d.gateway_running) {
 						statusTextEl.innerHTML = '<span style="color:#1a7f37;">● 网关运行中</span>';
 						openBtn.href = url;

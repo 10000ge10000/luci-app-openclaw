@@ -27,17 +27,22 @@ for ver_dir in "${OC_GLOBAL}"/*/node_modules/openclaw; do
 $ver_dir"
 done
 
-local d
-echo "$search_dirs" | while read -r d; do
+local d _tmpf
+_tmpf=$(mktemp)
+echo "$search_dirs" > "$_tmpf"
+while read -r d; do
 [ -z "$d" ] && continue
 if [ -f "${d}/openclaw.mjs" ]; then
 echo "${d}/openclaw.mjs"
+rm -f "$_tmpf"
 return
 elif [ -f "${d}/dist/cli.js" ]; then
 echo "${d}/dist/cli.js"
+rm -f "$_tmpf"
 return
 fi
-done
+done < "$_tmpf"
+rm -f "$_tmpf"
 }
 
 patch_iframe_headers() {
@@ -75,7 +80,7 @@ fi
 
 # 如果仍然没有 token，生成一个新的
 if [ -z "$token" ]; then
-	token=$(head -c 24 /dev/urandom | hexdump -e '24/1 "%02x"' 2>/dev/null || openssl rand -hex 24 2>/dev/null || echo "auto_$(date +%s)")
+	token=$(head -c 24 /dev/urandom | hexdump -e '24/1 "%02x"' 2>/dev/null || openssl rand -hex 24 2>/dev/null || dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 48)
 fi
 
 # 确保 token 写回 UCI
@@ -176,18 +181,22 @@ OC_GLOBAL="$OC_GLOBAL" \
 OC_DATA="$OC_DATA" \
 PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 procd_set_param user openclaw
-procd_set_param respawn 3600 5 0
+procd_set_param respawn 3600 5 5
 procd_set_param stdout 1
 procd_set_param stderr 1
 procd_set_param pidfile /var/run/openclaw.pid
 procd_close_instance
 
 # 启动 Web PTY 配置终端 (辅助服务)
-# 生成 PTY 会话 token 用于 WebSocket 认证
+# 复用已有 PTY token，只在不存在时才生成新的
+# 这样避免服务重启时 PTY WebSocket 连接因 token 变化而断开
 local pty_token
-pty_token=$(head -c 16 /dev/urandom | hexdump -e '16/1 "%02x"' 2>/dev/null || openssl rand -hex 16 2>/dev/null || echo "pty_$(date +%s)")
-uci set openclaw.main.pty_token="$pty_token"
-uci commit openclaw 2>/dev/null
+pty_token=$(uci -q get openclaw.main.pty_token || echo "")
+if [ -z "$pty_token" ]; then
+	pty_token=$(head -c 16 /dev/urandom | hexdump -e '16/1 "%02x"' 2>/dev/null || openssl rand -hex 16 2>/dev/null || echo "pty_$(date +%s)")
+	uci set openclaw.main.pty_token="$pty_token"
+	uci commit openclaw 2>/dev/null
+fi
 
 procd_open_instance "pty"
 procd_set_param command "$NODE_BIN" /usr/share/openclaw/web-pty.js
@@ -231,17 +240,56 @@ echo "正在调用 openclaw-env setup..."
 
 restart_gateway() {
 # 仅重启 Gateway 进程，通过 kill 触发 procd respawn
-# 不调用 start_service，避免重新生成 pty_token 导致 PTY 连接断开
+# 绝对不能调用 start_service，否则会重启 PTY 实例
+
+local port
+port=$(uci -q get openclaw.main.port || echo "18789")
+
+# ── 第一步: kill 监听端口的 gateway 子进程 (openclaw-gateway) ──
+# openclaw 启动后会 fork 出 openclaw-gateway 子进程实际监听端口
+# 必须先杀子进程释放端口，否则 procd respawn 的新实例会因端口冲突而崩溃
+local port_pid=""
+if command -v ss >/dev/null 2>&1; then
+	port_pid=$(ss -tlnp 2>/dev/null | grep ":${port} " | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)
+else
+	port_pid=$(netstat -tlnp 2>/dev/null | grep ":${port} " | sed -n 's|.* \([0-9]*\)/.*|\1|p' | head -1)
+fi
+[ -n "$port_pid" ] && kill "$port_pid" 2>/dev/null
+
+# ── 第二步: kill procd 管理的 gateway 主进程 (openclaw) ──
+# procd 追踪的是主进程 PID，kill 它才能触发 respawn
 local gw_pid=""
 gw_pid=$(ubus call service list '{"name":"openclaw"}' 2>/dev/null | \
 	jsonfilter -e '$.openclaw.instances.gateway.pid' 2>/dev/null) || true
 
 if [ -n "$gw_pid" ] && kill -0 "$gw_pid" 2>/dev/null; then
 	kill "$gw_pid" 2>/dev/null
-else
-	# 没有运行中的进程，直接 start（首次启动场景）
+fi
+
+# ── 第三步: 兜底 — kill 所有 openclaw gateway 相关残留进程 ──
+# 避免任何残留进程占据端口
+sleep 1
+for pid in $(pgrep -f "openclaw-gateway" 2>/dev/null) $(pgrep -f "openclaw.*gateway.*run" 2>/dev/null); do
+	kill "$pid" 2>/dev/null
+done
+
+# ── 第四步: 等待端口真正释放 (最多 5 秒) ──
+local wait_count=0
+while [ $wait_count -lt 5 ]; do
+	if command -v ss >/dev/null 2>&1; then
+		ss -tlnp 2>/dev/null | grep -q ":${port} " || break
+	else
+		netstat -tlnp 2>/dev/null | grep -q ":${port} " || break
+	fi
+	sleep 1
+	wait_count=$((wait_count + 1))
+done
+
+# ── 第五步: 如果 procd 中没有 gateway 服务注册 (首次/崩溃)，调用 start ──
+if [ -z "$gw_pid" ]; then
 	/etc/init.d/openclaw start >/dev/null 2>&1
 fi
+# 如果 gw_pid 存在，procd respawn 会自动重启 gateway
 }
 
 status_service() {

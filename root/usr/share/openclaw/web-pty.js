@@ -29,7 +29,7 @@ const MAX_SESSIONS = parseInt(process.env.OC_MAX_SESSIONS || '5', 10);
 function loadAuthToken() {
   try {
     const { execSync } = require('child_process');
-    const t = execSync('uci -q get openclaw.main.luci_token 2>/dev/null', { encoding: 'utf8', timeout: 3000 }).trim();
+    const t = execSync('uci -q get openclaw.main.pty_token 2>/dev/null', { encoding: 'utf8', timeout: 3000 }).trim();
     return t || '';
   } catch { return ''; }
 }
@@ -263,6 +263,7 @@ function handleUpgrade(req, socket, head) {
 // ── 服务器实例 ──
 const httpServer = http.createServer(handleRequest);
 httpServer.on('upgrade', handleUpgrade);
+let httpsServer = null;
 
 httpServer.listen(PORT, HOST, () => {
   console.log(`[oc-config] HTTP listening on ${HOST}:${PORT}`);
@@ -273,7 +274,7 @@ httpServer.listen(PORT, HOST, () => {
 const HTTPS_PORT = PORT + 1;
 try {
   if (fs.existsSync(SSL_CERT) && fs.existsSync(SSL_KEY)) {
-    const httpsServer = https.createServer({ cert: fs.readFileSync(SSL_CERT), key: fs.readFileSync(SSL_KEY) }, handleRequest);
+    httpsServer = https.createServer({ cert: fs.readFileSync(SSL_CERT), key: fs.readFileSync(SSL_KEY) }, handleRequest);
     httpsServer.on('upgrade', handleUpgrade);
     httpsServer.listen(HTTPS_PORT, HOST, () => console.log(`[oc-config] HTTPS listening on ${HOST}:${HTTPS_PORT}`));
     httpsServer.on('error', (e) => console.log(`[oc-config] HTTPS port ${HTTPS_PORT}: ${e.message}`));
@@ -281,5 +282,6 @@ try {
 } catch (e) { console.log(`[oc-config] SSL init: ${e.message}`); }
 
 httpServer.on('error', (e) => { console.error(`[oc-config] Fatal: ${e.message}`); process.exit(1); });
-process.on('SIGTERM', () => { console.log('[oc-config] Shutdown'); httpServer.close(); process.exit(0); });
-process.on('SIGINT', () => { httpServer.close(); process.exit(0); });
+function shutdown() { console.log('[oc-config] Shutdown'); httpServer.close(); if (httpsServer) httpsServer.close(); process.exit(0); }
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

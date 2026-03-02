@@ -165,13 +165,12 @@ restart_gateway() {
 	port=${port:-18789}
 
 	# ── kill gateway 进程，让 procd respawn ──
-	# 不调用 init.d start，避免重新生成 pty_token 导致当前 PTY 会话断开
 	/etc/init.d/openclaw restart_gateway >/dev/null 2>&1
 
-	# ── 等待端口监听，最多 60 秒 (Node.js 冷启动实测约 15-40 秒) ──
-	echo -e "  ${YELLOW}⏳ Gateway 启动中，请稍候 (约 30 秒)...${NC}"
+	# ── 等待端口恢复 (最多 30 秒，含端口释放 + Node.js 冷启动) ──
+	echo -e "  ${YELLOW}⏳ Gateway 启动中，请稍候 (约 15-30 秒)...${NC}"
 	local waited=0
-	while [ $waited -lt 60 ]; do
+	while [ $waited -lt 30 ]; do
 		sleep 3
 		waited=$((waited + 3))
 		if check_port_listening "$port"; then
@@ -180,14 +179,10 @@ restart_gateway() {
 		fi
 	done
 
-	# 超时后补一次立即检查（避免刚好在 sleep 间隙就绪时误判）
-	if check_port_listening "$port"; then
-		echo -e "  ${GREEN}✅ Gateway 已重启成功${NC}"
-		return 0
-	fi
-
-	echo -e "  ${RED}❌ Gateway 启动超时，请稍后手动检查${NC}"
+	# 30 秒内没就绪，提示用户但不继续阻塞
+	echo -e "  ${YELLOW}⏳ Gateway 仍在启动中，请稍后确认${NC}"
 	echo -e "  ${CYAN}   查看日志: logread -e openclaw${NC}"
+	echo ""
 }
 
 ask_restart() {
@@ -460,32 +455,53 @@ configure_model() {
 		7)
 			echo ""
 			echo -e "  ${BOLD}GitHub Copilot 配置${NC}"
-			echo -e "  ${YELLOW}需要有效的 GitHub Copilot 订阅${NC}"
-			echo -e "  ${YELLOW}获取 Token: https://github.com/settings/tokens (需 copilot 权限)${NC}"
+			echo -e "  ${YELLOW}需要有效的 GitHub Copilot 订阅 (Free/Pro/Business 均可)${NC}"
+			echo -e "  ${YELLOW}使用 OAuth 自动认证，无需手动输入 Token${NC}"
 			echo ""
-			prompt_with_default "请输入 GitHub Token (ghp_...)" "" api_key
-			if [ -n "$api_key" ]; then
-				json_set models.github-copilot.apiKey "$api_key"
-				echo ""
-				echo -e "  ${CYAN}可用模型:${NC}"
-				echo -e "    ${CYAN}a)${NC} github-copilot/claude-sonnet-4 — Claude Sonnet 4 (推荐)"
-				echo -e "    ${CYAN}b)${NC} github-copilot/gpt-5.2         — GPT-5.2"
-				echo -e "    ${CYAN}c)${NC} github-copilot/gemini-2.5-pro  — Gemini 2.5 Pro"
-				echo -e "    ${CYAN}d)${NC} github-copilot/o3              — o3"
-				echo -e "    ${CYAN}e)${NC} 手动输入模型名"
-				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="github-copilot/claude-sonnet-4" ;;
-					b) model_name="github-copilot/gpt-5.2" ;;
-					c) model_name="github-copilot/gemini-2.5-pro" ;;
-					d) model_name="github-copilot/o3" ;;
-					e) prompt_with_default "请输入模型名称" "github-copilot/claude-sonnet-4" model_name ;;
-					*) model_name="github-copilot/claude-sonnet-4" ;;
-				esac
-				json_set agents.defaults.model.primary "$model_name"
-				echo -e "  ${GREEN}✅ GitHub Copilot 已配置，活跃模型: ${model_name}${NC}"
-			fi
+			echo -e "  ${CYAN}配置方式:${NC}"
+			echo -e "    ${CYAN}a)${NC} 通过 OAuth 授权登录 (推荐)"
+			echo -e "    ${CYAN}b)${NC} 手动输入 GitHub Token (ghp_...)"
+			echo ""
+			prompt_with_default "请选择" "a" copilot_mode
+			case "$copilot_mode" in
+				a)
+					echo ""
+					echo -e "  ${CYAN}启用 Copilot Proxy 插件...${NC}"
+					enable_auth_plugins
+					echo -e "  ${CYAN}启动 GitHub Copilot OAuth 授权...${NC}"
+					oc_cmd models auth login --provider copilot-proxy --set-default || echo -e "  ${YELLOW}OAuth 授权已退出${NC}"
+					echo ""
+					ask_restart
+					;;
+				b|*)
+					echo ""
+					echo -e "  ${YELLOW}获取 Token: https://github.com/settings/tokens (需 copilot 权限)${NC}"
+					echo ""
+					prompt_with_default "请输入 GitHub Token (ghp_...)" "" api_key
+					if [ -n "$api_key" ]; then
+						json_set models.github-copilot.apiKey "$api_key"
+						echo ""
+						echo -e "  ${CYAN}可用模型:${NC}"
+						echo -e "    ${CYAN}a)${NC} github-copilot/claude-sonnet-4 — Claude Sonnet 4 (推荐)"
+						echo -e "    ${CYAN}b)${NC} github-copilot/gpt-5.2         — GPT-5.2"
+						echo -e "    ${CYAN}c)${NC} github-copilot/gemini-2.5-pro  — Gemini 2.5 Pro"
+						echo -e "    ${CYAN}d)${NC} github-copilot/o3              — o3"
+						echo -e "    ${CYAN}e)${NC} 手动输入模型名"
+						echo ""
+						prompt_with_default "请选择模型" "a" model_choice
+						case "$model_choice" in
+							a) model_name="github-copilot/claude-sonnet-4" ;;
+							b) model_name="github-copilot/gpt-5.2" ;;
+							c) model_name="github-copilot/gemini-2.5-pro" ;;
+							d) model_name="github-copilot/o3" ;;
+							e) prompt_with_default "请输入模型名称" "github-copilot/claude-sonnet-4" model_name ;;
+							*) model_name="github-copilot/claude-sonnet-4" ;;
+						esac
+						json_set agents.defaults.model.primary "$model_name"
+						echo -e "  ${GREEN}✅ GitHub Copilot 已配置，活跃模型: ${model_name}${NC}"
+					fi
+					;;
+			esac
 			;;
 		8)
 			echo ""
@@ -513,8 +529,8 @@ configure_model() {
 					echo ""
 					prompt_with_default "请输入阿里云 API Key (sk-...)" "" api_key
 					if [ -n "$api_key" ]; then
-						json_set models.custom.apiKey "$api_key"
-						json_set models.custom.baseUrl "https://dashscope.aliyuncs.com/compatible-mode/v1"
+						json_set models.dashscope.apiKey "$api_key"
+						json_set models.dashscope.baseUrl "https://dashscope.aliyuncs.com/compatible-mode/v1"
 						echo ""
 						echo -e "  ${CYAN}可用模型:${NC}"
 						echo -e "    ${CYAN}a)${NC} qwen-max        — 通义千问旗舰 (推荐)"
@@ -599,8 +615,8 @@ configure_model() {
 			echo ""
 			prompt_with_default "请输入 SiliconFlow API Key" "" api_key
 			if [ -n "$api_key" ]; then
-				json_set models.custom.apiKey "$api_key"
-				json_set models.custom.baseUrl "https://api.siliconflow.cn/v1"
+				json_set models.siliconflow.apiKey "$api_key"
+				json_set models.siliconflow.baseUrl "https://api.siliconflow.cn/v1"
 				echo ""
 				echo -e "  ${CYAN}可用模型:${NC}"
 				echo -e "    ${CYAN}a)${NC} deepseek-ai/DeepSeek-V3      — DeepSeek V3 (推荐)"
@@ -910,8 +926,10 @@ telegram_pairing() {
 		fi
 
 		if [ -n "$codes" ]; then
-			# ash 不支持 <<<, 使用 echo | while
-			echo "$codes" | while IFS= read -r code; do
+			# 逐个处理配对码 (避免管道子 shell 变量丢失问题)
+			local _codes_tmp="/tmp/oc_pair_codes_$$"
+			echo "$codes" > "$_codes_tmp"
+			while IFS= read -r code; do
 				[ -z "$code" ] && continue
 				echo -e "  ${CYAN}发现配对请求: ${code}${NC}"
 				local approve=$(oc_cmd pairing approve telegram "$code" 2>&1)
@@ -919,7 +937,8 @@ telegram_pairing() {
 					echo ""
 					echo -e "  ${GREEN}${BOLD}🎉 Telegram 配对成功！${NC}"
 				fi
-			done
+			done < "$_codes_tmp"
+			rm -f "$_codes_tmp"
 			# 检查是否还有待配对的
 			local re_check=$(oc_cmd pairing list telegram --json 2>/dev/null || echo "")
 			local re_codes=$(echo "$re_check" | grep -o '"code"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
@@ -1156,7 +1175,17 @@ reset_to_defaults() {
 
 				echo -e "  ${CYAN}[4/5] 重新初始化...${NC}"
 				# 尝试 onboard，超时 10 秒避免阻塞
-				timeout 10 sh -c "$(which node 2>/dev/null || echo "$NODE_BIN") \"$OC_ENTRY\" onboard --non-interactive --accept-risk" >/dev/null 2>&1 || true
+				local _node_bin
+				_node_bin=$(which node 2>/dev/null || echo "$NODE_BIN")
+				if command -v timeout >/dev/null 2>&1; then
+					timeout 10 sh -c "\"$_node_bin\" \"$OC_ENTRY\" onboard --non-interactive --accept-risk" >/dev/null 2>&1 || true
+				else
+					"$_node_bin" "$OC_ENTRY" onboard --non-interactive --accept-risk >/dev/null 2>&1 &
+					local _ob_pid=$!
+					sleep 10
+					kill "$_ob_pid" 2>/dev/null || true
+					wait "$_ob_pid" 2>/dev/null || true
+				fi
 				echo -e "  ${GREEN}   初始化完成${NC}"
 
 				echo -e "  ${CYAN}[5/5] 应用 OpenWrt 适配配置...${NC}"

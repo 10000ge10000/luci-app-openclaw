@@ -4,8 +4,27 @@ module("luci.controller.openclaw", package.seeall)
 -- 公共辅助: 获取 OpenClaw 版本号
 local function get_openclaw_version()
 	local sys = require "luci.sys"
-	local ver = sys.exec("[ -x /opt/openclaw/node/bin/node ] && for d in /opt/openclaw/global/lib/node_modules/openclaw /opt/openclaw/global/node_modules/openclaw /opt/openclaw/global/*/node_modules/openclaw; do [ -f \"$d/openclaw.mjs\" ] && /opt/openclaw/node/bin/node \"$d/openclaw.mjs\" --version 2>/dev/null && break; [ -f \"$d/dist/cli.js\" ] && /opt/openclaw/node/bin/node \"$d/dist/cli.js\" --version 2>/dev/null && break; done"):gsub("%s+", "")
-	return ver
+	-- 优先从 package.json 读取版本号 (轻量)，避免每次启动 node 进程
+	local dirs = {
+		"/opt/openclaw/global/lib/node_modules/openclaw",
+		"/opt/openclaw/global/node_modules/openclaw",
+	}
+	-- pnpm 版本目录
+	local pnpm_glob = sys.exec("ls -d /opt/openclaw/global/*/node_modules/openclaw 2>/dev/null"):gsub("%s+$", "")
+	for d in pnpm_glob:gmatch("[^\n]+") do
+		dirs[#dirs + 1] = d
+	end
+	for _, d in ipairs(dirs) do
+		local pkg = d .. "/package.json"
+		local f = io.open(pkg, "r")
+		if f then
+			local content = f:read("*a")
+			f:close()
+			local ver = content:match('"version"%s*:%s*"([^"]+)"')
+			if ver and ver ~= "" then return ver end
+		end
+	end
+	return ""
 end
 
 function index()
@@ -99,9 +118,22 @@ function action_status()
 	local pty_check = sys.exec("netstat -tlnp 2>/dev/null | grep -c ':" .. pty_port .. " ' || echo 0"):gsub("%s+", "")
 	result.pty_running = (tonumber(pty_check) or 0) > 0
 
+	-- 读取当前活跃模型
+	local config_file = "/opt/openclaw/data/.openclaw/openclaw.json"
+	local cf = io.open(config_file, "r")
+	if cf then
+		local content = cf:read("*a")
+		cf:close()
+		-- 简单正则提取 "primary": "xxx"
+		local model = content:match('"primary"%s*:%s*"([^"]+)"')
+		if model and model ~= "" then
+			result.active_model = model
+		end
+	end
+
 	-- PID 和内存
 	if result.gateway_running then
-		local pid = sys.exec("netstat -tlnp 2>/dev/null | grep ':" .. port .. " ' | head -1 | sed 's|.* \\([0-9]*\\)/.*|\\1|'"):gsub("%s+", "")
+		local pid = sys.exec("netstat -tlnp 2>/dev/null | awk '/:" .. port .. " /{split($NF,a,\"/\");print a[1];exit}'"):gsub("%s+", "")
 		if pid and pid ~= "" then
 			result.pid = pid
 			-- 内存 (VmRSS from /proc)

@@ -4,6 +4,29 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.1] - 2026-03-02
+
+### 修复
+- **P0** web-pty.js `loadAuthToken` 读取错误的 UCI key `luci_token` → `pty_token`
+- **P0** init.d `get_oc_entry()` 管道子 shell 导致返回值丢失，改用临时文件重定向
+- **P1** Gateway procd respawn 无限重试 (`3600 5 0`) → 限制最多 5 次 (`3600 5 5`)
+- **P1** Telegram 配对流程管道子 shell 变量丢失，改用临时文件避免子 shell
+- **P1** `openclaw.lua` PID 提取 `sed` 正则不可靠，改用 `awk` + `split`
+- **P2** init.d 和 uci-defaults 弱 token fallback (`echo "auto_$(date +%s)"`) → `dd if=/dev/urandom`
+- **P2** `oc-config.sh` 恢复出厂 `timeout` 命令可能不存在，添加 `command -v` 检查和降级方案
+- **P2** web-pty.js SIGTERM 不清理 HTTPS server，统一 `shutdown()` 函数
+
+### 新增
+- GitHub Copilot 配置新增 OAuth 授权登录方式 (通过 `copilot-proxy` 插件)
+- `uci-defaults` 首次安装时自动生成 `pty_token`
+- Web 控制台和状态面板显示当前活跃模型名称
+
+### 改进
+- Qwen 使用 `models.dashscope` 键名、SiliconFlow 使用 `models.siliconflow`，避免 `models.custom` 键冲突
+- `get_openclaw_version()` 从 `package.json` 读取版本号，不再每次启动 Node.js 进程
+- PTY 终端 WebSocket 重连策略改为无限重连 (`MAX_RETRY=Infinity`)
+- Makefile `PKG_VERSION` 从 `VERSION` 文件动态读取
+
 ## [1.0.0] - 2026-03-02
 
 ### 新增
