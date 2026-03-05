@@ -177,6 +177,9 @@ class PtySession {
     this.proc.stderr.on('data', (d) => { if (this.alive) { this._spawnFailCount = 0; this.socket.write(encodeWSFrame(d, 0x01)); } });
     this.proc.on('close', (code) => {
       if (!this.alive) return;
+      // PTY 以 root 运行，子脚本可能创建了 root-owned 的目录
+      // 修复权限，防止以 openclaw 用户运行的 Gateway 遇到 EACCES
+      try { require('child_process').execFileSync('chown', ['-R', 'openclaw:openclaw', OC_DATA], { stdio: 'pipe', timeout: 5000 }); } catch(e) {}
       this._spawnFailCount++;
       if (this._spawnFailCount > this._MAX_SPAWN_RETRIES) {
         console.log(`[oc-config] Script failed ${this._spawnFailCount} times, stopping retries`);

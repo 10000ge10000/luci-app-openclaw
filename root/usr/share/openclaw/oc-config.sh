@@ -93,6 +93,7 @@ json_set() {
 	local key="$1" value="$2"
 	if [ ! -f "$CONFIG_FILE" ]; then
 		mkdir -p "$(dirname "$CONFIG_FILE")"
+		chown -R openclaw:openclaw "$OC_STATE_DIR" 2>/dev/null || true
 		echo '{}' > "$CONFIG_FILE"
 	fi
 	_JS_KEY="$key" _JS_VAL="$value" "$NODE_BIN" -e "
@@ -134,6 +135,7 @@ auth_set_apikey() {
 	local auth_dir="${OC_STATE_DIR}/agents/main/agent"
 	local auth_file="${auth_dir}/auth-profiles.json"
 	mkdir -p "$auth_dir"
+	chown -R openclaw:openclaw "${OC_STATE_DIR}/agents" 2>/dev/null || true
 	_AP_PROVIDER="$provider" _AP_KEY="$api_key" _AP_PROFILE="$profile_id" "$NODE_BIN" -e "
 		const fs=require('fs'),f=process.env._AP_FILE||'${auth_file}';
 		let d={version:1,profiles:{},usageStats:{}};
@@ -1428,6 +1430,7 @@ reset_to_defaults() {
 				local backup_dir="${OC_STATE_DIR}/backups"
 				local backup_ts=$(date +%Y%m%d_%H%M%S)
 				mkdir -p "$backup_dir"
+				chown openclaw:openclaw "$backup_dir" 2>/dev/null || true
 				if [ -f "$CONFIG_FILE" ]; then
 					cp "$CONFIG_FILE" "${backup_dir}/openclaw_${backup_ts}.json"
 					echo -e "  ${GREEN}   备份已保存: backups/openclaw_${backup_ts}.json${NC}"
