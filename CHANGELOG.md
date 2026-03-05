@@ -4,6 +4,29 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.7] - 2026-03-06
+
+### 修复依赖包名错误 & 补充 GNU tar 依赖 (感谢 [@esir](https://github.com/esir) 建议)
+
+#### 修复
+- **依赖包名修正**: `util-linux-script` 在 OpenWrt/iStoreOS 软件源中不存在，正确的包名是 `script-utils` (提供 `/usr/bin/script` 命令)。此错误会导致通过 iStore/opkg 安装插件时依赖解析失败
+- **补充 GNU tar 依赖**: `openclaw-env` 安装脚本使用 `tar --strip-components=1` 解压 Node.js，但 busybox 内置的 tar 不支持该参数。新增 `tar` (GNU tar) 为必需依赖，确保解压操作正常
+
+#### 变更
+- `Makefile`: `LUCI_DEPENDS` 中 `+util-linux-script` → `+script-utils +tar`
+- `scripts/build_ipk.sh`: 同步更新 Depends 字段
+- `scripts/build_run.sh`: 同步更新 Depends 字段
+
+### 修复重启服务时 Gateway crash loop 端口冲突
+
+#### 修复
+- **端口冲突 crash loop**: OpenClaw gateway 的架构是主进程 (`openclaw`) fork 出子进程 (`openclaw-gateway`) 监听端口，restart 时 procd 只杀主进程，子进程退出慢导致新实例端口冲突反复崩溃
+  - `stop_service()`: 从空函数改为主动清理 `openclaw-gateway` 子进程 + 等待端口释放 (最长 8 秒)
+  - `start_service()`: 启动前预检查端口，清理残留进程后再注册 procd 实例
+  - `reload_service()`: stop 和 start 之间增加等待确保内核回收端口
+  - LuCI controller: restart 改为先同步 stop 等端口释放，再后台 start
+  - procd respawn 间隔从 5s → 10s，降低连续端口冲突概率
+
 ## [1.0.6] - 2026-03-06
 
 ### 修复 Docker 环境下安装失败 "mkdir: can't create directory: Directory not empty"
