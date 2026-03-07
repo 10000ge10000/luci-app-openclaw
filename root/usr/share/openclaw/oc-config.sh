@@ -190,7 +190,7 @@ register_custom_provider() {
 		d.models.providers[prov]={
 			baseUrl:process.env._RCP_URL,
 			apiKey:process.env._RCP_KEY,
-			api:'openai-chat-completions',
+			api:'openai-completions',
 			models:[{
 				id:process.env._RCP_MID,
 				name:process.env._RCP_MNAME,
