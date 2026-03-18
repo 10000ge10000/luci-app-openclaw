@@ -14,19 +14,36 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+function loadInstallRoot() {
+  if (process.env.OPENCLAW_INSTALL_ROOT) {
+    return normalizeInstallRoot(process.env.OPENCLAW_INSTALL_ROOT);
+  }
+  try {
+    const { execSync } = require('child_process');
+    return normalizeInstallRoot(execSync('uci -q get openclaw.main.install_root 2>/dev/null', {
+      encoding: 'utf8',
+      timeout: 3000,
+    }).trim());
+  } catch {
+    return '/opt';
+  }
+}
+
+function normalizeInstallRoot(value) {
+  const cleaned = (value || '').trim();
+  if (!cleaned || cleaned[0] !== '/' || /\s/.test(cleaned)) return '/opt';
+  const normalized = cleaned.replace(/\/+$/, '');
+  return normalized || '/';
+}
+
 // ── 配置 (OpenWrt 适配) ──
 const PORT = parseInt(process.env.OC_CONFIG_PORT || '18793', 10);
 const HOST = process.env.OC_CONFIG_HOST || '0.0.0.0'; // token 认证保护，可安全绑定所有接口
-// 从 UCI 读取安装路径，默认为 /opt/openclaw
-const { execSync } = require('child_process');
-let installPath = '/opt/openclaw';
-try {
-  const uciPath = execSync('uci -q get openclaw.main.install_path 2>/dev/null', { encoding: 'utf8', timeout: 3000 }).trim();
-  if (uciPath) installPath = uciPath + '/openclaw';
-} catch {}
-const NODE_BASE = process.env.NODE_BASE || installPath + '/node';
-const OC_GLOBAL = process.env.OC_GLOBAL || installPath + '/global';
-const OC_DATA = process.env.OC_DATA || installPath + '/data';
+const INSTALL_ROOT = loadInstallRoot();
+const OC_ROOT = INSTALL_ROOT === '/' ? '/openclaw' : `${INSTALL_ROOT}/openclaw`;
+const NODE_BASE = process.env.NODE_BASE || `${OC_ROOT}/node`;
+const OC_GLOBAL = process.env.OC_GLOBAL || `${OC_ROOT}/global`;
+const OC_DATA = process.env.OC_DATA || `${OC_ROOT}/data`;
 const SCRIPT_PATH = process.env.OC_CONFIG_SCRIPT || '/usr/share/openclaw/oc-config.sh';
 const SSL_CERT = '/etc/uhttpd.crt';
 const SSL_KEY = '/etc/uhttpd.key';
@@ -104,7 +121,7 @@ function encodeWSFrame(data, opcode = 0x01) {
 
 // ── PTY 进程管理 ──
 class PtySession {
-  constructor(socket, initCmd = '') {
+  constructor(socket) {
     this.socket = socket;
     this.proc = null;
     this.cols = 80;
@@ -115,7 +132,6 @@ class PtySession {
     this._MAX_SPAWN_RETRIES = 5;
     this._pingTimer = null;
     this._pongReceived = true;
-    this.initCmd = initCmd;  // 初始命令 (如 'wechat')
     activeSessions++;
     console.log(`[oc-config] Session created (active: ${activeSessions}/${MAX_SESSIONS})`);
     this._setupWSReader();
@@ -178,6 +194,7 @@ class PtySession {
     const env = {
       ...process.env, TERM: 'xterm-256color', COLUMNS: String(this.cols), LINES: String(this.rows),
       COLORTERM: 'truecolor', LANG: 'en_US.UTF-8',
+      OPENCLAW_INSTALL_ROOT: INSTALL_ROOT,
       NODE_BASE, OC_GLOBAL, OC_DATA,
       HOME: OC_DATA,
       OPENCLAW_HOME: OC_DATA,
@@ -194,14 +211,12 @@ class PtySession {
         return true;
       } catch { return false; }
     })();
-    // 构建脚本参数
-    const scriptArgs = this.initCmd ? [SCRIPT_PATH, this.initCmd] : [SCRIPT_PATH];
     if (hasScript) {
-      this.proc = spawn('script', ['-qc', `stty rows ${this.rows} cols ${this.cols} 2>/dev/null; printf '\\e[?2004l'; sh "${scriptArgs.join('" "')}"`, '/dev/null'],
+      this.proc = spawn('script', ['-qc', `stty rows ${this.rows} cols ${this.cols} 2>/dev/null; printf '\\e[?2004l'; sh "${SCRIPT_PATH}"`, '/dev/null'],
         { stdio: ['pipe', 'pipe', 'pipe'], env, detached: true });
     } else {
       console.log('[oc-config] "script" command not found, falling back to sh (install util-linux-script for full PTY support)');
-      this.proc = spawn('sh', scriptArgs,
+      this.proc = spawn('sh', [SCRIPT_PATH],
         { stdio: ['pipe', 'pipe', 'pipe'], env, detached: true });
     }
 
@@ -287,9 +302,9 @@ function handleUpgrade(req, socket, head) {
   // 认证: 验证查询参数中的 token
   // 每次连接时实时读取 UCI token (安装/升级可能重新生成 token)
   const currentToken = loadAuthToken() || AUTH_TOKEN;
-  const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (currentToken) {
-    const clientToken = urlObj.searchParams.get('token') || '';
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const clientToken = url.searchParams.get('token') || '';
     if (clientToken !== currentToken) {
       console.log(`[oc-config] WS auth failed from ${socket.remoteAddress}`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -297,9 +312,6 @@ function handleUpgrade(req, socket, head) {
       return;
     }
   }
-
-  // 读取初始化命令参数 (如 cmd=wechat)
-  const initCmd = urlObj.searchParams.get('cmd') || '';
 
   // 并发会话限制
   if (activeSessions >= MAX_SESSIONS) {
@@ -321,8 +333,8 @@ function handleUpgrade(req, socket, head) {
 
   socket.write(handshake, () => {
     if (head && head.length > 0) socket.unshift(head);
-    new PtySession(socket, initCmd);
-    console.log(`[oc-config] PTY session started (cmd=${initCmd || 'menu'})`);
+    new PtySession(socket);
+    console.log('[oc-config] PTY session started');
   });
 }
 

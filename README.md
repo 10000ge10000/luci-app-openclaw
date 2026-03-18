@@ -5,7 +5,7 @@
 [![Build & Release](https://github.com/10000ge10000/luci-app-openclaw/actions/workflows/build.yml/badge.svg)](https://github.com/10000ge10000/luci-app-openclaw/actions/workflows/build.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
-[OpenClaw](https://github.com/openclaw/openclaw) AI 网关的 OpenWrt LuCI 管理插件。
+[OpenClaw](https://github.com/nicepkg/openclaw) AI 网关的 OpenWrt LuCI 管理插件。
 
 在路由器上运行 OpenClaw，通过 LuCI 管理界面完成安装、配置和服务管理。
 
@@ -23,6 +23,8 @@
 | 存储 | **1.5GB 以上可用空间** |
 | 内存 | 推荐 1GB 及以上 |
 
+安装运行环境时可在 LuCI 弹窗中自定义“安装根目录 / 检测目录”，例如填写已挂载的 eMMC 路径 `/mnt/emmc`。OpenClaw 会自动把实际文件放到 `<路径>/openclaw/` 下。
+
 ## 📦 安装
 
 ### 方式一：.run 自解压包（推荐）
@@ -30,19 +32,15 @@
 无需 SDK，适用于已安装好的系统。
 
 ```bash
-# 下载最新版本（自动获取版本号）
-VER=$(curl -sI "https://github.com/10000ge10000/luci-app-openclaw/releases/latest" 2>/dev/null | grep -i "location:" | sed 's/.*tag\/v\{0,1\}//' | tr -d '\r\n')
-wget "https://github.com/10000ge10000/luci-app-openclaw/releases/download/v${VER}/luci-app-openclaw_${VER}.run"
-sh "luci-app-openclaw_${VER}.run"
+wget https://github.com/10000ge10000/luci-app-openclaw/releases/latest/download/luci-app-openclaw.run
+sh luci-app-openclaw.run
 ```
 
 ### 方式二：.ipk 安装
 
 ```bash
-# 下载最新版本（自动获取版本号）
-VER=$(curl -sI "https://github.com/10000ge10000/luci-app-openclaw/releases/latest" 2>/dev/null | grep -i "location:" | sed 's/.*tag\/v\{0,1\}//' | tr -d '\r\n')
-wget "https://github.com/10000ge10000/luci-app-openclaw/releases/download/v${VER}/luci-app-openclaw_${VER}-1_all.ipk"
-opkg install "luci-app-openclaw_${VER}-1_all.ipk"
+wget https://github.com/10000ge10000/luci-app-openclaw/releases/latest/download/luci-app-openclaw.ipk
+opkg install luci-app-openclaw.ipk
 ```
 
 ### 方式三：集成到固件编译
@@ -76,10 +74,30 @@ make package/luci-app-openclaw/compile V=s
 find bin/ -name "luci-app-openclaw*.ipk"
 ```
 
+### 方式四：手动安装
+
+```bash
+git clone https://github.com/10000ge10000/luci-app-openclaw.git
+cd luci-app-openclaw
+
+cp -r root/* /
+mkdir -p /usr/lib/lua/luci/controller /usr/lib/lua/luci/model/cbi/openclaw /usr/lib/lua/luci/view/openclaw
+cp luasrc/controller/openclaw.lua /usr/lib/lua/luci/controller/
+cp luasrc/model/cbi/openclaw/*.lua /usr/lib/lua/luci/model/cbi/openclaw/
+mkdir -p /usr/lib/lua/openclaw /usr/libexec
+cp luasrc/openclaw/paths.lua /usr/lib/lua/openclaw/
+cp root/usr/libexec/openclaw-paths.sh /usr/libexec/
+cp luasrc/view/openclaw/*.htm /usr/lib/lua/luci/view/openclaw/
+
+chmod +x /etc/init.d/openclaw /usr/bin/openclaw-env /usr/share/openclaw/oc-config.sh
+sh /etc/uci-defaults/99-openclaw
+rm -f /tmp/luci-indexcache /tmp/luci-modulecache/*
+```
+
 
 ## 🔰 首次使用
 
-1. 打开 LuCI → 服务 → OpenClaw，点击「安装运行环境」
+1. 打开 LuCI → 服务 → OpenClaw，点击「安装运行环境」，按需填写安装根目录，例如 `/mnt/emmc`
 2. 安装完成后服务会自动启动，点击「刷新页面」查看状态
 3. 进入「Web 控制台」添加 AI 模型和 API Key
 4. 进入「配置管理」可使用向导配置消息渠道

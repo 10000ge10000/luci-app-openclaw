@@ -2,17 +2,11 @@
 # ============================================================================
 # luci-app-openclaw — 全局环境变量
 # 仅在 Node.js 已安装时生效，为 SSH 登录用户提供正确的运行环境
-# 解决 Issue #42: 统一配置文件路径，避免 /root/.openclaw 与安装路径混乱
-# 支持自定义安装路径
+# 解决 Issue #42: 统一配置文件路径，避免 /root/.openclaw 与运行目录混乱
 # ============================================================================
 
-# 从 UCI 配置读取自定义安装路径
-# 用户配置的是基础路径，程序会在此路径下创建 openclaw 目录
-OC_BASE_PATH="$(uci -q get openclaw.main.install_path 2>/dev/null || echo '/opt')"
-OC_INSTALL_PATH="${OC_BASE_PATH}/openclaw"
-NODE_BASE="${OC_INSTALL_PATH}/node"
-OC_GLOBAL="${OC_INSTALL_PATH}/global"
-OC_DATA="${OC_INSTALL_PATH}/data"
+. /usr/libexec/openclaw-paths.sh
+oc_load_paths "$OPENCLAW_INSTALL_ROOT"
 
 # 检查 Node.js 是否已安装
 [ -x "${NODE_BASE}/bin/node" ] || return 0

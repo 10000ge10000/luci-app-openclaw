@@ -1,5 +1,11 @@
 -- luci-app-openclaw — 基本设置 CBI Model
 local sys = require "luci.sys"
+local uci = require "luci.model.uci".cursor()
+local oc_paths = require "openclaw.paths"
+
+local current_paths = oc_paths.derive_paths(uci:get("openclaw", "main", "install_root"))
+local current_install_root = current_paths.install_root
+local current_oc_root = current_paths.oc_root
 
 m = Map("openclaw", "OpenClaw AI 网关",
 	"OpenClaw 是一个 AI 编程代理网关，支持 GitHub Copilot、Claude、GPT、Gemini 等大模型以及 QQ、Telegram、Discord 等多种消息渠道。")
@@ -41,10 +47,11 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '</div>'
 	html[#html+1] = '<div id="action-result" style="margin-top:8px;"></div>'
 	html[#html+1] = '<div id="oc-update-action" style="margin-top:8px;display:none;"></div>'
+	html[#html+1] = '<div style="margin:4px 0 8px;color:#666;font-size:12px;">当前安装根目录: <code>' .. current_install_root .. '</code>，实际运行目录: <code>' .. current_oc_root .. '</code></div>'
 
-	-- 版本选择对话框 (默认隐藏) - 支持自定义安装路径
+	-- 版本选择对话框 (默认隐藏)
 	html[#html+1] = '<div id="oc-setup-dialog" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;align-items:center;justify-content:center;">'
-	html[#html+1] = '<div style="background:#fff;border-radius:12px;padding:24px 28px;max-width:520px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,0.2);">'
+	html[#html+1] = '<div style="background:#fff;border-radius:12px;padding:24px 28px;max-width:480px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2);">'
 	html[#html+1] = '<h3 style="margin:0 0 16px 0;font-size:16px;color:#333;">📦 选择安装版本</h3>'
 	html[#html+1] = '<div style="display:flex;flex-direction:column;gap:12px;">'
 	-- 稳定版选项
@@ -59,15 +66,12 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '<div><strong style="color:#333;">🆕 最新版</strong>'
 	html[#html+1] = '<div style="font-size:12px;color:#e36209;margin-top:4px;">⚠️ 安装 npm 上的最新发布版本，可能存在未经验证的兼容性问题。</div>'
 	html[#html+1] = '</div></label>'
+	html[#html+1] = '<div style="padding:14px 16px;border:1px solid #d8dee4;border-radius:8px;background:#fafbfc;">'
+	html[#html+1] = '<label for="oc-install-root" style="display:block;font-weight:600;color:#333;margin-bottom:6px;">📁 安装根目录 / 检测目录</label>'
+	html[#html+1] = '<input id="oc-install-root" type="text" value="' .. current_install_root .. '" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #c9d1d9;border-radius:6px;" placeholder="/mnt/emmc">'
+	html[#html+1] = '<div style="font-size:12px;color:#666;margin-top:6px;line-height:1.6;">填写已挂载的存储路径，例如 <code>/mnt/emmc</code>。OpenClaw 会自动使用 <code>&lt;目录&gt;/openclaw/</code> 作为实际安装目录。更换已安装环境的目录不做迁移，如需切换请先卸载后重装。</div>'
+	html[#html+1] = '<div id="oc-install-root-preview" style="font-size:12px;color:#0969da;margin-top:6px;">实际安装目录: <code>' .. current_oc_root .. '</code></div>'
 	html[#html+1] = '</div>'
-	-- 自定义安装路径
-	html[#html+1] = '<div style="margin-top:16px;padding-top:14px;border-top:1px solid #eee;">'
-	html[#html+1] = '<div style="font-weight:600;font-size:13px;color:#333;margin-bottom:8px;">📂 安装路径</div>'
-	html[#html+1] = '<div style="display:flex;gap:8px;align-items:center;">'
-	html[#html+1] = '<input type="text" id="oc-install-path" value="/opt" style="flex:1;padding:8px 12px;border:1px solid #d0d7de;border-radius:6px;font-size:13px;" placeholder="/opt">'
-	html[#html+1] = '<button class="btn cbi-button" type="button" onclick="ocCheckInstallPath()" style="font-size:12px;padding:4px 10px;">检测空间</button>'
-	html[#html+1] = '</div>'
-	html[#html+1] = '<div id="oc-path-info" style="font-size:11px;color:#666;margin-top:6px;">💡 程序将在此路径下创建 openclaw 目录进行安装。最小需要 2GB 可用空间。如安装在第二块硬盘，请确保硬盘已挂载。</div>'
 	html[#html+1] = '</div>'
 	-- 按钮区
 	html[#html+1] = '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px;">'
@@ -88,43 +92,33 @@ act.cfgvalue = function(self, section)
 
 	-- JavaScript
 	html[#html+1] = '<script type="text/javascript">'
-	html[#html+1] = 'console.log("OpenClaw JS loading...");'
 
 	-- 版本选择对话框逻辑
 	html[#html+1] = 'var _setupTimer=null;'
+	html[#html+1] = 'var _ocLastInstallRoot=' .. string.format("%q", current_install_root) .. ';'
+	html[#html+1] = 'var _ocLastInstallPath=' .. string.format("%q", current_oc_root) .. ';'
+	html[#html+1] = 'function ocNormalizeInstallRoot(v){v=(v||"").replace(/^\\s+|\\s+$/g,"");if(!v)return"/opt";if(v.charAt(0)!=="/")return null;if(/\\s/.test(v))return null;v=v.replace(/\\/+$/,"");return v||"/";}'
+	html[#html+1] = 'function ocGetActualInstallPath(root){return root==="/"?"/openclaw":root+"/openclaw";}'
+	html[#html+1] = 'function ocRefreshInstallRootPreview(){var input=document.getElementById("oc-install-root");var preview=document.getElementById("oc-install-root-preview");if(!input||!preview)return;var root=ocNormalizeInstallRoot(input.value);if(!root){preview.innerHTML="<span style=\\"color:#cf222e;\\">请输入绝对路径，且不要包含空格，例如 <code>/mnt/emmc</code></span>";return;}preview.innerHTML="实际安装目录: <code>"+ocGetActualInstallPath(root)+"</code>";}'
 	html[#html+1] = 'function ocShowSetupDialog(){'
 	html[#html+1] = 'var dlg=document.getElementById("oc-setup-dialog");'
 	html[#html+1] = 'dlg.style.display="flex";'
+	html[#html+1] = 'ocRefreshInstallRootPreview();'
 	html[#html+1] = 'var radios=document.getElementsByName("oc-ver-choice");'
 	html[#html+1] = 'for(var i=0;i<radios.length;i++){if(radios[i].value==="stable")radios[i].checked=true;}'
 	html[#html+1] = '}'
 	html[#html+1] = 'function ocCloseSetupDialog(){'
 	html[#html+1] = 'document.getElementById("oc-setup-dialog").style.display="none";'
 	html[#html+1] = '}'
-	-- 检测自定义安装路径的磁盘空间
-	html[#html+1] = 'function ocCheckInstallPath(){'
-	html[#html+1] = 'var pathEl=document.getElementById("oc-install-path");'
-	html[#html+1] = 'var infoEl=document.getElementById("oc-path-info");'
-	html[#html+1] = 'var path=pathEl.value.trim();'
-	html[#html+1] = 'if(!path){path="/opt";pathEl.value=path;}'
-	html[#html+1] = 'infoEl.innerHTML="⏳ 正在检测空间...";'
-	html[#html+1] = '(new XHR()).get("' .. check_system_url .. '?install_path="+encodeURIComponent(path),null,function(x){'
-	html[#html+1] = 'try{'
-	html[#html+1] = 'var r=JSON.parse(x.responseText);'
-	html[#html+1] = 'if(r.disk_ok){'
-	html[#html+1] = 'infoEl.innerHTML="<span style=\\"color:#1a7f37;\\">✅ 可用空间: "+r.disk_free_str+" (检测路径: "+r.disk_path+")</span>";'
-	html[#html+1] = '}else{'
-	html[#html+1] = 'infoEl.innerHTML="<span style=\\"color:#cf222e;\\">❌ 空间不足: "+r.disk_mb+" MB 可用，需要 ≥ 2048 MB (检测路径: "+r.disk_path+")</span>";'
-	html[#html+1] = '}'
-	html[#html+1] = '}catch(e){infoEl.innerHTML="<span style=\\"color:#e36209;\\">⚠️ 检测失败</span>";}'
-	html[#html+1] = '});'
-	html[#html+1] = '}'
 	html[#html+1] = 'function ocConfirmSetup(){'
 	html[#html+1] = 'var btn=document.getElementById("btn-setup");'
-	html[#html+1] = 'var pathEl=document.getElementById("oc-install-path");'
-	html[#html+1] = 'var installPath=pathEl.value.trim()||"/opt";'
+	html[#html+1] = 'var installRootInput=document.getElementById("oc-install-root");'
+	html[#html+1] = 'var installRoot=ocNormalizeInstallRoot(installRootInput?installRootInput.value:"");'
+	html[#html+1] = 'if(!installRoot){alert("请输入绝对路径，且不要包含空格，例如 /mnt/emmc");return;}'
+	html[#html+1] = '_ocLastInstallRoot=installRoot;'
+	html[#html+1] = '_ocLastInstallPath=ocGetActualInstallPath(installRoot);'
 	html[#html+1] = 'btn.disabled=true;btn.textContent="⏳ 检测系统配置...";'
-	html[#html+1] = '(new XHR()).get("' .. check_system_url .. '?install_path="+encodeURIComponent(installPath),null,function(x){'
+	html[#html+1] = '(new XHR()).get("' .. check_system_url .. '?install_root="+encodeURIComponent(installRoot),null,function(x){'
 	html[#html+1] = 'try{'
 	html[#html+1] = 'var r=JSON.parse(x.responseText);'
 	html[#html+1] = 'var panel=document.getElementById("setup-log-panel");'
@@ -141,20 +135,21 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'logEl.textContent+="════════════════════════════════════════\\n";'
 	html[#html+1] = 'logEl.textContent+="🔍 系统配置检测\\n";'
 	html[#html+1] = 'logEl.textContent+="════════════════════════════════════════\\n";'
-	html[#html+1] = 'logEl.textContent+="安装路径: "+r.install_path+"\\n";'
+	html[#html+1] = 'logEl.textContent+="检测目录: "+(r.install_root||installRoot)+"\\n";'
+	html[#html+1] = 'logEl.textContent+="实际安装: "+(r.oc_root||_ocLastInstallPath)+"\\n";'
 	html[#html+1] = 'logEl.textContent+="内存: "+r.memory_mb+" MB (需要 ≥ 1024 MB) — "+(r.memory_ok?"✅ 通过":"❌ 不达标")+"\\n";'
-	html[#html+1] = 'logEl.textContent+="磁盘: "+r.disk_mb+" MB 可用 (需要 ≥ 2048 MB) — "+(r.disk_ok?"✅ 通过":"❌ 不达标")+"\\n";'
+	html[#html+1] = 'logEl.textContent+="磁盘: "+r.disk_mb+" MB 可用"+(r.disk_path?" [检测路径 "+r.disk_path+"]":"")+" (需要 ≥ 1536 MB) — "+(r.disk_ok?"✅ 通过":"❌ 不达标")+"\\n";'
 	html[#html+1] = 'logEl.textContent+="\\n";'
 	html[#html+1] = 'if(!r.pass){'
 	html[#html+1] = 'ocCloseSetupDialog();'
 	html[#html+1] = 'btn.disabled=false;btn.textContent="📦 安装运行环境";'
 	html[#html+1] = 'statusEl.innerHTML="<span style=\\"color:#cf222e;\\">❌ 系统配置不满足要求</span>";'
 	html[#html+1] = 'logEl.textContent+="❌ 系统配置不满足要求，安装已终止\\n";'
-	html[#html+1] = 'logEl.textContent+="💡 请升级硬件配置或清理磁盘空间后重试\\n";'
+	html[#html+1] = 'if(r.message)logEl.textContent+="💡 "+r.message+"\\n";'
 	html[#html+1] = 'resultEl.style.display="block";'
 	html[#html+1] = 'resultEl.innerHTML="<div style=\\"border:1px solid #f5c6cb;background:#ffeef0;padding:12px 16px;border-radius:6px;\\">"+'
 	html[#html+1] = '"<strong style=\\"color:#cf222e;font-size:14px;\\">❌ 系统配置不满足要求</strong><br/>"+'
-	html[#html+1] = '"<div style=\\"margin-top:8px;font-size:12px;color:#666;\\">💡 请升级硬件配置或清理磁盘空间后重试。</div></div>";'
+	html[#html+1] = '"<div style=\\"margin-top:8px;font-size:12px;color:#666;\\">💡 "+(r.message||"请升级硬件配置或清理磁盘空间后重试。")+"</div></div>";'
 	html[#html+1] = 'return;'
 	html[#html+1] = '}'
 	html[#html+1] = 'statusEl.innerHTML="<span style=\\"color:#7aa2f7;\\">⏳ 安装进行中...</span>";'
@@ -164,7 +159,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var choice="stable";'
 	html[#html+1] = 'for(var i=0;i<radios.length;i++){if(radios[i].checked){choice=radios[i].value;break;}}'
 	html[#html+1] = 'var verParam=(choice==="stable")?"stable":"latest";'
-	html[#html+1] = 'ocSetup(verParam,r.memory_mb,r.disk_mb,r.install_path);'
+	html[#html+1] = 'ocSetup(verParam,installRoot);'
 	html[#html+1] = '}catch(e){'
 	html[#html+1] = 'ocCloseSetupDialog();'
 	html[#html+1] = 'btn.disabled=false;btn.textContent="📦 安装运行环境";'
@@ -172,43 +167,28 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}});'
 	html[#html+1] = '}'
 
-	-- 安装运行环境 (带实时日志，支持自定义路径)
-	html[#html+1] = 'function ocSetup(version,mem_mb,disk_mb,install_path){'
+	-- 安装运行环境 (带实时日志)
+	html[#html+1] = 'function ocSetup(version,installRoot){'
 	html[#html+1] = 'var btn=document.getElementById("btn-setup");'
 	html[#html+1] = 'var logEl=document.getElementById("setup-log-content");'
 	html[#html+1] = 'btn.disabled=true;btn.textContent="⏳ 安装中...";'
 	html[#html+1] = 'logEl.textContent+="════════════════════════════════════════\\n";'
 	html[#html+1] = 'logEl.textContent+="📦 安装运行环境 ("+((version==="stable")?"稳定版":"最新版")+")\\n";'
+	html[#html+1] = 'logEl.textContent+="安装根目录: "+installRoot+"\\n";'
+	html[#html+1] = 'logEl.textContent+="实际安装目录: "+ocGetActualInstallPath(installRoot)+"\\n";'
 	html[#html+1] = 'logEl.textContent+="════════════════════════════════════════\\n";'
-	html[#html+1] = 'logEl.textContent+="安装路径: "+install_path+"\\n";'
 	html[#html+1] = 'logEl.textContent+="正在启动安装...\\n";'
-	html[#html+1] = '(new XHR()).get("' .. ctl_url .. '?action=setup&version="+encodeURIComponent(version)+"&install_path="+encodeURIComponent(install_path),null,function(x){'
-	html[#html+1] = 'try{JSON.parse(x.responseText);}catch(e){}'
+	html[#html+1] = '(new XHR()).get("' .. ctl_url .. '?action=setup&version="+encodeURIComponent(version)+"&install_root="+encodeURIComponent(installRoot),null,function(x){'
+	html[#html+1] = 'try{var r=JSON.parse(x.responseText);if(r.status&&r.status!=="ok"){logEl.textContent+="❌ "+(r.message||"安装启动失败")+"\\n";ocSetupDone(false,logEl.textContent);return;}}catch(e){}'
 	html[#html+1] = 'ocPollSetupLog();'
 	html[#html+1] = '});'
 	html[#html+1] = '}'
 
-	-- 轮询安装日志 (智能滚动: 用户向上滚动时暂停自动滚动，滚动到底部时恢复)
+	-- 轮询安装日志
 	html[#html+1] = 'var _lastLogLen=0;'
-	html[#html+1] = 'var _autoScrollEnabled=true;'  -- 智能滚动状态标志
 	html[#html+1] = 'function ocPollSetupLog(){'
 	html[#html+1] = 'if(_setupTimer)clearInterval(_setupTimer);'
 	html[#html+1] = '_lastLogLen=0;'
-	html[#html+1] = '_autoScrollEnabled=true;'  -- 初始状态: 启用自动滚动
-	html[#html+1] = 'var logEl=document.getElementById("setup-log-content");'
-	-- 绑定滚动事件监听器 (只绑定一次)
-	html[#html+1] = 'if(!logEl._scrollListenerAttached){'
-	html[#html+1] = 'logEl.addEventListener("scroll",function(){'
-	html[#html+1] = 'var el=this;'
-	html[#html+1] = 'var atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<5;'
-	html[#html+1] = 'if(atBottom){'
-	html[#html+1] = '_autoScrollEnabled=true;'  -- 滚动到底部: 恢复自动滚动
-	html[#html+1] = '}else{'
-	html[#html+1] = '_autoScrollEnabled=false;'  -- 用户向上滚动: 暂停自动滚动
-	html[#html+1] = '}'
-	html[#html+1] = '});'
-	html[#html+1] = 'logEl._scrollListenerAttached=true;'
-	html[#html+1] = '}'
 	html[#html+1] = '_setupTimer=setInterval(function(){'
 	html[#html+1] = '(new XHR()).get("' .. log_url .. '",null,function(x){'
 	html[#html+1] = 'try{'
@@ -220,10 +200,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'logEl.textContent+=newLog;'
 	html[#html+1] = '_lastLogLen=r.log.length;'
 	html[#html+1] = '}'
-	-- 智能滚动: 仅在自动滚动启用时滚动到底部
-	html[#html+1] = 'if(_autoScrollEnabled){'
 	html[#html+1] = 'logEl.scrollTop=logEl.scrollHeight;'
-	html[#html+1] = '}'
 	html[#html+1] = 'if(r.state==="running"){'
 	html[#html+1] = 'statusEl.innerHTML="<span style=\\"color:#7aa2f7;\\">⏳ 安装进行中...</span>";'
 	html[#html+1] = '}else if(r.state==="success"){'
@@ -268,6 +245,12 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var reasons=[];'
 	html[#html+1] = 'if(!log)return"未知错误，请检查日志。";'
 	html[#html+1] = 'var ll=log.toLowerCase();'
+	html[#html+1] = 'var ocRoot=_ocLastInstallPath||' .. string.format("%q", current_oc_root) .. ';'
+	html[#html+1] = 'var nodeBase=ocRoot+"/node";'
+	html[#html+1] = 'var globalBase=ocRoot+"/global";'
+	html[#html+1] = 'if(log.indexOf("当前已安装在")>=0||log.indexOf("检测目录不存在")>=0||log.indexOf("安装根目录")>=0){'
+	html[#html+1] = 'reasons.push("📁 <b>安装目录配置有误</b> — 请选择已挂载的绝对路径；如果当前环境已经安装在其他目录，请先卸载后再切换。");'
+	html[#html+1] = '}'
 	-- 网络问题
 	html[#html+1] = 'if(ll.indexOf("could not resolve")>=0||ll.indexOf("connection timed out")>=0||ll.indexOf("curl")>=0&&ll.indexOf("fail")>=0||ll.indexOf("wget")>=0&&ll.indexOf("fail")>=0||ll.indexOf("所有镜像均下载失败")>=0){'
 	html[#html+1] = 'reasons.push("🌐 <b>网络连接失败</b> — 无法下载 Node.js。请检查路由器是否能访问外网。<br/>&nbsp;&nbsp;💡 解决: 检查 DNS 设置和网络连接，或手动指定镜像: <code>NODE_MIRROR=https://npmmirror.com/mirrors/node openclaw-env setup</code>");'
@@ -282,15 +265,15 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}'
 	-- npm 安装失败
 	html[#html+1] = 'if(ll.indexOf("npm err")>=0||ll.indexOf("npm warn")>=0&&ll.indexOf("openclaw 安装验证失败")>=0){'
-	html[#html+1] = 'reasons.push("📦 <b>npm 安装 OpenClaw 失败</b> — npm 包下载或安装出错。<br/>&nbsp;&nbsp;💡 解决: 尝试手动安装 <code>openclaw-env setup</code> 或检查网络连接。");'
+	html[#html+1] = 'reasons.push("📦 <b>npm 安装 OpenClaw 失败</b> — npm 包下载或安装出错。<br/>&nbsp;&nbsp;💡 解决: 尝试手动安装 <code>PATH="+nodeBase+"/bin:$PATH npm install -g openclaw@latest --prefix="+globalBase+"</code>");'
 	html[#html+1] = '}'
 	-- 权限问题
 	html[#html+1] = 'if(ll.indexOf("permission denied")>=0||ll.indexOf("eacces")>=0){'
-	html[#html+1] = 'reasons.push("🔒 <b>权限不足</b> — 文件或目录权限问题。<br/>&nbsp;&nbsp;💡 解决: 运行 <code>openclaw-env setup</code> 或以 root 用户重试。");'
+	html[#html+1] = 'reasons.push("🔒 <b>权限不足</b> — 文件或目录权限问题。<br/>&nbsp;&nbsp;💡 解决: 运行 <code>chown -R openclaw:openclaw "+ocRoot+"</code> 或以 root 用户重试。");'
 	html[#html+1] = '}'
 	-- tar 解压失败
 	html[#html+1] = 'if(ll.indexOf("tar")>=0&&(ll.indexOf("error")>=0||ll.indexOf("fail")>=0)){'
-	html[#html+1] = 'reasons.push("📂 <b>解压失败</b> — Node.js 安装包可能下载不完整。<br/>&nbsp;&nbsp;💡 解决: 删除缓存重试 <code>openclaw-env setup</code>");'
+	html[#html+1] = 'reasons.push("📂 <b>解压失败</b> — Node.js 安装包可能下载不完整。<br/>&nbsp;&nbsp;💡 解决: 删除缓存重试 <code>rm -rf "+nodeBase+" && openclaw-env setup</code>");'
 	html[#html+1] = '}'
 	-- 验证失败
 	html[#html+1] = 'if(ll.indexOf("安装验证失败")>=0){'
@@ -302,6 +285,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}'
 	html[#html+1] = 'return reasons.join("<br/><br/>");'
 	html[#html+1] = '}'
+	html[#html+1] = 'var _ocInstallRootInput=document.getElementById("oc-install-root");if(_ocInstallRootInput){_ocInstallRootInput.oninput=ocRefreshInstallRootPreview;_ocInstallRootInput.onchange=ocRefreshInstallRootPreview;}'
 
 	-- 普通服务操作 (restart/stop)
 	html[#html+1] = 'function ocServiceCtl(action){'
@@ -314,40 +298,6 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}catch(e){el.innerHTML="<span style=\\"color:red\\">❌ 错误</span>";}'
 	html[#html+1] = '});}'
 
-	-- Markdown 转 HTML 函数 (优化版 - 用于渲染 GitHub Release Notes)
-	-- 特性：中英文字体栈、代码块样式、链接悬停效果、列表美化
-	html[#html+1] = 'function ocMarkdownToHtml(md){'
-	html[#html+1] = 'if(!md)return "";'
-	-- 转义 HTML 特殊字符
-	html[#html+1] = 'var html=md.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");'
-	-- 代码块 (```code```) - 圆角边框 + 等宽字体栈
-	html[#html+1] = 'html=html.replace(/```(\\w*)\\n([\\s\\S]*?)```/g,function(m,lang,code){return"<pre style=\\"background:#f6f8fa;padding:12px 16px;border-radius:8px;overflow-x:auto;font-size:13px;line-height:1.6;font-family:SF Mono,Consolas,Menlo,monospace;border:1px solid #d0d7de;\\"><code>"+code.trim()+"</code></pre>";});'
-	-- 行内代码 (`code`)
-	html[#html+1] = 'html=html.replace(/`([^`]+)`/g,"<code style=\\"background:#f6f8fa;padding:2px 6px;border-radius:4px;font-size:13px;font-family:SF Mono,Consolas,Menlo,monospace;border:1px solid #e1e4e8;\\">$1</code>");'
-	-- 标题层级 (优化比例: h1=20px, h2=17px, h3=15px, h4=14px)
-	html[#html+1] = 'html=html.replace(/^#### (.+)$/gm,"<h5 style=\\"margin:12px 0 6px;font-size:14px;font-weight:600;color:#1f2328;letter-spacing:-0.02em;\\">$1</h5>");'
-	html[#html+1] = 'html=html.replace(/^### (.+)$/gm,"<h4 style=\\"margin:14px 0 8px;font-size:15px;font-weight:600;color:#1f2328;letter-spacing:-0.02em;\\">$1</h4>");'
-	html[#html+1] = 'html=html.replace(/^## (.+)$/gm,"<h3 style=\\"margin:16px 0 10px;font-size:17px;font-weight:600;color:#1f2328;letter-spacing:-0.02em;\\">$1</h3>");'
-	html[#html+1] = 'html=html.replace(/^# (.+)$/gm,"<h2 style=\\"margin:18px 0 12px;font-size:20px;font-weight:600;color:#1f2328;border-bottom:1px solid #d0d7de;padding-bottom:8px;letter-spacing:-0.02em;\\">$1</h2>");'
-	-- 粗体和斜体
-	html[#html+1] = 'html=html.replace(/\\*\\*([^*]+)\\*\\*/g,"<strong style=\\"font-weight:600;\\">$1</strong>");'
-	html[#html+1] = 'html=html.replace(/\\*([^*]+)\\*/g,"<em>$1</em>");'
-	-- 链接 [text](url) - 悬停效果
-	html[#html+1] = 'html=html.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g,"<a href=\\"$2\\" target=\\"_blank\\" rel=\\"noopener\\" style=\\"color:#0969da;text-decoration:none;border-bottom:1px solid transparent;transition:border-color 0.2s;\\">$1</a>");'
-	-- 无序列表 (- 或 *)
-	html[#html+1] = 'html=html.replace(/^[*-] (.+)$/gm,"<li style=\\"margin:4px 0 4px 0;padding-left:4px;line-height:1.75;list-style-position:inside;color:#32383f;\\">$1</li>");'
-	-- 有序列表 (1. 2. 等)
-	html[#html+1] = 'html=html.replace(/^(\\d+)\\. (.+)$/gm,"<li style=\\"margin:4px 0 4px 0;padding-left:4px;line-height:1.75;list-style-position:inside;color:#32383f;\\"><span style=\\"color:#656d76;margin-right:4px;\\">$1.</span>$2</li>");'
-	-- 水平线 (--- 或 ***)
-	html[#html+1] = 'html=html.replace(/^(---|\\*\\*\\*)$/gm,"<hr style=\\"border:none;border-top:1px solid #d0d7de;margin:16px 0;\\"/>");'
-	-- 段落: 连续空行合并为段落分隔 (简化处理，避免生成未闭合标签)
-	html[#html+1] = 'html=html.replace(/\\n\\n+/g,"<br/><br/>");'
-	-- 换行
-	html[#html+1] = 'html=html.replace(/\\n/g,"<br/>");'
-	-- 外层容器 - 中英文字体栈
-	html[#html+1] = 'return"<div style=\\"font-size:14px;line-height:1.75;color:#32383f;font-family:PingFang SC,Microsoft YaHei,Noto Sans SC,sans-serif;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased;\\">"+html+"</div>";'
-	html[#html+1] = '}'
-
 	-- 检测升级 (只检查插件版本，有新版本时显示更新内容)
 	html[#html+1] = 'function ocCheckUpdate(){'
 	html[#html+1] = 'var btn=document.getElementById("btn-check-update");'
@@ -359,31 +309,29 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var dot=document.getElementById("update-dot");if(dot)dot.style.display="none";'
 	html[#html+1] = 'try{var r=JSON.parse(x.responseText);'
 	html[#html+1] = 'var msgs=[];'
-	-- 版本状态徽章样式
-	html[#html+1] = 'var badgeNew="display:inline-flex;align-items:center;padding:3px 10px;border-radius:16px;font-size:12px;font-weight:600;background:linear-gradient(135deg,#fff7e6 0%,#ffe7ba 100%);color:#9a6700;border:1px solid #f5a623;";'
-	html[#html+1] = 'var badgeLatest="display:inline-flex;align-items:center;padding:3px 10px;border-radius:16px;font-size:12px;font-weight:600;background:linear-gradient(135deg,#e6f7e6 0%,#c8f7c8 100%);color:#1a7f1a;border:1px solid #28a745;";'
-	html[#html+1] = 'var badgeUnknown="display:inline-flex;align-items:center;padding:3px 10px;border-radius:16px;font-size:12px;font-weight:600;background:#f6f8fa;color:#656d76;border:1px solid #d0d7de;";'
-	html[#html+1] = 'var verBadge="display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;font-family:SF Mono,Consolas,Menlo,monospace;background:#e1e4e8;color:#24292f;margin-left:4px;";'
-	-- 插件版本检查 (带渐变徽章)
+	-- 插件版本检查
 	html[#html+1] = 'if(r.plugin_current){'
-	html[#html+1] = 'if(r.plugin_has_update){msgs.push("<span style=\\""+badgeNew+"\\">🔌 有新版本</span> v"+r.plugin_current+" → <span style=\\""+verBadge+"\\">v"+r.plugin_latest+"</span>");}'
-	html[#html+1] = 'else if(r.plugin_latest){msgs.push("<span style=\\""+badgeLatest+"\\">✅ 已是最新</span> v"+r.plugin_current);}'
-	html[#html+1] = 'else{msgs.push("<span style=\\""+badgeUnknown+"\\">🔌 无法检查</span> v"+r.plugin_current);}'
+	html[#html+1] = 'if(r.plugin_has_update){msgs.push("<span style=\\"color:#e36209\\">🔌 插件: v"+r.plugin_current+" → v"+r.plugin_latest+" (有新版本)</span>");}'
+	html[#html+1] = 'else if(r.plugin_latest){msgs.push("<span style=\\"color:green\\">✅ 插件: v"+r.plugin_current+" (已是最新)</span>");}'
+	html[#html+1] = 'else{msgs.push("<span style=\\"color:#999\\">🔌 插件: v"+r.plugin_current+" (无法检查最新版本)</span>");}'
 	html[#html+1] = '}'
-	html[#html+1] = 'if(msgs.length===0)msgs.push("<span style=\\""+badgeUnknown+"\\">无法获取版本信息</span>");'
+	html[#html+1] = 'if(msgs.length===0)msgs.push("<span style=\\"color:#999\\">无法获取版本信息</span>");'
 	html[#html+1] = 'el.innerHTML=msgs.join("<br/>");'
-	-- 插件有更新时: 卡片式更新日志 + 操作按钮
+	-- 插件有更新时: release notes + 一键升级按钮 + GitHub 下载链接
 	html[#html+1] = 'if(r.plugin_has_update){'
 	html[#html+1] = 'act.style.display="block";'
 	html[#html+1] = 'window._pluginLatestVer=r.plugin_latest;'
 	html[#html+1] = 'var notesHtml="";'
 	html[#html+1] = 'if(r.release_notes){'
-	html[#html+1] = 'var rendered=ocMarkdownToHtml(r.release_notes);'
-	-- 卡片式容器: 圆角边框 + 微阴影 + 版本标题栏
-	html[#html+1] = 'notesHtml="<div style=\\"margin:12px 0;border:1px solid #d0d7de;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);\\"><div style=\\"background:linear-gradient(135deg,#f6f8fa 0%,#ffffff 100%);padding:12px 16px;border-bottom:1px solid #d0d7de;display:flex;align-items:center;justify-content:space-between;\\"><span style=\\"font-size:14px;font-weight:600;color:#24292f;\\">📋 更新日志</span><span style=\\"display:inline-flex;align-items:center;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;background:linear-gradient(135deg,#e3f2fd 0%,#bbdefb 100%);color:#1565c0;border:1px solid #64b5f6;\\">v"+r.plugin_latest+"</span></div><div style=\\"padding:16px;max-height:450px;overflow-y:auto;background:#fff;\\">"+rendered+"</div></div>";'
+	html[#html+1] = 'var escaped=r.release_notes.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");'
+	html[#html+1] = 'notesHtml=\'<div style="margin:10px 0 8px;padding:10px 14px;background:#fffbf0;border:1px solid #f0c040;border-radius:6px;">\''
+	html[#html+1] = '+\'<div style="font-size:12px;font-weight:600;color:#8a6a00;margin-bottom:6px;">📋 v\'+r.plugin_latest+\' 更新内容</div>\''
+	html[#html+1] = '+\'<pre style="margin:0;font-size:12px;color:#444;white-space:pre-wrap;word-break:break-word;line-height:1.6;">\'+escaped+\'</pre>\''
+	html[#html+1] = '+\'</div>\';'
 	html[#html+1] = '}'
-	-- 操作按钮区: 分组设计
-	html[#html+1] = 'act.innerHTML=notesHtml+"<div style=\\"margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;\\"><button class=\\"btn cbi-button cbi-button-apply\\" type=\\"button\\" onclick=\\"ocPluginUpgrade()\\" id=\\"btn-plugin-upgrade\\" style=\\"box-shadow:0 2px 4px rgba(0,0,0,0.1);\\">⬆️ 一键升级 v"+r.plugin_latest+"</button><a href=\\"https://github.com/10000ge10000/luci-app-openclaw/releases/latest\\" target=\\"_blank\\" rel=\\"noopener\\" class=\\"btn cbi-button cbi-button-action\\" style=\\"text-decoration:none;\\">📥 GitHub 下载</a></div>";'
+	html[#html+1] = 'act.innerHTML=notesHtml'
+	html[#html+1] = '+\'<button class="btn cbi-button cbi-button-apply" type="button" onclick="ocPluginUpgrade()" id="btn-plugin-upgrade">⬆️ 升级插件 v\'+r.plugin_latest+\'</button>\''
+	html[#html+1] = '+\' <a href="https://github.com/10000ge10000/luci-app-openclaw/releases/latest" target="_blank" rel="noopener" class="btn cbi-button cbi-button-action" style="text-decoration:none;">📥 手动下载</a>\';'
 	html[#html+1] = '}'
 	html[#html+1] = '}catch(e){el.innerHTML="<span style=\\"color:red\\">❌ 检测失败</span>";}'
 	html[#html+1] = '});}'
@@ -414,12 +362,10 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}'
 
 	-- 轮询插件升级日志 (带容错: 安装时文件被替换可能导致API暂时不可用)
-	-- 复用安装日志的智能滚动机制
 	html[#html+1] = 'var _pluginPollErrors=0;'
 	html[#html+1] = 'function ocPollPluginUpgradeLog(){'
 	html[#html+1] = 'if(_pluginUpgradeTimer)clearInterval(_pluginUpgradeTimer);'
 	html[#html+1] = '_pluginPollErrors=0;'
-	html[#html+1] = '_autoScrollEnabled=true;'  -- 重置: 启用自动滚动
 	html[#html+1] = '_pluginUpgradeTimer=setInterval(function(){'
 	html[#html+1] = '(new XHR()).get("' .. plugin_upgrade_log_url .. '",null,function(x){'
 	html[#html+1] = 'try{'
@@ -428,10 +374,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var logEl=document.getElementById("setup-log-content");'
 	html[#html+1] = 'var statusEl=document.getElementById("setup-log-status");'
 	html[#html+1] = 'if(r.log)logEl.textContent=r.log;'
-	-- 智能滚动: 仅在自动滚动启用时滚动到底部
-	html[#html+1] = 'if(_autoScrollEnabled){'
 	html[#html+1] = 'logEl.scrollTop=logEl.scrollHeight;'
-	html[#html+1] = '}'
 	html[#html+1] = 'if(r.state==="running"){'
 	html[#html+1] = 'statusEl.innerHTML="<span style=\\"color:#7aa2f7;\\">⏳ 插件升级中...</span>";'
 	html[#html+1] = '}else if(r.state==="success"){'
@@ -476,7 +419,7 @@ act.cfgvalue = function(self, section)
 
 	-- 卸载运行环境
 	html[#html+1] = 'function ocUninstall(){'
-	html[#html+1] = 'if(!confirm("确定要卸载 OpenClaw 运行环境？\\n\\n将删除 Node.js、OpenClaw 程序及配置数据，服务将停止运行。\\n\\n插件本身不会被删除，之后可重新安装运行环境。"))return;'
+	html[#html+1] = 'if(!confirm("确定要卸载 OpenClaw 运行环境？\\n\\n将删除 Node.js、OpenClaw 程序及配置数据（' .. current_oc_root .. ' 目录），服务将停止运行。\\n\\n插件本身不会被删除，之后可重新安装运行环境。"))return;'
 	html[#html+1] = 'var btn=document.getElementById("btn-uninstall");'
 	html[#html+1] = 'var el=document.getElementById("action-result");'
 	html[#html+1] = 'btn.disabled=true;btn.textContent="⏳ 正在卸载...";'
@@ -492,7 +435,6 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}else{el.innerHTML="<span style=\\"color:red\\">❌ "+(r.message||"卸载失败")+"</span>";}'
 	html[#html+1] = '}catch(e){el.innerHTML="<span style=\\"color:red\\">❌ 请求失败</span>";}'
 	html[#html+1] = '});}'
-	html[#html+1] = 'console.log("OpenClaw JS first block loaded");'
 
 	-- ═══ 备份/恢复 对话框 + 功能 (v2026.3.8+ openclaw backup) ═══
 	local backup_url = luci.dispatcher.build_url("admin", "services", "openclaw", "backup")

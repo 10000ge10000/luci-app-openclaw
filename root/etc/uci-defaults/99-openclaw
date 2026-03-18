@@ -1,16 +1,20 @@
 #!/bin/sh
 # luci-app-openclaw — 首次安装/升级初始化脚本
 
-# 获取安装路径 (支持自定义)
-# 用户配置的是基础路径，程序会在此路径下创建 openclaw 目录
-OC_BASE_PATH="$(uci -q get openclaw.main.install_path || echo '/opt')"
-OC_INSTALL_PATH="${OC_BASE_PATH}/openclaw"
+CURRENT_INSTALL_ROOT=$(uci -q get openclaw.main.install_root)
+if [ -z "$CURRENT_INSTALL_ROOT" ]; then
+	uci set openclaw.main.install_root='/opt'
+	uci commit openclaw
+	CURRENT_INSTALL_ROOT='/opt'
+fi
+
+. /usr/libexec/openclaw-paths.sh
+oc_load_paths "$CURRENT_INSTALL_ROOT"
 
 # ── v1.0.16: 清理错误路径下的配置文件 (Issue #42) ──
 # 用户在 SSH 中直接运行 openclaw 命令时，可能创建了 /root/.openclaw/ 目录
 # 需要迁移数据并清理，避免路径混乱
 if [ -d "/root/.openclaw" ]; then
-	OC_DATA="${OC_INSTALL_PATH}/data"
 	# 迁移 skills 目录 (如果存在且目标不存在)
 	if [ -d "/root/.openclaw/skills" ] && [ ! -d "${OC_DATA}/.openclaw/skills" ]; then
 		mkdir -p "${OC_DATA}/.openclaw"
@@ -46,7 +50,7 @@ if ! id openclaw >/dev/null 2>&1; then
 	done
 	# OpenWrt 方式：直接写入 /etc/passwd 和 /etc/shadow
 	if ! grep -q '^openclaw:' /etc/passwd 2>/dev/null; then
-		echo "openclaw:x:${OC_UID}:${OC_GID}:openclaw:${OC_INSTALL_PATH}/data:/bin/false" >> /etc/passwd
+		echo "openclaw:x:${OC_UID}:${OC_GID}:openclaw:${OC_DATA}:/bin/false" >> /etc/passwd
 	fi
 	if ! grep -q '^openclaw:' /etc/shadow 2>/dev/null; then
 		echo 'openclaw:x:0:0:99999:7:::' >> /etc/shadow
@@ -57,22 +61,22 @@ if ! id openclaw >/dev/null 2>&1; then
 fi
 
 # 创建数据目录
-# ── OverlayFS 兼容: Docker bind mount 可能导致 /opt 不可写 (仅当基础路径为 /opt 时) ──
-if [ "$OC_BASE_PATH" = "/opt" ]; then
-	if ! mkdir -p /opt/openclaw/.probe 2>/dev/null; then
+# ── OverlayFS 兼容: Docker bind mount 可能导致 /opt 不可写 ──
+if oc_install_root_uses_opt_workaround "$OPENCLAW_INSTALL_ROOT"; then
+	if ! mkdir -p "${OC_ROOT}/.probe" 2>/dev/null; then
 		if [ -d /overlay/upper/opt ]; then
 			mkdir -p /overlay/upper/opt/openclaw 2>/dev/null
 			mount --bind /overlay/upper/opt /opt 2>/dev/null
 		fi
-		rmdir /opt/openclaw/.probe 2>/dev/null
+		rmdir "${OC_ROOT}/.probe" 2>/dev/null
 	else
-		rmdir /opt/openclaw/.probe 2>/dev/null
+		rmdir "${OC_ROOT}/.probe" 2>/dev/null
 	fi
 fi
-mkdir -p "${OC_INSTALL_PATH}/data/.openclaw"
-mkdir -p "${OC_INSTALL_PATH}/node"
-mkdir -p "${OC_INSTALL_PATH}/global"
-chown -R openclaw:openclaw "${OC_INSTALL_PATH}" 2>/dev/null || true
+mkdir -p "${OC_DATA}/.openclaw"
+mkdir -p "$NODE_BASE"
+mkdir -p "$OC_GLOBAL"
+chown -R openclaw:openclaw "$OC_ROOT" 2>/dev/null || true
 
 # 生成随机 Token (如果尚未设置)
 CURRENT_TOKEN=$(uci -q get openclaw.main.token)
@@ -88,18 +92,6 @@ if [ -z "$CURRENT_PTY_TOKEN" ]; then
 	PTY_TOKEN=$(head -c 24 /dev/urandom | hexdump -e '24/1 "%02x"' 2>/dev/null || dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 48)
 	uci set openclaw.main.pty_token="$PTY_TOKEN"
 	uci commit openclaw
-fi
-
-# 启用服务自启动 (创建 /etc/rc.d/S99openclaw 符号链接)
-# 这一步确保安装/升级后服务能随系统启动
-# 注意: 仅当 UCI 中 enabled='1' 或尚未设置 enabled 时才启用
-# 如果用户明确设置 enabled='0' (禁用)，则尊重用户选择
-if [ -x /etc/init.d/openclaw ]; then
-	OC_ENABLED=$(uci -q get openclaw.main.enabled)
-	# enabled='1' 或未设置时启用自启动；enabled='0' 时不操作
-	if [ "$OC_ENABLED" != "0" ]; then
-		/etc/init.d/openclaw enable 2>/dev/null
-	fi
 fi
 
 exit 0
