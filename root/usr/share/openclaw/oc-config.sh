@@ -8,10 +8,6 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
 
-# ── 交互式菜单引擎路径 ──
-OC_MENU_ENGINE="/usr/share/openclaw/oc-menu-engine.js"
-OC_INTERACTIVE="/usr/share/openclaw/oc-config-interactive.js"
-
 # ── 端口检查兼容函数 (ss 或 netstat) ──
 # check_port_listening <port> — 检查端口是否在监听，返回 0/1
 check_port_listening() {
@@ -32,14 +28,9 @@ get_pid_by_port() {
 	fi
 }
 
-# ── 路径 (OpenWrt 适配，支持自定义安装路径) ──
-# 从 UCI 配置读取自定义路径，环境变量可覆盖
-# 用户配置的是基础路径，程序会在此路径下创建 openclaw 目录
-OC_BASE_PATH="${OC_INSTALL_PATH:-$(uci -q get openclaw.main.install_path 2>/dev/null || echo '/opt')}"
-OC_INSTALL_PATH="${OC_BASE_PATH}/openclaw"
-NODE_BASE="${NODE_BASE:-${OC_INSTALL_PATH}/node}"
-OC_GLOBAL="${OC_GLOBAL:-${OC_INSTALL_PATH}/global}"
-OC_DATA="${OC_DATA:-${OC_INSTALL_PATH}/data}"
+# ── 路径 (OpenWrt 适配) ──
+. /usr/libexec/openclaw-paths.sh
+oc_load_paths "$OPENCLAW_INSTALL_ROOT"
 NODE_BIN="${NODE_BASE}/bin/node"
 OC_STATE_DIR="${OC_DATA}/.openclaw"
 CONFIG_FILE="${OC_STATE_DIR}/openclaw.json"
@@ -74,7 +65,6 @@ oc_cmd() {
 		"$NODE_BIN" "$OC_ENTRY" "$@" 2>&1
 		local rc=$?
 		# 修复权限: oc_cmd 以 root 运行但配置文件应属于 openclaw 用户
-                find "$OC_STATE_DIR" -user root ! -path "*/extensions*" -exec chown openclaw:openclaw {} \; 2>/dev/null || true
 		chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 		chown openclaw:openclaw "${CONFIG_FILE}.bak" 2>/dev/null || true
 		return $rc
@@ -108,7 +98,7 @@ json_set() {
 		local parent_dir="$(dirname "$CONFIG_FILE")"
 		if ! mkdir -p "$parent_dir" 2>/dev/null; then
 			echo "ERROR: 无法创建配置目录 $parent_dir" >&2
-			echo "HINT: 请检查 $OC_DATA 是否存在且有写权限" >&2
+			echo "HINT: 请检查 ${OC_DATA} 是否存在且有写权限" >&2
 			return 1
 		fi
 		
@@ -205,21 +195,10 @@ enable_auth_plugins() {
 			const d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));
 			if(!d.plugins)d.plugins={};if(!d.plugins.entries)d.plugins.entries={};
 			const e=d.plugins.entries;
-			// 启用有效的认证插件
-			['copilot-proxy'].forEach(p=>{
+			['qwen-portal-auth','copilot-proxy','google-gemini-cli-auth','minimax-portal-auth'].forEach(p=>{
 				if(!e[p])e[p]={};e[p].enabled=true;
 			});
-			// 清理已废弃或未安装的插件配置 (v2026.4.9: 这些插件已移除或更名)
-			delete e['qwen-portal-auth'];
-			delete e['google-gemini-cli-auth'];
-			delete e['minimax-portal-auth'];
 			delete e['google-antigravity-auth'];
-			delete e['openclaw-weixin'];  // 微信插件有独立安装流程，不应在 entries 中
-			// 清理过时的 installs 配置
-			if(d.plugins && d.plugins.installs){
-				delete d.plugins.installs['google-gemini-cli-auth'];
-				delete d.plugins.installs['minimax-portal-auth'];
-			}
 			fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
 		}catch(e){}
 	" 2>/dev/null
@@ -594,14 +573,6 @@ show_current_config() {
 	echo -e "${GREEN}├──────────────────────────────────────────────────────────┤${NC}"
 	echo -e "${GREEN}│${NC}  ${BOLD}渠道配置状态${NC}"
 
-	# 检测微信渠道
-	local wechat_ext_dir="${OC_STATE_DIR}/extensions/openclaw-weixin"
-	if [ -d "$wechat_ext_dir" ] && [ -f "${wechat_ext_dir}/openclaw.plugin.json" ]; then
-		echo -e "${GREEN}│${NC}  微信 .............. ${GREEN}✅ 已配置${NC}"
-	else
-		echo -e "${GREEN}│${NC}  微信 .............. ${YELLOW}❌ 未配置${NC}"
-	fi
-
 	local tg_token=$(json_get channels.telegram.botToken)
 	local dc_token=$(json_get channels.discord.botToken)
 	local fs_appid=$(json_get channels.feishu.appId)
@@ -657,48 +628,43 @@ show_current_config() {
 # ══════════════════════════════════════════════════════════════
 configure_model() {
 	echo ""
-	echo -e "  ${BOLD}🤖 配置 AI 模型和提供商${NC}"
+	echo -e "  ${BOLD}🤖 配置 AI 模型提供商${NC}"
 	echo ""
-	echo -e "  ${GREEN}${BOLD}🌟 ── 推荐 ──${NC}"
-	echo -e "  ${CYAN}w)${NC} 🌟 官方完整模型配置向导  ${GREEN}(推荐，支持所有提供商)${NC}"
+	echo -e "  ${GREEN}${BOLD}--- 推荐 ---${NC}"
+	echo -e "  ${CYAN}1)${NC} 🌟 官方完整模型配置向导  ${GREEN}(推荐，支持所有提供商)${NC}"
 	echo ""
-	echo -e "  ${BOLD}🌍 ── 国外模型提供商 ──${NC}"
-	echo -e "  ${CYAN}a)${NC} OpenAI (GPT-5.2, GPT-5 mini, GPT-4.1)"
-	echo -e "  ${CYAN}b)${NC} Anthropic (Claude Sonnet 4, Opus 4, Haiku)"
-	echo -e "  ${CYAN}c)${NC} Google Gemini (Gemini 2.5 Pro/Flash, Gemini 3)"
-	echo -e "  ${CYAN}d)${NC} OpenRouter (聚合多家模型)"
-	echo -e "  ${CYAN}e)${NC} GitHub Copilot (需要 Copilot 订阅)"
-	echo -e "  ${CYAN}f)${NC} xAI Grok (Grok-4/3)"
+	echo -e "  ${BOLD}--- 快速配置 ---${NC}"
+	echo -e "  ${CYAN}2)${NC} OpenAI (GPT-5.2, GPT-5 mini, GPT-4.1)"
+	echo -e "  ${CYAN}3)${NC} Anthropic (Claude Sonnet 4, Opus 4, Haiku)"
+	echo -e "  ${CYAN}4)${NC} Google Gemini (Gemini 2.5 Pro/Flash, Gemini 3)"
+	echo -e "  ${CYAN}5)${NC} OpenRouter (聚合多家模型)"
+	echo -e "  ${CYAN}6)${NC} DeepSeek (DeepSeek-V3/R1)"
+	echo -e "  ${CYAN}7)${NC} GitHub Copilot (需要 Copilot 订阅)"
+	echo -e "  ${CYAN}8)${NC} 阿里云通义千问 Qwen (Portal/API/Coding Plan)"
+	echo -e "  ${CYAN}9)${NC} xAI Grok (Grok-3/3-mini)"
+	echo -e "  ${CYAN}10)${NC} Groq (Llama 4, Llama 3.3)"
+	echo -e "  ${CYAN}11)${NC} 硅基流动 SiliconFlow"
+	echo -e "  ${CYAN}12)${NC} Ollama (本地模型，无需 API Key)"
+	echo -e "  ${CYAN}13)${NC} 腾讯云 Coding Plan (HY T1/TurboS/GLM-5/Kimi)"
+	echo -e "  ${CYAN}14)${NC} 自定义 OpenAI 兼容 API"
+	echo -e "  ${CYAN}0)${NC} 返回"
 	echo ""
-	echo -e "  ${BOLD}🇨🇳 ── 国内模型提供商 ──${NC}"
-	echo -e "  ${CYAN}g)${NC} 阿里云通义千问 Qwen (Portal/API/Coding Plan)"
-	echo -e "  ${CYAN}h)${NC} 硅基流动 SiliconFlow"
-	echo -e "  ${CYAN}i)${NC} 腾讯云 Coding Plan (HY T1/TurboS/GLM-5/Kimi)"
-	echo -e "  ${CYAN}j)${NC} 百度千帆 (ERNIE-4.0, ERNIE-3.5)"
-	echo -e "  ${CYAN}k)${NC} 智谱 GLM / Z.AI (GLM-5.1, GLM-5)"
-	echo ""
-	echo -e "  ${BOLD}🏠 ── 本地模型 / 自定义 API ──${NC}"
-	echo -e "  ${CYAN}l)${NC} Ollama (本地模型，无需 API Key)"
-	echo -e "  ${CYAN}m)${NC} 自定义 OpenAI 兼容 API"
-	echo ""
-	echo -e "  ${CYAN}q)${NC} 返回"
-	echo ""
-	prompt_with_default "请选择" "w" choice
+	prompt_with_default "请选择" "1" choice
 
 	case "$choice" in
-		w)
+		1)
 			echo ""
 			echo -e "  ${CYAN}启动官方完整模型配置向导...${NC}"
 			echo -e "  ${YELLOW}提示: ↑↓ 移动, Tab/空格 选中, 回车 确认${NC}"
 			echo ""
-			echo -e "  ${CYAN}清理过时插件配置...${NC}"
+			echo -e "  ${CYAN}预启用模型认证插件...${NC}"
 			enable_auth_plugins
 			echo ""
 			(oc_cmd configure --section model) || echo -e "  ${YELLOW}配置向导已退出${NC}"
 			echo ""
 			ask_restart
 			;;
-		a)
+		2)
 			echo ""
 			echo -e "  ${BOLD}OpenAI 配置${NC}"
 			echo -e "  ${YELLOW}获取 API Key: https://platform.openai.com/api-keys${NC}"
@@ -731,7 +697,7 @@ configure_model() {
 				echo -e "  ${GREEN}✅ OpenAI 已配置，活跃模型: openai/${model_name}${NC}"
 			fi
 			;;
-		b)
+		3)
 			echo ""
 			echo -e "  ${BOLD}Anthropic 配置${NC}"
 			echo -e "  ${YELLOW}获取 API Key: https://console.anthropic.com/settings/keys${NC}"
@@ -762,7 +728,7 @@ configure_model() {
 				echo -e "  ${GREEN}✅ Anthropic 已配置，活跃模型: anthropic/${model_name}${NC}"
 			fi
 			;;
-		c)
+		4)
 			echo ""
 			echo -e "  ${BOLD}Google Gemini 配置${NC}"
 			echo -e "  ${YELLOW}获取 API Key: https://aistudio.google.com/apikey${NC}"
@@ -793,7 +759,7 @@ configure_model() {
 				echo -e "  ${GREEN}✅ Google Gemini 已配置，活跃模型: google/${model_name}${NC}"
 			fi
 			;;
-		d)
+		5)
 			echo ""
 			echo -e "  ${BOLD}OpenRouter 配置${NC}"
 			echo -e "  ${YELLOW}获取 API Key: https://openrouter.ai/keys${NC}"
@@ -827,7 +793,33 @@ configure_model() {
 				echo -e "  ${GREEN}✅ OpenRouter 已配置，活跃模型: openrouter/${model_name}${NC}"
 			fi
 			;;
-		e)
+		6)
+			echo ""
+			echo -e "  ${BOLD}DeepSeek 配置${NC}"
+			echo -e "  ${YELLOW}获取 API Key: https://platform.deepseek.com/api_keys${NC}"
+			echo ""
+			prompt_with_default "请输入 DeepSeek API Key" "" api_key
+			if [ -n "$api_key" ]; then
+				echo ""
+				echo -e "  ${CYAN}可用模型:${NC}"
+				echo -e "    ${CYAN}a)${NC} deepseek-chat     — DeepSeek-V3 (通用对话)"
+				echo -e "    ${CYAN}b)${NC} deepseek-reasoner — DeepSeek-R1 (深度推理)"
+				echo -e "    ${CYAN}c)${NC} 手动输入模型名"
+				echo ""
+				prompt_with_default "请选择模型" "a" model_choice
+				case "$model_choice" in
+					a) model_name="deepseek-chat" ;;
+					b) model_name="deepseek-reasoner" ;;
+					c) prompt_with_default "请输入模型名称" "deepseek-chat" model_name ;;
+					*) model_name="deepseek-chat" ;;
+				esac
+				auth_set_apikey deepseek "$api_key"
+				register_custom_provider deepseek "https://api.deepseek.com/v1" "$api_key" "$model_name" "$model_name"
+				register_and_set_model "deepseek/${model_name}"
+				echo -e "  ${GREEN}✅ DeepSeek 已配置，活跃模型: deepseek/${model_name}${NC}"
+			fi
+			;;
+		7)
 			echo ""
 			echo -e "  ${BOLD}GitHub Copilot 配置${NC}"
 			echo -e "  ${YELLOW}需要有效的 GitHub Copilot 订阅 (Free/Pro/Business 均可)${NC}"
@@ -882,7 +874,7 @@ configure_model() {
 				echo -e "  ${YELLOW}OAuth 授权已退出或失败${NC}"
 			fi
 			;;
-		g)
+		8)
 			echo ""
 			echo -e "  ${BOLD}阿里云通义千问 Qwen 配置${NC}"
 			echo ""
@@ -1009,7 +1001,7 @@ configure_model() {
 					;;
 			esac
 			;;
-		f)
+		9)
 			echo ""
 			echo -e "  ${BOLD}xAI Grok 配置${NC}"
 			echo -e "  ${YELLOW}获取 API Key: https://console.x.ai${NC}"
@@ -1042,7 +1034,41 @@ configure_model() {
 				echo -e "  ${GREEN}✅ xAI Grok 已配置，活跃模型: xai/${model_name}${NC}"
 			fi
 			;;
-		h)
+		10)
+			echo ""
+			echo -e "  ${BOLD}Groq 配置${NC}"
+			echo -e "  ${YELLOW}获取 API Key: https://console.groq.com/keys${NC}"
+			echo -e "  ${YELLOW}Groq 提供超快推理速度${NC}"
+			echo ""
+			prompt_with_default "请输入 Groq API Key" "" api_key
+			if [ -n "$api_key" ]; then
+				echo ""
+				echo -e "  ${CYAN}可用模型:${NC}"
+				echo -e "    ${CYAN}a)${NC} meta-llama/llama-4-maverick-17b-128e-instruct  — Llama 4 Maverick (推荐)"
+				echo -e "    ${CYAN}b)${NC} meta-llama/llama-4-scout-17b-16e-instruct      — Llama 4 Scout"
+				echo -e "    ${CYAN}c)${NC} moonshotai/kimi-k2-instruct                    — Kimi K2"
+				echo -e "    ${CYAN}d)${NC} qwen/qwen3-32b                                 — 通义千问 Qwen3 32B"
+				echo -e "    ${CYAN}e)${NC} llama-3.3-70b-versatile                         — Llama 3.3 70B"
+				echo -e "    ${CYAN}f)${NC} llama-3.1-8b-instant                            — Llama 3.1 8B (极速)"
+				echo -e "    ${CYAN}g)${NC} 手动输入模型名"
+				echo ""
+				prompt_with_default "请选择模型" "a" model_choice
+				case "$model_choice" in
+					a) model_name="meta-llama/llama-4-maverick-17b-128e-instruct" ;;
+					b) model_name="meta-llama/llama-4-scout-17b-16e-instruct" ;;
+					c) model_name="moonshotai/kimi-k2-instruct" ;;
+					d) model_name="qwen/qwen3-32b" ;;
+					e) model_name="llama-3.3-70b-versatile" ;;
+					f) model_name="llama-3.1-8b-instant" ;;
+					g) prompt_with_default "请输入模型名称" "meta-llama/llama-4-maverick-17b-128e-instruct" model_name ;;
+					*) model_name="meta-llama/llama-4-maverick-17b-128e-instruct" ;;
+				esac
+				auth_set_apikey groq "$api_key"
+				register_and_set_model "groq/${model_name}"
+				echo -e "  ${GREEN}✅ Groq 已配置，活跃模型: groq/${model_name}${NC}"
+			fi
+			;;
+		11)
 			echo ""
 			echo -e "  ${BOLD}硅基流动 SiliconFlow 配置${NC}"
 			echo -e "  ${YELLOW}获取 API Key: https://cloud.siliconflow.cn/account/ak${NC}"
@@ -1051,36 +1077,18 @@ configure_model() {
 			prompt_with_default "请输入 SiliconFlow API Key" "" api_key
 			if [ -n "$api_key" ]; then
 				echo ""
-				echo -e "  ${CYAN}可用模型分类说明:${NC}"
-				echo -e "  ${YELLOW}* Pro模型 (带 Pro/ 前缀): 仅支持充值余额支付，并发与速率(Rate Limits)可变。${NC}"
-				echo -e "  ${YELLOW}* 非Pro模型 (无 Pro/ 前缀): 支持赠费余额（代金券）和充值余额支付，Rate Limits 固定。${NC}"
-				echo -e "  ${GREEN}【建议】如果您是代金券/赠送余额用户，请务必选择【非Pro模型】。${NC}"
+				echo -e "  ${CYAN}可用模型:${NC}"
+				echo -e "    ${CYAN}a)${NC} deepseek-ai/DeepSeek-V3      — DeepSeek V3 (推荐)"
+				echo -e "    ${CYAN}b)${NC} deepseek-ai/DeepSeek-R1      — DeepSeek R1"
+				echo -e "    ${CYAN}c)${NC} Qwen/Qwen3-235B-A22B        — 通义千问 Qwen3 235B"
+				echo -e "    ${CYAN}d)${NC} 手动输入模型名"
 				echo ""
-				echo -e "  ${CYAN}── 非Pro模型 (支持代金券/免费额度) ──${NC}"
-				echo -e "    ${CYAN}1)${NC} deepseek-ai/DeepSeek-V3       — DeepSeek-V3 (推荐)"
-				echo -e "    ${CYAN}2)${NC} deepseek-ai/DeepSeek-R1       — DeepSeek-R1 (推理模型)"
-				echo -e "    ${CYAN}3)${NC} Qwen/Qwen2.5-72B-Instruct     — 通义千问 2.5 72B"
-				echo -e "    ${CYAN}4)${NC} Qwen/Qwen2.5-7B-Instruct      — 通义千问 2.5 7B"
-				echo -e "    ${CYAN}5)${NC} THUDM/glm-4-9b-chat           — 智谱 GLM-4 9B"
-				echo -e "    ${CYAN}6)${NC} 01-ai/Yi-1.5-34B-Chat-16K     — 零一万物 Yi-1.5 34B"
-				echo ""
-				echo -e "  ${CYAN}── Pro模型 (仅支持充值余额) ──${NC}"
-				echo -e "    ${CYAN}7)${NC} Pro/deepseek-ai/DeepSeek-V3   — DeepSeek-V3 (Pro增强侧)"
-				echo -e "    ${CYAN}8)${NC} Pro/zai-org/GLM-5             — 智谱 GLM-5"
-				echo ""
-				echo -e "    ${CYAN}0)${NC} 手动输入其他任意模型名称"
-				echo ""
-				prompt_with_default "请选择模型 [0-8]" "1" model_choice
+				prompt_with_default "请选择模型" "a" model_choice
 				case "$model_choice" in
-					1) model_name="deepseek-ai/DeepSeek-V3" ;;
-					2) model_name="deepseek-ai/DeepSeek-R1" ;;
-					3) model_name="Qwen/Qwen2.5-72B-Instruct" ;;
-					4) model_name="Qwen/Qwen2.5-7B-Instruct" ;;
-					5) model_name="THUDM/glm-4-9b-chat" ;;
-					6) model_name="01-ai/Yi-1.5-34B-Chat-16K" ;;
-					7) model_name="Pro/deepseek-ai/DeepSeek-V3" ;;
-					8) model_name="Pro/zai-org/GLM-5" ;;
-					0) prompt_with_default "请输入模型详细名称" "deepseek-ai/DeepSeek-V3" model_name ;;
+					a) model_name="deepseek-ai/DeepSeek-V3" ;;
+					b) model_name="deepseek-ai/DeepSeek-R1" ;;
+					c) model_name="Qwen/Qwen3-235B-A22B" ;;
+					d) prompt_with_default "请输入模型名称" "deepseek-ai/DeepSeek-V3" model_name ;;
 					*) model_name="deepseek-ai/DeepSeek-V3" ;;
 				esac
 				auth_set_apikey siliconflow "$api_key"
@@ -1089,7 +1097,7 @@ configure_model() {
 				echo -e "  ${GREEN}✅ SiliconFlow 已配置，活跃模型: siliconflow/${model_name}${NC}"
 			fi
 			;;
-		l)
+		12)
 			echo ""
 			echo -e "  ${BOLD}🦙 Ollama 本地模型配置${NC}"
 			echo -e "  ${YELLOW}Ollama 在本地或局域网运行大模型，无需 API Key${NC}"
@@ -1205,7 +1213,7 @@ configure_model() {
 				fi
 			fi
 			;;
-		i)
+		13)
 			echo ""
 			echo -e "  ${BOLD}腾讯云大模型 Coding Plan 套餐配置${NC}"
 			echo ""
@@ -1254,104 +1262,7 @@ configure_model() {
 				echo -e "  ${DIM}提示: 套餐内全部模型已注册，可随时在 WebChat 中通过 /model 切换${NC}"
 			fi
 			;;
-		j)
-			echo ""
-			echo -e "  ${BOLD}百度千帆大模型配置${NC}"
-			echo -e "  ${YELLOW}获取 API Key: https://console.bce.baidu.com/qianfan/ais/console/onlineService${NC}"
-			echo ""
-			echo -e "  ${DIM}提示: 需要 API Key (Access Token) 和可选的 Secret Key${NC}"
-			echo ""
-			prompt_with_default "请输入百度千帆 API Key (Access Token)" "" api_key
-			if [ -n "$api_key" ]; then
-				auth_set_apikey qianfan "$api_key"
-				echo ""
-				echo -e "  ${CYAN}可用模型:${NC}"
-				echo -e "    ${CYAN}a)${NC} ernie-4.0-8k        — 文心一言 4.0 (推荐)"
-				echo -e "    ${CYAN}b)${NC} ernie-3.5-8k        — 文心一言 3.5"
-				echo -e "    ${CYAN}c)${NC} ernie-4.0-turbo-8k  — 文心一言 4.0 Turbo"
-				echo -e "    ${CYAN}d)${NC} ernie-speed-8k      — 文心一言 Speed 极速"
-				echo -e "    ${CYAN}e)${NC} 手动输入模型名"
-				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="ernie-4.0-8k" ;;
-					b) model_name="ernie-3.5-8k" ;;
-					c) model_name="ernie-4.0-turbo-8k" ;;
-					d) model_name="ernie-speed-8k" ;;
-					e) prompt_with_default "请输入模型名称" "ernie-4.0-8k" model_name ;;
-					*) model_name="ernie-4.0-8k" ;;
-				esac
-				# 百度千帆使用 OpenAI 兼容接口
-				# 注: OpenClaw v2026.3.28+ 支持 qianfan 原生 provider
-				register_custom_provider qianfan "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop" "$api_key" "$model_name" "$model_name"
-				register_and_set_model "qianfan/${model_name}"
-				echo -e "  ${GREEN}✅ 百度千帆已配置，活跃模型: qianfan/${model_name}${NC}"
-			fi
-			;;
-		k)
-			echo ""
-			echo -e "  ${BOLD}智谱 GLM / Z.AI 配置${NC}"
-			echo ""
-			echo -e "  ${CYAN}认证方式:${NC}"
-			echo -e "    ${CYAN}a)${NC} CN (open.bigmodel.cn) ${GREEN}★ 国内用户推荐${NC}"
-			echo -e "    ${CYAN}b)${NC} Coding-Plan-CN (智谱 Coding Plan 套餐)"
-			echo -e "    ${CYAN}c)${NC} Global (api.z.ai)"
-			echo -e "    ${CYAN}d)${NC} 手动输入 API Key"
-			echo ""
-			prompt_with_default "请选择认证方式" "a" zai_method
-			case "$zai_method" in
-				a)
-					zai_base_url="https://open.bigmodel.cn/api/paas/v4"
-					echo -e "  ${YELLOW}获取 API Key: https://open.bigmodel.cn/api-key${NC}"
-					;;
-				b)
-					zai_base_url="https://open.bigmodel.cn/api/coding/paas/v4"
-					echo -e "  ${YELLOW}Coding Plan 套餐 API Key (sk-...)${NC}"
-					;;
-				c)
-					zai_base_url="https://api.z.ai/api/paas/v4"
-					echo -e "  ${YELLOW}全球版 API Key${NC}"
-					;;
-				d)
-					prompt_with_default "请输入 Base URL" "https://open.bigmodel.cn/api/paas/v4" zai_base_url
-					;;
-				*)
-					zai_base_url="https://open.bigmodel.cn/api/paas/v4"
-					;;
-			esac
-			echo ""
-			prompt_with_default "请输入智谱 API Key" "" api_key
-			if [ -n "$api_key" ]; then
-				echo ""
-				echo -e "  ${CYAN}可用模型:${NC}"
-				echo -e "    ${CYAN}a)${NC} glm-5.1        — GLM-5.1 (推荐)"
-				echo -e "    ${CYAN}b)${NC} glm-5          — GLM-5"
-				echo -e "    ${CYAN}c)${NC} glm-4.7        — GLM-4.7"
-				echo -e "    ${CYAN}d)${NC} glm-4.7-flash  — GLM-4.7 Flash"
-				echo -e "    ${CYAN}e)${NC} glm-4.5        — GLM-4.5"
-				echo -e "    ${CYAN}f)${NC} glm-4.5-flash  — GLM-4.5 Flash (免费额度)"
-				echo -e "    ${CYAN}g)${NC} 手动输入模型名"
-				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="glm-5.1" ;;
-					b) model_name="glm-5" ;;
-					c) model_name="glm-4.7" ;;
-					d) model_name="glm-4.7-flash" ;;
-					e) model_name="glm-4.5" ;;
-					f) model_name="glm-4.5-flash" ;;
-					g) prompt_with_default "请输入模型名称" "glm-5.1" model_name ;;
-					*) model_name="glm-5.1" ;;
-				esac
-				# 智谱 GLM 使用原生 zai provider (OpenClaw 内置支持)
-				auth_set_apikey zai "$api_key"
-				register_custom_provider zai "$zai_base_url" "$api_key" "$model_name" "$model_name" "128000" "4096"
-				register_and_set_model "zai/${model_name}"
-				echo -e "  ${GREEN}✅ 智谱 GLM 已配置，活跃模型: zai/${model_name}${NC}"
-				echo -e "  ${DIM}   Base URL: ${zai_base_url}${NC}"
-			fi
-			;;
-		m)
+		14)
 			echo ""
 			echo -e "  ${BOLD}自定义 OpenAI 兼容 API${NC}"
 			echo -e "  ${YELLOW}支持任何兼容 OpenAI API 格式的服务商${NC}"
@@ -1366,7 +1277,7 @@ configure_model() {
 				echo -e "  ${GREEN}✅ 自定义模型已配置，活跃模型: openai-compatible/${model_name}${NC}"
 			fi
 			;;
-		q) return ;;
+		0) return ;;
 	esac
 
 	if [ "$choice" != "0" ] && [ "$choice" != "1" ]; then
@@ -1474,7 +1385,6 @@ configure_qq() {
 				echo -e "  ${YELLOW}⚠️  qqbot 插件已安装但未能正常加载${NC}"
 				echo -e "  ${CYAN}正在修复插件目录权限...${NC}"
 				chown -R root:root "$qqbot_ext_dir" 2>/dev/null
-				chmod -R 755 "$qqbot_ext_dir" 2>/dev/null
 				echo -e "  ${GREEN}✅ 权限已修复，重启 Gateway 后生效${NC}"
 				plugin_installed=1
 			fi
@@ -1483,7 +1393,6 @@ configure_qq() {
 			echo -e "  ${YELLOW}⚠️  qqbot 插件目录存在但未能加载${NC}"
 			echo -e "  ${CYAN}正在修复插件目录权限...${NC}"
 			chown -R root:root "$qqbot_ext_dir" 2>/dev/null
-			chmod -R 755 "$qqbot_ext_dir" 2>/dev/null
 			echo -e "  ${GREEN}✅ 权限已修复${NC}"
 			plugin_installed=1
 		fi
@@ -1502,10 +1411,8 @@ configure_qq() {
 			local install_rc=$?
 
 			# 关键: 安装后立即修复插件目录权限为 root (OpenClaw 安全策略要求)
-			# 同时修复权限模式为 755，确保 Gateway 可读取插件
 			if [ -d "$qqbot_ext_dir" ]; then
 				chown -R root:root "$qqbot_ext_dir" 2>/dev/null
-				chmod -R 755 "$qqbot_ext_dir" 2>/dev/null
 			fi
 
 			if [ $install_rc -eq 0 ]; then
@@ -1932,10 +1839,8 @@ configure_channels() {
 		echo ""
 		echo -e "  ${BOLD}📡 配置消息渠道${NC}"
 		echo ""
-		echo -e "  ${CYAN}提示: 微信配置请使用 LuCI 界面「微信配置」菜单${NC}"
-		echo ""
-		echo -e "  ${CYAN}1)${NC} QQ 机器人  ${GREEN}(腾讯QQ)${NC}"
-		echo -e "  ${CYAN}2)${NC} Telegram  ${GREEN}(最常用)${NC}"
+		echo -e "  ${CYAN}1)${NC} QQ 机器人  ${GREEN}(腾讯QQ，推荐国内用户)${NC}"
+		echo -e "  ${CYAN}2)${NC} Telegram  ${GREEN}(最常用，推荐)${NC}"
 		echo -e "  ${CYAN}3)${NC} Discord"
 		echo -e "  ${CYAN}4)${NC} 飞书 (Feishu)"
 		echo -e "  ${CYAN}5)${NC} Slack"
@@ -2223,7 +2128,7 @@ reset_to_defaults() {
 				echo -e "  ${CYAN}已取消${NC}"
 			fi
 			;;
-		c)
+		4)
 			echo ""
 			echo -e "  ${RED}╔══════════════════════════════════════════════════════╗${NC}"
 			echo -e "  ${RED}║  ⚠️  完全恢复出厂设置                               ║${NC}"
@@ -2405,7 +2310,7 @@ backup_restore_menu() {
 				oc_cmd backup verify "$latest" 2>&1
 			fi
 			;;
-		c)
+		4)
 			echo ""
 			if [ -d "$backup_dir" ]; then
 				local count=$(ls "${backup_dir}"/*-openclaw-backup.tar.gz 2>/dev/null | wc -l)
@@ -2423,7 +2328,7 @@ backup_restore_menu() {
 			echo ""
 			echo -e "  ${DIM}备份目录: ${backup_dir}${NC}"
 			;;
-		d)
+		5)
 			local latest=$(ls -t "${backup_dir}"/*-openclaw-backup.tar.gz 2>/dev/null | head -1)
 			if [ -z "$latest" ]; then
 				echo -e "  ${YELLOW}未找到备份文件，请先创建备份${NC}"
@@ -2456,7 +2361,7 @@ backup_restore_menu() {
 							# 提取 payload 到根目录 (还原到原始绝对路径)
 							tar -xzf "$latest" --strip-components=3 -C / "${backup_name}/payload/posix/" 2>&1
 							# 修复权限
-							chown -R openclaw:openclaw "$OC_STATE_DIR" 2>/dev/null
+							chown -R openclaw:openclaw "${OC_DATA}/.openclaw" 2>/dev/null
 							echo -e "  ${GREEN}✅ 配置和数据已完整恢复！原配置已保存为 openclaw.json.pre-restore${NC}"
 							echo ""
 							prompt_with_default "是否重启服务使配置生效? (Y/n)" "Y" do_restart
@@ -2475,62 +2380,7 @@ backup_restore_menu() {
 	esac
 }
 
-# ══════════════════════════════════════════════════════════════════════════
-# 交互式菜单 (方向键导航)
-# ══════════════════════════════════════════════════════════════════════════
-
-# 检测是否支持交互模式 (需要 Node.js + TTY 终端)
-can_use_interactive() {
-	[ -x "$NODE_BIN" ] || return 1
-	[ -f "$OC_INTERACTIVE" ] || return 1
-	[ -f "$OC_MENU_ENGINE" ] || return 1
-	# 检测是否为真实 TTY (排除某些非交互环境)
-	[ -t 0 ] && [ -t 1 ] || return 1
-	return 0
-}
-
-# 启动交互式菜单 (方向键导航版本)
-launch_interactive_menu() {
-	if ! can_use_interactive; then
-		echo -e "  ${YELLOW}⚠️ 当前环境不支持交互模式，使用传统菜单${NC}"
-		return 1
-	fi
-
-	# 调用 Node.js 交互式前端
-	"$NODE_BIN" "$OC_INTERACTIVE" 2>&1
-	local rc=$?
-
-        find "$OC_STATE_DIR" -user root ! -path "*/extensions*" -exec chown openclaw:openclaw {} \; 2>/dev/null || true
-	# 返回后刷新配置权限
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-	return $rc
-}
-
-# 启动交互式模型配置
-launch_interactive_model_config() {
-	if ! can_use_interactive; then
-		echo -e "  ${YELLOW}⚠️ 当前环境不支持交互模式，使用传统菜单${NC}"
-		configure_model  # 回退到传统菜单
-		return $?
-	fi
-
-	# 调用 Node.js 交互式前端的模型配置模块
-	"$NODE_BIN" "$OC_INTERACTIVE" model 2>&1
-	local rc=$?
-
-        find "$OC_STATE_DIR" -user root ! -path "*/extensions*" -exec chown openclaw:openclaw {} \; 2>/dev/null || true
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-	return $rc
-}
-
 main_menu() {
-	# 直接启动交互模式 (如果支持)
-	if can_use_interactive && [ "${OC_FORCE_TRADITIONAL:-0}" != "1" ]; then
-		launch_interactive_menu
-		return $?
-	fi
-
-	# 传统菜单 (回退方案)
 	while true; do
 		echo ""
 		echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
@@ -2744,29 +2594,6 @@ advanced_menu() {
 
 # ── 支持命令行参数 ──
 case "${1:-}" in
-	--tui|--interactive)
-		# 强制启动交互式菜单 (方向键导航)
-		if can_use_interactive; then
-			launch_interactive_menu
-		else
-			echo -e "${YELLOW}⚠️ 当前环境不支持交互模式${NC}"
-			echo "需要: Node.js + TTY 终端"
-			exit 1
-		fi
-		;;
-	--traditional)
-		# 强制使用传统菜单
-		export OC_FORCE_TRADITIONAL=1
-		main_menu
-		;;
-	--model)
-		# 直接进入模型配置
-		if can_use_interactive; then
-			launch_interactive_model_config
-		else
-			configure_model
-		fi
-		;;
 	--set)
 		if [ -n "${2:-}" ] && [ -n "${3:-}" ]; then
 			json_set "$2" "$3"
@@ -2801,20 +2628,11 @@ case "${1:-}" in
 		echo "OpenClaw AI Gateway — OpenWrt 配置管理工具"
 		echo ""
 		echo "用法:"
-		echo "  oc-config.sh              # 进入交互式菜单 (自动检测)"
-		echo "  oc-config.sh --tui        # 强制使用方向键交互模式"
-		echo "  oc-config.sh --traditional # 强制使用传统数字菜单"
-		echo "  oc-config.sh --model      # 直接进入模型配置"
+		echo "  oc-config.sh              # 进入交互式菜单"
 		echo "  oc-config.sh --set K V    # 设置配置项"
 		echo "  oc-config.sh --get K      # 读取配置项"
 		echo "  oc-config.sh --restart    # 重启 Gateway"
 		echo "  oc-config.sh --status     # 查看状态"
-		echo ""
-		echo "交互模式快捷键:"
-		echo "  ↑↓      导航选项"
-		echo "  回车    确认选择"
-		echo "  ESC/q   返回上级"
-		echo "  字符    搜索过滤"
 		echo ""
 		;;
 	"")

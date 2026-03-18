@@ -11,39 +11,30 @@
 # ============================================================================
 set -e
 
+. /usr/libexec/openclaw-paths.sh
+
 # ── Node.js 版本策略 (双版本兼容) ──
-# V2: 当前推荐版本，用于 OpenClaw v2026.3.22+ (要求 >= 22.14.0，使用 22.16.0 确保兼容)
+# V2: 当前推荐版本，用于 OpenClaw v2026.3.11+ (要求 >= 22.16.0)
 # V1: 旧版兼容，用于 OpenClaw v2026.3.8 及更早版本
 NODE_VERSION_V2="22.16.0"
 NODE_VERSION_V1="22.15.1"
 # 默认使用 V2 版本 (可通过 NODE_VERSION 环境变量覆盖)
 NODE_VERSION="${NODE_VERSION:-${NODE_VERSION_V2}}"
 # 经过验证的 OpenClaw 稳定版本 (更新此值需同步测试)
-OC_TESTED_VERSION="2026.4.9"
+OC_TESTED_VERSION="2026.3.13"
 # 用户可通过 OC_VERSION 环境变量覆盖安装版本
 OC_VERSION="${OC_VERSION:-}"
-
-# ── 安装路径 (支持自定义) ──
-# 从 UCI 配置读取自定义路径，默认为 /opt
-# 用户可在 LuCI 界面或通过 uci set openclaw.main.install_path=/mnt/data 设置
-# 程序会在此路径下自动创建 openclaw 目录
-OC_BASE_PATH="${OC_INSTALL_PATH:-$(uci -q get openclaw.main.install_path || echo '/opt')}"
-OC_INSTALL_PATH="${OC_BASE_PATH}/openclaw"
-NODE_BASE="${OC_INSTALL_PATH}/node"
-OC_GLOBAL="${OC_INSTALL_PATH}/global"
-OC_DATA="${OC_INSTALL_PATH}/data"
+oc_load_paths "$OPENCLAW_INSTALL_ROOT"
 
 # ── OverlayFS 兼容性修复 ──
 # iStoreOS/OpenWrt 上 Docker 的 bind mount (/overlay/upper/opt/docker)
 # 会导致 OverlayFS 合并视图中 /opt 完全不可写 (mkdir 报 "Directory not empty")。
 # 解决方案: 将 /overlay/upper/opt bind mount 到 /opt，绕过 OverlayFS 冲突。
-# 注意: 仅当基础路径为 /opt 时才需要此修复
 _oc_fix_opt() {
-	# 如果基础路径不是 /opt，无需修复
-	[ "$OC_BASE_PATH" != "/opt" ] && return 0
+	oc_install_root_uses_opt_workaround "$OPENCLAW_INSTALL_ROOT" || return 0
 	# 如果 /opt 可正常写入，无需修复
-	if mkdir -p /opt/openclaw/.probe 2>/dev/null; then
-		rmdir /opt/openclaw/.probe 2>/dev/null
+	if mkdir -p "${OC_ROOT}/.probe" 2>/dev/null; then
+		rmdir "${OC_ROOT}/.probe" 2>/dev/null
 		return 0
 	fi
 	# /opt 不可写且 overlay upper 层存在 — 执行 bind mount 修复
@@ -82,7 +73,9 @@ ensure_mkdir() {
 	[ -d "$target" ] && return 0
 	if ! mkdir -p "$target" 2>/dev/null; then
 		log_error "无法创建目录: $target"
-		log_error "如果安装了 Docker，可能需要手动执行: mount --bind /overlay/upper/opt /opt"
+		if oc_install_root_uses_opt_workaround "$OPENCLAW_INSTALL_ROOT"; then
+			log_error "如果安装了 Docker，可能需要手动执行: mount --bind /overlay/upper/opt /opt"
+		fi
 		return 1
 	fi
 }
@@ -107,7 +100,7 @@ find_oc_entry() {
 ${OC_GLOBAL}/node_modules/openclaw
 ${NODE_BASE}/lib/node_modules/openclaw"
 
-	# 添加 pnpm 版本化目录 (如 $OC_GLOBAL/5/node_modules/openclaw)
+	# 添加 pnpm 版本化目录 (如 /opt/openclaw/global/5/node_modules/openclaw)
 	for ver_dir in "${OC_GLOBAL}"/*/node_modules/openclaw; do
 		[ -d "$ver_dir" ] 2>/dev/null && search_dirs="$search_dirs
 $ver_dir"
@@ -375,6 +368,18 @@ install_openclaw() {
 		log_error "OpenClaw 安装验证失败"
 		exit 1
 	fi
+
+	# 安装 Gemini CLI (官方模型配置向导的 Google Gemini OAuth 依赖)
+	if [ -x "$NPM_BIN" ]; then
+		echo ""
+		echo "=== 安装 Gemini CLI (Google OAuth 依赖) ==="
+		"$NPM_BIN" install -g @google/gemini-cli --prefix="$OC_GLOBAL" $install_flags 2>&1 | tail -3
+		if command -v gemini >/dev/null 2>&1 || [ -x "$OC_GLOBAL/bin/gemini" ]; then
+			log_info "Gemini CLI 安装成功"
+		else
+			log_warn "Gemini CLI 安装失败 (不影响核心功能，仅影响 Google Gemini OAuth 登录)"
+		fi
+	fi
 }
 
 init_openclaw() {
@@ -437,7 +442,7 @@ do_setup() {
 	else
 		echo "  OpenClaw:   最新版"
 	fi
-	echo "  安装路径:   ${OC_INSTALL_PATH}"
+	echo "  安装路径:   ${NODE_BASE}"
 	echo "  数据路径:   ${OC_DATA}"
 	echo ""
 
@@ -491,11 +496,10 @@ do_check() {
 		echo "  配置:     未初始化"
 	fi
 
-	# 磁盘使用 (检测实际安装路径)
+	# 磁盘使用
 	local used
-	used=$(du -sh "$OC_INSTALL_PATH" 2>/dev/null | awk '{print $1}')
+	used=$(du -sh "$OC_ROOT" 2>/dev/null | awk '{print $1}')
 	echo "  磁盘:     ${used:-N/A}"
-	echo "  安装路径: ${OC_INSTALL_PATH}"
 
 	# libc 类型
 	echo "  C库:      $(detect_libc)"
@@ -623,10 +627,7 @@ do_factory_reset() {
 		log_info "新认证令牌: $new_token"
 	fi
 
-	# 7. 确保数据目录权限正确 (防止 root 操作留下的文件)
-	chown -R openclaw:openclaw "$OC_DATA" 2>/dev/null || true
-
-	# 8. 重启服务
+	# 7. 重启服务
 	/etc/init.d/openclaw start >/dev/null 2>&1 &
 	log_info "出厂设置已恢复，Gateway 重启中..."
 }
@@ -653,7 +654,7 @@ do_setup_offline() {
 	echo "╚══════════════════════════════════════════════════════════════╝"
 	echo ""
 	echo "  架构:       $(uname -m)"
-	echo "  安装路径:   ${OC_INSTALL_PATH}"
+	echo "  安装路径:   ${NODE_BASE}"
 	echo "  数据路径:   ${OC_DATA}"
 	echo "  离线包:     ${offline_dir}"
 	echo ""

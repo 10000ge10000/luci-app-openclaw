@@ -1,5 +1,6 @@
 config openclaw 'main'
 	option enabled '0'
+	option install_root '/opt'
 	option port '18789'
 	option bind 'lan'
 	option token ''

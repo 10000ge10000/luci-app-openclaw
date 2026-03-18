@@ -56,8 +56,12 @@ define Package/$(PKG_NAME)/install
 	$(INSTALL_DATA) ./root/etc/profile.d/openclaw.sh $(1)/etc/profile.d/openclaw.sh
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) ./root/usr/bin/openclaw-env $(1)/usr/bin/openclaw-env
+	$(INSTALL_DIR) $(1)/usr/libexec
+	$(INSTALL_BIN) ./root/usr/libexec/openclaw-paths.sh $(1)/usr/libexec/openclaw-paths.sh
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/controller
 	$(INSTALL_DATA) ./luasrc/controller/openclaw.lua $(1)/usr/lib/lua/luci/controller/openclaw.lua
+	$(INSTALL_DIR) $(1)/usr/lib/lua/openclaw
+	$(INSTALL_DATA) ./luasrc/openclaw/paths.lua $(1)/usr/lib/lua/openclaw/paths.lua
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/model/cbi/openclaw
 	$(INSTALL_DATA) ./luasrc/model/cbi/openclaw/basic.lua $(1)/usr/lib/lua/luci/model/cbi/openclaw/basic.lua
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/view/openclaw
