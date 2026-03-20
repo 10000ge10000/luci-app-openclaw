@@ -51,9 +51,19 @@ mkdir -p "$DATA_DIR/usr/bin"
 cp "$PKG_DIR/root/usr/bin/openclaw-env" "$DATA_DIR/usr/bin/"
 chmod +x "$DATA_DIR/usr/bin/openclaw-env"
 
+# libexec helpers
+mkdir -p "$DATA_DIR/usr/libexec"
+cp "$PKG_DIR/root/usr/libexec/openclaw-paths.sh" "$DATA_DIR/usr/libexec/"
+cp "$PKG_DIR/root/usr/libexec/openclaw-node.sh" "$DATA_DIR/usr/libexec/"
+chmod +x "$DATA_DIR/usr/libexec/openclaw-paths.sh" "$DATA_DIR/usr/libexec/openclaw-node.sh"
+
 # LuCI controller
 mkdir -p "$DATA_DIR/usr/lib/lua/luci/controller"
 cp "$PKG_DIR/luasrc/controller/openclaw.lua" "$DATA_DIR/usr/lib/lua/luci/controller/"
+
+# Shared Lua helpers
+mkdir -p "$DATA_DIR/usr/lib/lua/openclaw"
+cp "$PKG_DIR/luasrc/openclaw/paths.lua" "$DATA_DIR/usr/lib/lua/openclaw/"
 
 # LuCI CBI
 mkdir -p "$DATA_DIR/usr/lib/lua/luci/model/cbi/openclaw"

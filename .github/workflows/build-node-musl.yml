@@ -62,6 +62,27 @@ jobs:
           echo "=== Tarball contents (first 20 entries) ==="
           tar tJf dist/*.tar.xz | head -20
 
+      - name: Verify relocatable tarball
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD/dist:/dist:ro" \
+            alpine:3.21 sh -euxc '
+              apk add --no-cache xz icu-data-full tar
+              TARBALL=$(ls /dist/*.tar.xz | head -1)
+              verify_prefix() {
+                prefix="$1"
+                rm -rf "$prefix"
+                mkdir -p "$prefix"
+                tar -xJf "$TARBALL" --strip-components=1 -C "$prefix"
+                "$prefix/bin/node" --version
+                exec_path=$("$prefix/bin/node" -e "process.stdout.write(process.execPath)")
+                [ "$exec_path" = "$prefix/bin/node" ]
+                NODE_ICU_DATA="$prefix/share/icu" "$prefix/bin/npm" --version >/dev/null
+              }
+              verify_prefix /opt/openclaw/node
+              verify_prefix /tmp/custom-openclaw-root/openclaw/node
+            '
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -114,6 +135,27 @@ jobs:
           echo ""
           echo "=== Tarball contents (first 20 entries) ==="
           tar tJf dist/*.tar.xz | head -20
+
+      - name: Verify relocatable tarball
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD/dist:/dist:ro" \
+            alpine:3.21 sh -euxc '
+              apk add --no-cache xz icu-data-full tar
+              TARBALL=$(ls /dist/*.tar.xz | head -1)
+              verify_prefix() {
+                prefix="$1"
+                rm -rf "$prefix"
+                mkdir -p "$prefix"
+                tar -xJf "$TARBALL" --strip-components=1 -C "$prefix"
+                "$prefix/bin/node" --version
+                exec_path=$("$prefix/bin/node" -e "process.stdout.write(process.execPath)")
+                [ "$exec_path" = "$prefix/bin/node" ]
+                NODE_ICU_DATA="$prefix/share/icu" "$prefix/bin/npm" --version >/dev/null
+              }
+              verify_prefix /opt/openclaw/node
+              verify_prefix /tmp/custom-openclaw-root/openclaw/node
+            '
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

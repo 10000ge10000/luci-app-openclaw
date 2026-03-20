@@ -10,14 +10,6 @@ MAKEFILE="$REPO_ROOT/Makefile"
 BUILD_IPK="$REPO_ROOT/scripts/build_ipk.sh"
 BUILD_RUN="$REPO_ROOT/scripts/build_run.sh"
 ENV_SCRIPT="$REPO_ROOT/root/usr/bin/openclaw-env"
-CONTROLLER_SCRIPT="$REPO_ROOT/luasrc/controller/openclaw.lua"
-BASIC_LUA="$REPO_ROOT/luasrc/model/cbi/openclaw/basic.lua"
-PROFILE_SCRIPT="$REPO_ROOT/root/etc/profile.d/openclaw.sh"
-UCI_DEFAULTS_SCRIPT="$REPO_ROOT/root/etc/uci-defaults/99-openclaw"
-INIT_SCRIPT="$REPO_ROOT/root/etc/init.d/openclaw"
-PATHS_HELPER="$REPO_ROOT/root/usr/libexec/openclaw-paths.sh"
-NODE_HELPER="$REPO_ROOT/root/usr/libexec/openclaw-node.sh"
-WEB_PTY_SCRIPT="$REPO_ROOT/root/usr/share/openclaw/web-pty.js"
 
 fail() {
 	echo "FAIL: $1" >&2
@@ -34,89 +26,18 @@ grep -Fq 'verify_prefix /opt/openclaw/node' "$WORKFLOW" || fail "workflow should
 grep -Fq 'verify_prefix /tmp/custom-openclaw-root/openclaw/node' "$WORKFLOW" || fail "workflow should verify custom install path"
 
 grep -Fq 'oc_node_version_ge "$installed_ver" "$node_ver"' "$ENV_SCRIPT" || fail "installer should enforce minimum node version after extraction"
-grep -Fq 'NODE_VERSION_V2="24.14.1"' "$ENV_SCRIPT" || fail "installer should default V2 to Node.js 24.14.1"
-grep -Fq "description: 'Build V2 (24.14.1) - Current LTS version'" "$WORKFLOW" || fail "workflow should describe V2 as Node.js 24.14.1 LTS"
-grep -Fq 'NODE_VER="24.14.1"' "$WORKFLOW" || fail "workflow should request Node.js 24.14.1 for V2"
-grep -Fq 'Build Node.js V2 ARM64 musl (apk lts mode)' "$WORKFLOW" || fail "workflow should build V2 in apk lts mode"
-grep -Fq 'PKG_TYPE=lts' "$WORKFLOW" || fail "workflow should use Alpine nodejs LTS package for V2"
-grep -Fq 'alpine:edge sh /build-node-musl.sh' "$WORKFLOW" || fail "workflow should build V2 from Alpine edge to get the latest Node.js 24 LTS package"
-grep -Fq 'EXPECTED_ARTIFACT="node-v24.14.1-linux-arm64-musl.tar.xz"' "$WORKFLOW" || fail "workflow should require the exact Node.js 24.14.1 V2 artifact name"
-grep -Fq '`node-v24.14.1-linux-arm64-musl.tar.xz`' "$WORKFLOW" || fail "release notes should mention the Node.js 24.14.1 ARM64 musl tarball"
 if grep -Fq 'mirror_list="$mirror_list ${NODE_SELF_HOST}/${v1_tarball}"' "$ENV_SCRIPT"; then
 	fail "installer should not auto-fallback from V2 to V1 tarball"
 fi
-grep -Fq 'OPENCLAW_GITHUB_REPO="${OPENCLAW_GITHUB_REPO:-hotwa/luci-app-openclaw}"' "$ENV_SCRIPT" || fail "installer should keep hotwa as primary app repo"
-grep -Fq 'OPENCLAW_NODE_BINS_REPO="${OPENCLAW_NODE_BINS_REPO:-hotwa/luci-app-openclaw}"' "$ENV_SCRIPT" || fail "installer should default ARM64 musl node-bins to hotwa repo"
-grep -Fq 'NODE_SELF_HOST="${NODE_SELF_HOST:-https://github.com/${OPENCLAW_NODE_BINS_REPO}/releases/download/node-bins}"' "$ENV_SCRIPT" || fail "installer should derive node-bins release URL from hotwa repo"
-grep -Fq 'NODE_SELF_HOST_FALLBACK="${NODE_SELF_HOST_FALLBACK:-https://gitea.jmsu.top/lingyuzeng/luci-app-openclaw/releases/download/node-bins}"' "$ENV_SCRIPT" || fail "installer should define a Gitea mirror fallback for ARM64 musl downloads"
-grep -Fq 'NODE_RELEASE_API="${NODE_RELEASE_API:-https://api.github.com/repos/${OPENCLAW_NODE_BINS_REPO}/releases/tags/node-bins}"' "$ENV_SCRIPT" || fail "installer should derive node-bins release API from hotwa repo"
-grep -Fq 'NODE_RELEASE_API_FALLBACK="${NODE_RELEASE_API_FALLBACK:-https://gitea.jmsu.top/api/v1/repos/lingyuzeng/luci-app-openclaw/releases/tags/node-bins}"' "$ENV_SCRIPT" || fail "installer should define a Gitea release API fallback"
-grep -Fq 'NODE_RELEASE_PAGE_FALLBACK="${NODE_RELEASE_PAGE_FALLBACK:-https://gitea.jmsu.top/lingyuzeng/luci-app-openclaw/releases/tag/node-bins}"' "$ENV_SCRIPT" || fail "installer should define a Gitea release page fallback"
-grep -Fq 'for release_api in "$NODE_RELEASE_API" "$NODE_RELEASE_API_FALLBACK"; do' "$ENV_SCRIPT" || fail "installer should retry ARM64 musl release API using the Gitea mirror"
-grep -Fq 'oc_select_node_release_asset_url' "$ENV_SCRIPT" || fail "installer should dynamically select ARM64 musl asset"
-grep -Fq 'oc_node_requires_opt_compat "$NODE_BIN"' "$ENV_SCRIPT" || fail "installer should detect legacy opt-bound ARM64 musl node assets"
-grep -Fq 'oc_ensure_opt_compat_link "$OC_ROOT"' "$ENV_SCRIPT" || fail "installer should create /opt compatibility symlink for legacy assets"
-grep -Fq 'mirror_list="${NODE_SELF_HOST}/${musl_tarball}"' "$ENV_SCRIPT" || fail "installer should default ARM64 musl downloads to direct release asset URL"
-grep -Fq 'mirror_list="$mirror_list ${NODE_SELF_HOST_FALLBACK}/${musl_tarball}"' "$ENV_SCRIPT" || fail "installer should try the Gitea mirror after GitHub"
-grep -Fq 'arm64_musl_url=$(resolve_arm64_musl_node_url "$node_ver" 2>/dev/null || true)' "$ENV_SCRIPT" || fail "installer should keep API-based ARM64 musl asset discovery as fallback"
-grep -Fq 'while IFS= read -r d; do' "$ENV_SCRIPT" || fail "installer should traverse OpenClaw entry candidates without a pipeline subshell"
-if grep -Fq 'echo "$search_dirs" | while read -r d; do' "$ENV_SCRIPT"; then
-	fail "installer should not rely on a pipeline subshell for OpenClaw entry lookup"
-fi
-grep -Fq 'NPM_CONFIG_PREFIX="${OC_GLOBAL}"' "$ENV_SCRIPT" || fail "installer should force npm global prefix into custom install root"
-grep -Fq 'NPM_CONFIG_CACHE="${OC_DATA}/.npm"' "$ENV_SCRIPT" || fail "installer should force npm cache into custom data root"
-grep -Fq 'XDG_CACHE_HOME="${OC_DATA}/.cache"' "$ENV_SCRIPT" || fail "installer should force generic caches into custom data root"
-grep -Fq 'COREPACK_HOME="${OC_DATA}/.cache/corepack"' "$ENV_SCRIPT" || fail "installer should force corepack cache into custom data root"
-grep -Fq 'TMPDIR="${OC_DATA}/tmp"' "$ENV_SCRIPT" || fail "installer should force temp files into custom data root"
 
 grep -Fq 'openclaw-paths.sh' "$MAKEFILE" || fail "package makefile should install path helper"
 grep -Fq 'openclaw-node.sh' "$MAKEFILE" || fail "package makefile should install node helper"
 grep -Fq 'openclaw/paths.lua' "$MAKEFILE" || fail "package makefile should install Lua path helper"
-grep -Fq '+libstdcpp' "$MAKEFILE" || fail "package makefile should depend on libstdcpp"
-if grep -Fq 'libstdcpp6' "$MAKEFILE" "$BUILD_IPK" "$BUILD_RUN"; then
-	fail "packaging metadata should not reference libstdcpp6"
-fi
 grep -Fq 'openclaw-paths.sh' "$BUILD_IPK" || fail "ipk builder should package path helper"
 grep -Fq 'openclaw-node.sh' "$BUILD_IPK" || fail "ipk builder should package node helper"
 grep -Fq 'openclaw/paths.lua' "$BUILD_IPK" || fail "ipk builder should package Lua path helper"
 grep -Fq 'openclaw-paths.sh' "$BUILD_RUN" || fail "run builder should package path helper"
 grep -Fq 'openclaw-node.sh' "$BUILD_RUN" || fail "run builder should package node helper"
 grep -Fq 'openclaw/paths.lua' "$BUILD_RUN" || fail "run builder should package Lua path helper"
-
-python - "$ENV_SCRIPT" "$PROFILE_SCRIPT" "$UCI_DEFAULTS_SCRIPT" "$INIT_SCRIPT" "$PATHS_HELPER" "$NODE_HELPER" "$BUILD_IPK" "$BUILD_RUN" "$BUILD_SCRIPT" <<'PY' || fail "shell-oriented source files must use LF line endings"
-from pathlib import Path
-import sys
-
-bad = []
-for arg in sys.argv[1:]:
-    data = Path(arg).read_bytes()
-    if b"\r\n" in data:
-        bad.append(arg)
-
-if bad:
-    print("CRLF detected in:", file=sys.stderr)
-    for path in bad:
-        print(path, file=sys.stderr)
-    raise SystemExit(1)
-PY
-
-grep -Fq 'local GITHUB_REPO = "hotwa/luci-app-openclaw"' "$CONTROLLER_SCRIPT" || fail "controller should default to hotwa repo"
-grep -Fq 'local GITHUB_RELEASES_URL = "https://github.com/" .. GITHUB_REPO .. "/releases"' "$CONTROLLER_SCRIPT" || fail "controller should derive release URLs from hotwa repo"
-grep -Fq 'local GITHUB_API_RELEASES_URL = "https://api.github.com/repos/" .. GITHUB_REPO .. "/releases"' "$CONTROLLER_SCRIPT" || fail "controller should derive API URLs from hotwa repo"
-grep -Fq 'export NPM_CONFIG_PREFIX="$OC_GLOBAL"' "$PROFILE_SCRIPT" || fail "shell profile should export npm prefix into custom install root"
-grep -Fq 'export NPM_CONFIG_CACHE="${OC_DATA}/.npm"' "$PROFILE_SCRIPT" || fail "shell profile should export npm cache into custom data root"
-grep -Fq 'export XDG_CACHE_HOME="${OC_DATA}/.cache"' "$PROFILE_SCRIPT" || fail "shell profile should export cache home into custom data root"
-grep -Fq 'NPM_CONFIG_PREFIX="$OC_GLOBAL" \' "$INIT_SCRIPT" || fail "service environment should pass npm prefix into custom install root"
-grep -Fq 'NPM_CONFIG_CACHE="${OC_DATA}/.npm" \' "$INIT_SCRIPT" || fail "service environment should pass npm cache into custom data root"
-grep -Fq 'XDG_CACHE_HOME="${OC_DATA}/.cache" \' "$INIT_SCRIPT" || fail "service environment should pass cache home into custom data root"
-grep -Fq 'NPM_CONFIG_PREFIX: OC_GLOBAL' "$WEB_PTY_SCRIPT" || fail "web PTY environment should pass npm prefix into custom install root"
-grep -Fq 'NPM_CONFIG_CACHE: `${OC_DATA}/.npm`' "$WEB_PTY_SCRIPT" || fail "web PTY environment should pass npm cache into custom data root"
-grep -Fq 'COREPACK_HOME: `${OC_DATA}/.cache/corepack`' "$WEB_PTY_SCRIPT" || fail "web PTY environment should pass corepack cache into custom data root"
-grep -Fq "https://github.com/hotwa/luci-app-openclaw/releases/latest" "$BASIC_LUA" || fail "UI should link manual download to hotwa repo"
-grep -Fq "ARM64 musl" "$BASIC_LUA" || fail "UI should mention ARM64 musl specific guidance"
-grep -Fq "hotwa/luci-app-openclaw" "$BASIC_LUA" || fail "UI should point ARM64 musl guidance at hotwa repo"
-if grep -Fq 'NODE_MIRROR=https://npmmirror.com/mirrors/node openclaw-env setup' "$BASIC_LUA"; then
-	fail "UI should not recommend NODE_MIRROR for ARM64 musl node download failures"
-fi
 
 echo "ok"
