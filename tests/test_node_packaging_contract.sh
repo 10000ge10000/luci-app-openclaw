@@ -33,6 +33,10 @@ fi
 grep -Fq 'openclaw-paths.sh' "$MAKEFILE" || fail "package makefile should install path helper"
 grep -Fq 'openclaw-node.sh' "$MAKEFILE" || fail "package makefile should install node helper"
 grep -Fq 'openclaw/paths.lua' "$MAKEFILE" || fail "package makefile should install Lua path helper"
+grep -Fq '+libstdcpp' "$MAKEFILE" || fail "package makefile should depend on libstdcpp"
+if grep -Fq 'libstdcpp6' "$MAKEFILE" "$BUILD_IPK" "$BUILD_RUN"; then
+	fail "packaging metadata should not reference libstdcpp6"
+fi
 grep -Fq 'openclaw-paths.sh' "$BUILD_IPK" || fail "ipk builder should package path helper"
 grep -Fq 'openclaw-node.sh' "$BUILD_IPK" || fail "ipk builder should package node helper"
 grep -Fq 'openclaw/paths.lua' "$BUILD_IPK" || fail "ipk builder should package Lua path helper"
