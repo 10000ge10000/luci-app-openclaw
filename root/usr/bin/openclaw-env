@@ -12,10 +12,11 @@
 set -e
 
 . /usr/libexec/openclaw-paths.sh
+. /usr/libexec/openclaw-node.sh
 
-# ── Node.js 版本策略 (双版本兼容) ──
+# ── Node.js 版本策略 ──
 # V2: 当前推荐版本，用于 OpenClaw v2026.3.11+ (要求 >= 22.16.0)
-# V1: 旧版兼容，用于 OpenClaw v2026.3.8 及更早版本
+# V1: 保留给显式指定旧版环境时使用，不再作为 V2 的自动回退
 NODE_VERSION_V2="22.16.0"
 NODE_VERSION_V1="22.15.1"
 # 默认使用 V2 版本 (可通过 NODE_VERSION 环境变量覆盖)
@@ -148,23 +149,23 @@ download_node() {
 	# 如果已存在且版本兼容, 跳过
 	if [ -x "$NODE_BIN" ]; then
 		local current_ver
-		current_ver=$("$NODE_BIN" --version 2>/dev/null | sed 's/^v//')
-		if [ "$current_ver" = "$node_ver" ]; then
+		current_ver=$(oc_read_node_version "$NODE_BIN" || true)
+		if [ -n "$current_ver" ] && [ "$current_ver" = "$node_ver" ]; then
 			log_info "Node.js v${node_ver} 已安装, 跳过下载"
 			return 0
 		fi
-		# ARM64 musl 使用 Alpine 打包，版本号可能不完全匹配
-		# 只要主版本号相同即认为兼容 (如 22.15.1 vs 22.15.0)
-		local cur_major=$(echo "$current_ver" | cut -d. -f1)
-		local want_major=$(echo "$node_ver" | cut -d. -f1)
-		if [ "$cur_major" = "$want_major" ]; then
-			log_info "Node.js v${current_ver} 已安装 (兼容 v${node_ver}), 跳过下载"
+		if [ -n "$current_ver" ] && oc_node_version_ge "$current_ver" "$node_ver"; then
+			log_info "Node.js v${current_ver} 已安装 (满足 >= v${node_ver}), 跳过下载"
 			return 0
 		fi
-		log_warn "当前 Node.js v${current_ver}, 将更新到 v${node_ver}"
+		if [ -n "$current_ver" ]; then
+			log_warn "当前 Node.js v${current_ver} 低于要求 v${node_ver}, 将更新"
+		else
+			log_warn "检测到现有 Node.js 文件但无法运行，将重新安装"
+		fi
 	fi
 
-	# ── 构建下载 URL 列表 (按优先级排列，支持双版本回退) ──
+	# ── 构建下载 URL 列表 (按优先级排列) ──
 	local mirror_list=""
 	local musl_tarball="node-v${node_ver}-${node_arch}-musl.tar.xz"
 	local glibc_tarball="node-v${node_ver}-${node_arch}.tar.xz"
@@ -179,11 +180,6 @@ download_node() {
 			mirror_list="${NODE_SELF_HOST}/${musl_tarball}"
 			# 2) unofficial-builds (留作将来可能支持)
 			mirror_list="$mirror_list ${NODE_MUSL_MIRROR}/v${node_ver}/${musl_tarball}"
-			# 3) 回退到 V1 版本 (兼容旧环境，仅当请求 V2 时)
-			if [ "$node_ver" = "$NODE_VERSION_V2" ]; then
-				local v1_tarball="node-v${NODE_VERSION_V1}-${node_arch}-musl.tar.xz"
-				mirror_list="$mirror_list ${NODE_SELF_HOST}/${v1_tarball}"
-			fi
 		else
 			# x64 musl: unofficial-builds 提供
 			# 1) unofficial-builds
@@ -262,14 +258,18 @@ download_node() {
 	rm -f "$tmp_file"
 
 	# 验证
-	if [ -x "$NODE_BIN" ]; then
-		local installed_ver
-		installed_ver=$("$NODE_BIN" --version 2>/dev/null || echo "unknown")
+	local installed_ver
+	installed_ver=$(oc_read_node_version "$NODE_BIN" || true)
+	if [ -n "$installed_ver" ] && oc_node_version_ge "$installed_ver" "$node_ver"; then
 		log_info "Node.js ${installed_ver} 安装成功"
+		return 0
+	fi
+	if [ -n "$installed_ver" ]; then
+		log_error "Node.js 版本过低: v${installed_ver} < v${node_ver}"
 	else
 		log_error "Node.js 安装验证失败"
-		exit 1
 	fi
+	exit 1
 }
 
 install_pnpm() {
@@ -410,9 +410,11 @@ init_openclaw() {
 
 do_setup() {
 	local node_ver="$NODE_VERSION"
+	local installed_node_ver=""
+	installed_node_ver=$(oc_read_node_version "$NODE_BIN" || true)
 
 	# 检查是否已安装
-	if [ -x "$NODE_BIN" ] && [ -n "$(find_oc_entry)" ]; then
+	if [ -n "$installed_node_ver" ] && [ -n "$(find_oc_entry)" ]; then
 		local oc_ver=""
 		local oc_entry="$(find_oc_entry)"
 		local oc_pkg_dir="$(dirname "$oc_entry")"
@@ -422,7 +424,7 @@ do_setup() {
 		echo "║          ⚠️  OpenClaw 运行环境已安装，无需重复安装          ║"
 		echo "╚══════════════════════════════════════════════════════════════╝"
 		echo ""
-		echo "  Node.js:    $($NODE_BIN --version 2>/dev/null)"
+		echo "  Node.js:    v${installed_node_ver}"
 		[ -n "$oc_ver" ] && echo "  OpenClaw:   v${oc_ver}"
 		echo ""
 		echo "  如需升级，请使用: openclaw-env upgrade"
@@ -465,8 +467,10 @@ do_check() {
 	echo ""
 
 	# Node.js
-	if [ -x "$NODE_BIN" ]; then
-		echo "  Node.js:  $($NODE_BIN --version 2>/dev/null)"
+	local installed_node_ver=""
+	installed_node_ver=$(oc_read_node_version "$NODE_BIN" || true)
+	if [ -n "$installed_node_ver" ]; then
+		echo "  Node.js:  v${installed_node_ver}"
 	else
 		echo "  Node.js:  未安装"
 	fi
@@ -511,7 +515,9 @@ do_upgrade() {
 	echo "╚══════════════════════════════════════════════════════════════╝"
 	echo ""
 
-	if [ ! -x "$NODE_BIN" ]; then
+	local installed_node_ver=""
+	installed_node_ver=$(oc_read_node_version "$NODE_BIN" || true)
+	if [ -z "$installed_node_ver" ]; then
 		log_error "Node.js 未安装, 请先运行: openclaw-env setup"
 		exit 1
 	fi
@@ -526,7 +532,7 @@ do_upgrade() {
 			current_ver=$("$NODE_BIN" -e "try{console.log(require('$oc_pkg_dir/package.json').version)}catch(e){}" 2>/dev/null) || true
 	fi
 
-	echo "  Node.js:     $($NODE_BIN --version 2>/dev/null)"
+	echo "  Node.js:     v${installed_node_ver}"
 	[ -n "$current_ver" ] && echo "  当前版本:    v${current_ver}"
 	echo ""
 
@@ -643,7 +649,9 @@ do_setup_offline() {
 	fi
 
 	# 检查是否已安装
-	if [ -x "$NODE_BIN" ] && [ -n "$(find_oc_entry)" ]; then
+	local installed_node_ver=""
+	installed_node_ver=$(oc_read_node_version "$NODE_BIN" || true)
+	if [ -n "$installed_node_ver" ] && [ -n "$(find_oc_entry)" ]; then
 		log_warn "OpenClaw 运行环境已安装"
 		log_warn "如需重新离线安装，请先卸载现有环境"
 		exit 0
@@ -680,8 +688,10 @@ do_setup_offline() {
 			rm -rf "$tmp_extract"
 		fi
 
-		if [ -x "$NODE_BIN" ]; then
-			log_info "Node.js $($NODE_BIN --version 2>/dev/null) 安装成功"
+		local offline_node_ver=""
+		offline_node_ver=$(oc_read_node_version "$NODE_BIN" || true)
+		if [ -n "$offline_node_ver" ]; then
+			log_info "Node.js v${offline_node_ver} 安装成功"
 		else
 			log_error "Node.js 安装失败"
 			exit 1
