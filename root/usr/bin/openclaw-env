@@ -307,6 +307,22 @@ download_node() {
 		log_info "Node.js ${installed_ver} 安装成功"
 		return 0
 	fi
+
+	if [ "$libc_type" = "musl" ] && [ "$node_arch" = "linux-arm64" ] && \
+		[ "$OPENCLAW_INSTALL_ROOT" != "/opt" ] && oc_node_requires_opt_compat "$NODE_BIN"; then
+		log_warn "检测到旧版 ARM64 musl Node.js 资产，尝试创建 /opt 兼容链接"
+		if oc_ensure_opt_compat_link "$OC_ROOT"; then
+			installed_ver=$(oc_read_node_version "$NODE_BIN" || true)
+			if [ -n "$installed_ver" ] && oc_node_version_ge "$installed_ver" "$node_ver"; then
+				log_warn "已启用兼容链接: /opt/openclaw -> ${OC_ROOT}"
+				log_info "Node.js ${installed_ver} 安装成功"
+				return 0
+			fi
+		else
+			log_warn "无法创建 /opt/openclaw 兼容链接，请检查该路径是否已被其他安装占用"
+		fi
+	fi
+
 	if [ -n "$installed_ver" ]; then
 		log_error "Node.js 版本过低: v${installed_ver} < v${node_ver}"
 	else

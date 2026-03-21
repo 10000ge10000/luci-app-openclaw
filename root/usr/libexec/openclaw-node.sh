@@ -1,6 +1,8 @@
 #!/bin/sh
 # Shared OpenClaw Node.js runtime/version helpers.
 
+OPENCLAW_LEGACY_ARM64_MUSL_INTERPRETER="${OPENCLAW_LEGACY_ARM64_MUSL_INTERPRETER:-/opt/openclaw/node/lib/ld-musl-aarch64.so.1}"
+
 oc_normalize_node_version() {
 	local version="${1:-}"
 	local old_ifs
@@ -65,6 +67,15 @@ oc_read_node_version() {
 
 	version=$("$node_bin" --version 2>/dev/null) || return 1
 	oc_normalize_node_version "$version"
+}
+
+oc_node_requires_opt_compat() {
+	local node_bin="${1:-}"
+
+	[ -n "$node_bin" ] || return 1
+	[ -f "$node_bin" ] || return 1
+
+	grep -aqF "$OPENCLAW_LEGACY_ARM64_MUSL_INTERPRETER" "$node_bin"
 }
 
 oc_select_node_release_asset_url() {

@@ -51,6 +51,17 @@ if oc_read_node_version "$tmpdir/node-bad" >/dev/null 2>&1; then
 	fail "broken node binary should not be accepted"
 fi
 
+cat > "$tmpdir/node-legacy-opt" <<'EOF'
+#!/bin/sh
+/opt/openclaw/node/lib/ld-musl-aarch64.so.1
+EOF
+chmod +x "$tmpdir/node-legacy-opt"
+
+oc_node_requires_opt_compat "$tmpdir/node-legacy-opt" || fail "legacy opt-bound node binary should be detected"
+if oc_node_requires_opt_compat "$tmpdir/node-ok" >/dev/null 2>&1; then
+	fail "modern runnable node helper should not require opt compatibility"
+fi
+
 cat > "$tmpdir/node-bins-release.json" <<'EOF'
 {
   "tag_name": "node-bins",

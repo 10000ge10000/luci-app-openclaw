@@ -27,4 +27,22 @@ trap 'rm -rf "$tmpdir"' EXIT INT TERM
 existing=$(oc_find_existing_path "$tmpdir/missing/nested")
 [ "$existing" = "$tmpdir" ] || fail "nearest existing path"
 
+export OPENCLAW_OPT_COMPAT_ROOT="$tmpdir/compat-opt"
+target_root="$tmpdir/install-root/openclaw"
+mkdir -p "$target_root"
+
+oc_ensure_opt_compat_link "$target_root" || fail "compat symlink should be created for custom install root"
+[ -L "$OPENCLAW_OPT_COMPAT_ROOT/openclaw" ] || fail "compat symlink should exist"
+[ "$(readlink "$OPENCLAW_OPT_COMPAT_ROOT/openclaw")" = "$target_root" ] || fail "compat symlink should point to install root"
+
+oc_ensure_opt_compat_link "$target_root" || fail "compat symlink should be idempotent"
+
+conflict_root="$tmpdir/conflict-openclaw"
+mkdir -p "$conflict_root"
+rm -f "$OPENCLAW_OPT_COMPAT_ROOT/openclaw"
+ln -s "$conflict_root" "$OPENCLAW_OPT_COMPAT_ROOT/openclaw"
+if oc_ensure_opt_compat_link "$target_root" >/dev/null 2>&1; then
+	fail "compat symlink should fail when pointing at another install root"
+fi
+
 echo "ok"

@@ -2,6 +2,7 @@
 # Shared OpenClaw install-root and derived-path helpers.
 
 OPENCLAW_DEFAULT_INSTALL_ROOT="${OPENCLAW_DEFAULT_INSTALL_ROOT:-/opt}"
+OPENCLAW_OPT_COMPAT_ROOT="${OPENCLAW_OPT_COMPAT_ROOT:-/opt}"
 
 oc_normalize_install_root() {
 	local path="$1"
@@ -66,6 +67,30 @@ oc_install_root_uses_opt_workaround() {
 	[ "$(oc_normalize_install_root "${1:-$OPENCLAW_INSTALL_ROOT}")" = "/opt" ]
 }
 
+oc_ensure_opt_compat_link() {
+	local target_root="$1"
+	local compat_root compat_link current_target
+
+	target_root="$(oc_normalize_install_root "$target_root")"
+	[ "$target_root" = "/opt" ] && return 0
+
+	compat_root="$(oc_normalize_install_root "$OPENCLAW_OPT_COMPAT_ROOT")"
+	compat_link="${compat_root}/openclaw"
+
+	if [ -L "$compat_link" ]; then
+		current_target="$(readlink "$compat_link" 2>/dev/null || true)"
+		[ "$current_target" = "$target_root" ] && return 0
+		return 1
+	fi
+
+	if [ -e "$compat_link" ]; then
+		return 1
+	fi
+
+	mkdir -p "$compat_root"
+	ln -s "$target_root" "$compat_link"
+}
+
 oc_print_env() {
 	oc_load_paths "$1"
 	cat <<EOF
@@ -74,5 +99,6 @@ OC_ROOT=$OC_ROOT
 NODE_BASE=$NODE_BASE
 OC_GLOBAL=$OC_GLOBAL
 OC_DATA=$OC_DATA
+OPENCLAW_OPT_COMPAT_ROOT=$OPENCLAW_OPT_COMPAT_ROOT
 EOF
 }

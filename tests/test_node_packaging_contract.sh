@@ -36,6 +36,8 @@ grep -Fq 'OPENCLAW_NODE_BINS_REPO="${OPENCLAW_NODE_BINS_REPO:-hotwa/luci-app-ope
 grep -Fq 'NODE_SELF_HOST="${NODE_SELF_HOST:-https://github.com/${OPENCLAW_NODE_BINS_REPO}/releases/download/node-bins}"' "$ENV_SCRIPT" || fail "installer should derive node-bins release URL from hotwa repo"
 grep -Fq 'NODE_RELEASE_API="${NODE_RELEASE_API:-https://api.github.com/repos/${OPENCLAW_NODE_BINS_REPO}/releases/tags/node-bins}"' "$ENV_SCRIPT" || fail "installer should derive node-bins release API from hotwa repo"
 grep -Fq 'oc_select_node_release_asset_url' "$ENV_SCRIPT" || fail "installer should dynamically select ARM64 musl asset"
+grep -Fq 'oc_node_requires_opt_compat "$NODE_BIN"' "$ENV_SCRIPT" || fail "installer should detect legacy opt-bound ARM64 musl node assets"
+grep -Fq 'oc_ensure_opt_compat_link "$OC_ROOT"' "$ENV_SCRIPT" || fail "installer should create /opt compatibility symlink for legacy assets"
 grep -Fq 'arm64_musl_url=$(resolve_arm64_musl_node_url "$node_ver") || exit 1' "$ENV_SCRIPT" || fail "installer should resolve ARM64 musl asset dynamically"
 if grep -Fq 'mirror_list="${NODE_SELF_HOST}/${musl_tarball}"' "$ENV_SCRIPT"; then
 	fail "installer should not hardcode exact ARM64 musl asset path"
