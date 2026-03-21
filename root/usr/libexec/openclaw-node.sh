@@ -66,3 +66,53 @@ oc_read_node_version() {
 	version=$("$node_bin" --version 2>/dev/null) || return 1
 	oc_normalize_node_version "$version"
 }
+
+oc_select_node_release_asset_url() {
+	local json_file="${1:-}"
+	local node_arch="${2:-}"
+	local min_version="${3:-}"
+	local asset_regex=""
+	local urls=""
+	local best_url=""
+	local best_version=""
+	local url=""
+	local asset_name=""
+	local asset_version=""
+
+	[ -n "$json_file" ] || return 1
+	[ -f "$json_file" ] || return 1
+	oc_normalize_node_version "$min_version" >/dev/null || return 1
+
+	case "$node_arch" in
+		linux-arm64|linux-x64) ;;
+		*) return 1 ;;
+	esac
+
+	asset_regex="node-v[0-9][0-9.]*-${node_arch}-musl\\.tar\\.xz"
+	urls=$(
+		tr -d '\r' < "$json_file" | \
+		grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*${asset_regex}\"" | \
+		sed 's/^"browser_download_url"[[:space:]]*:[[:space:]]*"//; s/"$//'
+	) || true
+
+	[ -n "$urls" ] || return 1
+
+	while IFS= read -r url; do
+		[ -n "$url" ] || continue
+		asset_name="${url##*/}"
+		asset_version=$(printf '%s\n' "$asset_name" | sed -n "s/^node-v\\([0-9][0-9.]*\\)-${node_arch}-musl\\.tar\\.xz$/\\1/p")
+		asset_version=$(oc_normalize_node_version "$asset_version" 2>/dev/null || true)
+		[ -n "$asset_version" ] || continue
+		if oc_node_version_ge "$asset_version" "$min_version"; then
+			if [ -z "$best_version" ] || oc_node_version_ge "$asset_version" "$best_version"; then
+				best_version="$asset_version"
+				best_url="$url"
+			fi
+		fi
+	done <<EOF
+$urls
+EOF
+
+	[ -n "$best_url" ] || return 1
+	printf '%s\n' "$best_url"
+}

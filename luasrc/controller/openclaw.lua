@@ -4,6 +4,9 @@ module("luci.controller.openclaw", package.seeall)
 local nixio_fs = require "nixio.fs"
 local util = require "luci.util"
 local oc_paths = require "openclaw.paths"
+local GITHUB_REPO = "hotwa/luci-app-openclaw"
+local GITHUB_RELEASES_URL = "https://github.com/" .. GITHUB_REPO .. "/releases"
+local GITHUB_API_RELEASES_URL = "https://api.github.com/repos/" .. GITHUB_REPO .. "/releases"
 
 local function get_install_root_from_uci()
 	return require("luci.model.uci").cursor():get("openclaw", "main", "install_root")
@@ -448,7 +451,7 @@ function action_check_update()
 	local plugin_has_update = false
 
 	-- 使用 GitHub API 获取最新 release (tag + body)
-	local gh_json = sys.exec("curl -sf --connect-timeout 5 --max-time 10 'https://api.github.com/repos/10000ge10000/luci-app-openclaw/releases/latest' 2>/dev/null")
+	local gh_json = sys.exec("curl -sf --connect-timeout 5 --max-time 10 '" .. GITHUB_API_RELEASES_URL .. "/latest' 2>/dev/null")
 	if gh_json and gh_json ~= "" then
 		-- 提取 tag_name
 		local tag = gh_json:match('"tag_name"%s*:%s*"([^"]+)"')
@@ -551,7 +554,7 @@ function action_plugin_upgrade()
 	sys.exec("rm -f /tmp/openclaw-plugin-upgrade.log /tmp/openclaw-plugin-upgrade.pid /tmp/openclaw-plugin-upgrade.exit")
 
 	-- 后台执行: 下载 .run 并执行安装
-	local run_url = "https://github.com/10000ge10000/luci-app-openclaw/releases/download/v" .. version .. "/luci-app-openclaw_" .. version .. ".run"
+	local run_url = GITHUB_RELEASES_URL .. "/download/v" .. version .. "/luci-app-openclaw_" .. version .. ".run"
 	-- 使用 curl 下载 (-L 跟随重定向), 然后 sh 执行
 	sys.exec(string.format(
 		"( echo '正在下载插件 v%s ...' > /tmp/openclaw-plugin-upgrade.log; " ..

@@ -51,4 +51,31 @@ if oc_read_node_version "$tmpdir/node-bad" >/dev/null 2>&1; then
 	fail "broken node binary should not be accepted"
 fi
 
+cat > "$tmpdir/node-bins-release.json" <<'EOF'
+{
+  "tag_name": "node-bins",
+  "assets": [
+    {
+      "name": "node-v22.15.1-linux-arm64-musl.tar.xz",
+      "browser_download_url": "https://github.com/hotwa/luci-app-openclaw/releases/download/node-bins/node-v22.15.1-linux-arm64-musl.tar.xz"
+    },
+    {
+      "name": "node-v23.2.0-linux-arm64-musl.tar.xz",
+      "browser_download_url": "https://github.com/hotwa/luci-app-openclaw/releases/download/node-bins/node-v23.2.0-linux-arm64-musl.tar.xz"
+    },
+    {
+      "name": "node-v22.16.0-linux-x64-musl.tar.xz",
+      "browser_download_url": "https://github.com/hotwa/luci-app-openclaw/releases/download/node-bins/node-v22.16.0-linux-x64-musl.tar.xz"
+    }
+  ]
+}
+EOF
+
+selected_url=$(oc_select_node_release_asset_url "$tmpdir/node-bins-release.json" "linux-arm64" "22.16.0") || fail "select compatible ARM64 musl asset"
+[ "$selected_url" = "https://github.com/hotwa/luci-app-openclaw/releases/download/node-bins/node-v23.2.0-linux-arm64-musl.tar.xz" ] || fail "selected asset should be newest compatible ARM64 musl release"
+
+if oc_select_node_release_asset_url "$tmpdir/node-bins-release.json" "linux-arm64" "24.0.0" >/dev/null 2>&1; then
+	fail "asset selection should fail when no compatible version exists"
+fi
+
 echo "ok"
