@@ -253,7 +253,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}'
 	-- ARM64 musl 专属下载问题
 	html[#html+1] = 'if(ll.indexOf("arm64 musl")>=0&&(ll.indexOf("release api")>=0||ll.indexOf("node-bins")>=0||ll.indexOf("未找到兼容的 arm64 musl node.js 资产")>=0||ll.indexOf("无法获取 arm64 musl node.js 发布元数据")>=0)){'
-	html[#html+1] = 'reasons.push("🧩 <b>ARM64 musl Node.js 资产不可用</b> — 当前设备依赖仓库发布的 <code>node-bins</code> 资产，而不是通用 Node 镜像。<br/>&nbsp;&nbsp;💡 解决: 检查 <code>10000ge10000/luci-app-openclaw</code> 的 <code>node-bins</code> release 是否存在满足 <code>>=22.16.0</code> 的 <code>linux-arm64-musl</code> 资产，并确认路由器可访问 GitHub API 与 release 页面。");'
+	html[#html+1] = 'reasons.push("🧩 <b>ARM64 musl Node.js 资产不可用</b> — 当前设备依赖仓库发布的 <code>node-bins</code> 资产，而不是通用 Node 镜像。<br/>&nbsp;&nbsp;💡 解决: 检查 <code>hotwa/luci-app-openclaw</code> 的 <code>node-bins</code> release 是否存在满足 <code>>=22.16.0</code> 的 <code>linux-arm64-musl</code> 资产，并确认路由器可访问 GitHub API 与 release 页面。");'
 	html[#html+1] = '}'
 	-- 通用网络问题
 	html[#html+1] = 'if((ll.indexOf("could not resolve")>=0||ll.indexOf("connection timed out")>=0||ll.indexOf("curl")>=0&&ll.indexOf("fail")>=0||ll.indexOf("wget")>=0&&ll.indexOf("fail")>=0||ll.indexOf("所有镜像均下载失败")>=0)&&!(ll.indexOf("arm64 musl")>=0&&(ll.indexOf("release api")>=0||ll.indexOf("node-bins")>=0||ll.indexOf("未找到兼容的 arm64 musl node.js 资产")>=0||ll.indexOf("无法获取 arm64 musl node.js 发布元数据")>=0))){'

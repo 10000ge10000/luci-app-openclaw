@@ -55,7 +55,7 @@ PNPM_BIN="${OC_GLOBAL}/bin/pnpm"
 
 # Node.js 下载源
 OPENCLAW_GITHUB_REPO="${OPENCLAW_GITHUB_REPO:-hotwa/luci-app-openclaw}"
-OPENCLAW_NODE_BINS_REPO="${OPENCLAW_NODE_BINS_REPO:-10000ge10000/luci-app-openclaw}"
+OPENCLAW_NODE_BINS_REPO="${OPENCLAW_NODE_BINS_REPO:-hotwa/luci-app-openclaw}"
 NODE_MIRROR="${NODE_MIRROR:-https://nodejs.org/dist}"
 NODE_MIRROR_CN="https://npmmirror.com/mirrors/node"
 NODE_MUSL_MIRROR="https://unofficial-builds.nodejs.org/download/release"
