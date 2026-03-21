@@ -55,12 +55,13 @@ PNPM_BIN="${OC_GLOBAL}/bin/pnpm"
 
 # Node.js 下载源
 OPENCLAW_GITHUB_REPO="${OPENCLAW_GITHUB_REPO:-hotwa/luci-app-openclaw}"
+OPENCLAW_NODE_BINS_REPO="${OPENCLAW_NODE_BINS_REPO:-10000ge10000/luci-app-openclaw}"
 NODE_MIRROR="${NODE_MIRROR:-https://nodejs.org/dist}"
 NODE_MIRROR_CN="https://npmmirror.com/mirrors/node"
 NODE_MUSL_MIRROR="https://unofficial-builds.nodejs.org/download/release"
-NODE_SELF_HOST="${NODE_SELF_HOST:-https://github.com/${OPENCLAW_GITHUB_REPO}/releases/download/node-bins}"
-NODE_RELEASE_API="${NODE_RELEASE_API:-https://api.github.com/repos/${OPENCLAW_GITHUB_REPO}/releases/tags/node-bins}"
-NODE_RELEASE_PAGE="${NODE_RELEASE_PAGE:-https://github.com/${OPENCLAW_GITHUB_REPO}/releases/tag/node-bins}"
+NODE_SELF_HOST="${NODE_SELF_HOST:-https://github.com/${OPENCLAW_NODE_BINS_REPO}/releases/download/node-bins}"
+NODE_RELEASE_API="${NODE_RELEASE_API:-https://api.github.com/repos/${OPENCLAW_NODE_BINS_REPO}/releases/tags/node-bins}"
+NODE_RELEASE_PAGE="${NODE_RELEASE_PAGE:-https://github.com/${OPENCLAW_NODE_BINS_REPO}/releases/tag/node-bins}"
 
 export PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:$PATH"
 export NODE_ICU_DATA="${NODE_BASE}/share/icu"
@@ -86,7 +87,7 @@ resolve_arm64_musl_node_url() {
 	if ! download_url_to_file "$NODE_RELEASE_API" "$release_json"; then
 		rm -f "$release_json"
 		log_error "无法获取 ARM64 musl Node.js 发布元数据" >&2
-		echo "    仓库: ${OPENCLAW_GITHUB_REPO}" >&2
+		echo "    仓库: ${OPENCLAW_NODE_BINS_REPO}" >&2
 		echo "    最低要求: v${node_ver}" >&2
 		echo "    Release API: ${NODE_RELEASE_API}" >&2
 		echo "    Release 页面: ${NODE_RELEASE_PAGE}" >&2
@@ -103,7 +104,7 @@ resolve_arm64_musl_node_url() {
 	fi
 
 	log_error "未找到兼容的 ARM64 musl Node.js 资产" >&2
-	echo "    仓库: ${OPENCLAW_GITHUB_REPO}" >&2
+	echo "    仓库: ${OPENCLAW_NODE_BINS_REPO}" >&2
 	echo "    最低要求: v${node_ver}" >&2
 	echo "    Release API: ${NODE_RELEASE_API}" >&2
 	echo "    Release 页面: ${NODE_RELEASE_PAGE}" >&2
