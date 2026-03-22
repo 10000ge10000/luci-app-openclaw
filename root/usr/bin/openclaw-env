@@ -15,9 +15,9 @@ set -e
 . /usr/libexec/openclaw-node.sh
 
 # ── Node.js 版本策略 ──
-# V2: 当前推荐版本，用于 OpenClaw v2026.3.11+ (要求 >= 22.16.0)
+# V2: 当前推荐版本，用于 OpenClaw v2026.3.11+ (默认下载 23.2.0，满足 >= 22.16.0)
 # V1: 保留给显式指定旧版环境时使用，不再作为 V2 的自动回退
-NODE_VERSION_V2="22.16.0"
+NODE_VERSION_V2="23.2.0"
 NODE_VERSION_V1="22.15.1"
 # 默认使用 V2 版本 (可通过 NODE_VERSION 环境变量覆盖)
 NODE_VERSION="${NODE_VERSION:-${NODE_VERSION_V2}}"
@@ -60,8 +60,11 @@ NODE_MIRROR="${NODE_MIRROR:-https://nodejs.org/dist}"
 NODE_MIRROR_CN="https://npmmirror.com/mirrors/node"
 NODE_MUSL_MIRROR="https://unofficial-builds.nodejs.org/download/release"
 NODE_SELF_HOST="${NODE_SELF_HOST:-https://github.com/${OPENCLAW_NODE_BINS_REPO}/releases/download/node-bins}"
+NODE_SELF_HOST_FALLBACK="${NODE_SELF_HOST_FALLBACK:-https://gitea.jmsu.top/lingyuzeng/luci-app-openclaw/releases/download/node-bins}"
 NODE_RELEASE_API="${NODE_RELEASE_API:-https://api.github.com/repos/${OPENCLAW_NODE_BINS_REPO}/releases/tags/node-bins}"
+NODE_RELEASE_API_FALLBACK="${NODE_RELEASE_API_FALLBACK:-https://gitea.jmsu.top/api/v1/repos/lingyuzeng/luci-app-openclaw/releases/tags/node-bins}"
 NODE_RELEASE_PAGE="${NODE_RELEASE_PAGE:-https://github.com/${OPENCLAW_NODE_BINS_REPO}/releases/tag/node-bins}"
+NODE_RELEASE_PAGE_FALLBACK="${NODE_RELEASE_PAGE_FALLBACK:-https://gitea.jmsu.top/lingyuzeng/luci-app-openclaw/releases/tag/node-bins}"
 
 export PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:$PATH"
 export NODE_ICU_DATA="${NODE_BASE}/share/icu"
@@ -82,32 +85,36 @@ resolve_arm64_musl_node_url() {
 	local node_ver="$1"
 	local release_json="/tmp/openclaw-node-bins-release.json"
 	local asset_url=""
+	local release_api=""
 
-	echo "  正在从 ${NODE_RELEASE_API} 获取 ARM64 musl 版本列表..." >&2
-	if ! download_url_to_file "$NODE_RELEASE_API" "$release_json"; then
+	for release_api in "$NODE_RELEASE_API" "$NODE_RELEASE_API_FALLBACK"; do
+		[ -n "$release_api" ] || continue
+		echo "  正在从 ${release_api} 获取 ARM64 musl 版本列表..." >&2
+		if ! download_url_to_file "$release_api" "$release_json"; then
+			rm -f "$release_json"
+			continue
+		fi
+
+		asset_url=$(oc_select_node_release_asset_url "$release_json" "linux-arm64" "$node_ver" || true)
 		rm -f "$release_json"
-		log_error "无法获取 ARM64 musl Node.js 发布元数据" >&2
-		echo "    仓库: ${OPENCLAW_NODE_BINS_REPO}" >&2
-		echo "    最低要求: v${node_ver}" >&2
-		echo "    Release API: ${NODE_RELEASE_API}" >&2
-		echo "    Release 页面: ${NODE_RELEASE_PAGE}" >&2
-		echo "    请先发布 node-bins 中满足要求的 ARM64 musl 资产，或通过环境变量覆盖下载源" >&2
-		return 1
-	fi
 
-	asset_url=$(oc_select_node_release_asset_url "$release_json" "linux-arm64" "$node_ver" || true)
-	rm -f "$release_json"
-
-	if [ -n "$asset_url" ]; then
-		printf '%s\n' "$asset_url"
-		return 0
-	fi
+		if [ -n "$asset_url" ]; then
+			printf '%s\n' "$asset_url"
+			return 0
+		fi
+	done
 
 	log_error "未找到兼容的 ARM64 musl Node.js 资产" >&2
 	echo "    仓库: ${OPENCLAW_NODE_BINS_REPO}" >&2
 	echo "    最低要求: v${node_ver}" >&2
 	echo "    Release API: ${NODE_RELEASE_API}" >&2
+	if [ -n "$NODE_RELEASE_API_FALLBACK" ] && [ "$NODE_RELEASE_API_FALLBACK" != "$NODE_RELEASE_API" ]; then
+		echo "    Fallback API: ${NODE_RELEASE_API_FALLBACK}" >&2
+	fi
 	echo "    Release 页面: ${NODE_RELEASE_PAGE}" >&2
+	if [ -n "$NODE_RELEASE_PAGE_FALLBACK" ] && [ "$NODE_RELEASE_PAGE_FALLBACK" != "$NODE_RELEASE_PAGE" ]; then
+		echo "    Fallback 页面: ${NODE_RELEASE_PAGE_FALLBACK}" >&2
+	fi
 	echo "    请先发布 node-bins 中满足要求的 ARM64 musl 资产，或通过环境变量覆盖下载源" >&2
 	return 1
 }
@@ -152,16 +159,26 @@ $ver_dir"
 	done
 
 	local d
-	echo "$search_dirs" | while read -r d; do
+	local found=""
+	while IFS= read -r d; do
 		[ -z "$d" ] && continue
 		if [ -f "${d}/openclaw.mjs" ]; then
-			echo "${d}/openclaw.mjs"
-			return
+			found="${d}/openclaw.mjs"
+			break
 		elif [ -f "${d}/dist/cli.js" ]; then
-			echo "${d}/dist/cli.js"
-			return
+			found="${d}/dist/cli.js"
+			break
 		fi
-	done
+	done <<EOF
+$search_dirs
+EOF
+
+	if [ -n "$found" ]; then
+		printf '%s\n' "$found"
+		return 0
+	fi
+
+	return 1
 }
 
 detect_arch() {
@@ -219,11 +236,20 @@ download_node() {
 		echo ""
 		echo "=== 下载 Node.js v${node_ver} (${node_arch}, musl libc) ==="
 
-		if [ "$node_arch" = "linux-arm64" ]; then
-			# ARM64 musl: 从当前维护仓库的 node-bins release 动态选择兼容资产
-			arm64_musl_url=$(resolve_arm64_musl_node_url "$node_ver") || exit 1
-			mirror_list="${arm64_musl_url}"
-		else
+	if [ "$node_arch" = "linux-arm64" ]; then
+		# ARM64 musl: GitHub 直链优先，Gitea 镜像兜底，API 解析作为兼容补充
+		mirror_list="${NODE_SELF_HOST}/${musl_tarball}"
+		if [ -n "$NODE_SELF_HOST_FALLBACK" ] && [ "$NODE_SELF_HOST_FALLBACK" != "$NODE_SELF_HOST" ]; then
+			mirror_list="$mirror_list ${NODE_SELF_HOST_FALLBACK}/${musl_tarball}"
+		fi
+		arm64_musl_url=$(resolve_arm64_musl_node_url "$node_ver" 2>/dev/null || true)
+		if [ -n "$arm64_musl_url" ] && [ "$arm64_musl_url" != "${NODE_SELF_HOST}/${musl_tarball}" ]; then
+			case " $mirror_list " in
+				*" ${arm64_musl_url} "*) ;;
+				*) mirror_list="$mirror_list ${arm64_musl_url}" ;;
+			esac
+		fi
+	else
 			# x64 musl: unofficial-builds 提供
 			# 1) unofficial-builds
 			mirror_list="${NODE_MUSL_MIRROR}/v${node_ver}/${musl_tarball}"

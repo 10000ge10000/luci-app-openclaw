@@ -28,19 +28,27 @@ grep -Fq 'verify_prefix /opt/openclaw/node' "$WORKFLOW" || fail "workflow should
 grep -Fq 'verify_prefix /tmp/custom-openclaw-root/openclaw/node' "$WORKFLOW" || fail "workflow should verify custom install path"
 
 grep -Fq 'oc_node_version_ge "$installed_ver" "$node_ver"' "$ENV_SCRIPT" || fail "installer should enforce minimum node version after extraction"
+grep -Fq 'NODE_VERSION_V2="23.2.0"' "$ENV_SCRIPT" || fail "installer should default V2 to Node.js 23.2.0"
 if grep -Fq 'mirror_list="$mirror_list ${NODE_SELF_HOST}/${v1_tarball}"' "$ENV_SCRIPT"; then
 	fail "installer should not auto-fallback from V2 to V1 tarball"
 fi
 grep -Fq 'OPENCLAW_GITHUB_REPO="${OPENCLAW_GITHUB_REPO:-hotwa/luci-app-openclaw}"' "$ENV_SCRIPT" || fail "installer should keep hotwa as primary app repo"
 grep -Fq 'OPENCLAW_NODE_BINS_REPO="${OPENCLAW_NODE_BINS_REPO:-hotwa/luci-app-openclaw}"' "$ENV_SCRIPT" || fail "installer should default ARM64 musl node-bins to hotwa repo"
 grep -Fq 'NODE_SELF_HOST="${NODE_SELF_HOST:-https://github.com/${OPENCLAW_NODE_BINS_REPO}/releases/download/node-bins}"' "$ENV_SCRIPT" || fail "installer should derive node-bins release URL from hotwa repo"
+grep -Fq 'NODE_SELF_HOST_FALLBACK="${NODE_SELF_HOST_FALLBACK:-https://gitea.jmsu.top/lingyuzeng/luci-app-openclaw/releases/download/node-bins}"' "$ENV_SCRIPT" || fail "installer should define a Gitea mirror fallback for ARM64 musl downloads"
 grep -Fq 'NODE_RELEASE_API="${NODE_RELEASE_API:-https://api.github.com/repos/${OPENCLAW_NODE_BINS_REPO}/releases/tags/node-bins}"' "$ENV_SCRIPT" || fail "installer should derive node-bins release API from hotwa repo"
+grep -Fq 'NODE_RELEASE_API_FALLBACK="${NODE_RELEASE_API_FALLBACK:-https://gitea.jmsu.top/api/v1/repos/lingyuzeng/luci-app-openclaw/releases/tags/node-bins}"' "$ENV_SCRIPT" || fail "installer should define a Gitea release API fallback"
+grep -Fq 'NODE_RELEASE_PAGE_FALLBACK="${NODE_RELEASE_PAGE_FALLBACK:-https://gitea.jmsu.top/lingyuzeng/luci-app-openclaw/releases/tag/node-bins}"' "$ENV_SCRIPT" || fail "installer should define a Gitea release page fallback"
+grep -Fq 'for release_api in "$NODE_RELEASE_API" "$NODE_RELEASE_API_FALLBACK"; do' "$ENV_SCRIPT" || fail "installer should retry ARM64 musl release API using the Gitea mirror"
 grep -Fq 'oc_select_node_release_asset_url' "$ENV_SCRIPT" || fail "installer should dynamically select ARM64 musl asset"
 grep -Fq 'oc_node_requires_opt_compat "$NODE_BIN"' "$ENV_SCRIPT" || fail "installer should detect legacy opt-bound ARM64 musl node assets"
 grep -Fq 'oc_ensure_opt_compat_link "$OC_ROOT"' "$ENV_SCRIPT" || fail "installer should create /opt compatibility symlink for legacy assets"
-grep -Fq 'arm64_musl_url=$(resolve_arm64_musl_node_url "$node_ver") || exit 1' "$ENV_SCRIPT" || fail "installer should resolve ARM64 musl asset dynamically"
-if grep -Fq 'mirror_list="${NODE_SELF_HOST}/${musl_tarball}"' "$ENV_SCRIPT"; then
-	fail "installer should not hardcode exact ARM64 musl asset path"
+grep -Fq 'mirror_list="${NODE_SELF_HOST}/${musl_tarball}"' "$ENV_SCRIPT" || fail "installer should default ARM64 musl downloads to direct release asset URL"
+grep -Fq 'mirror_list="$mirror_list ${NODE_SELF_HOST_FALLBACK}/${musl_tarball}"' "$ENV_SCRIPT" || fail "installer should try the Gitea mirror after GitHub"
+grep -Fq 'arm64_musl_url=$(resolve_arm64_musl_node_url "$node_ver" 2>/dev/null || true)' "$ENV_SCRIPT" || fail "installer should keep API-based ARM64 musl asset discovery as fallback"
+grep -Fq 'while IFS= read -r d; do' "$ENV_SCRIPT" || fail "installer should traverse OpenClaw entry candidates without a pipeline subshell"
+if grep -Fq 'echo "$search_dirs" | while read -r d; do' "$ENV_SCRIPT"; then
+	fail "installer should not rely on a pipeline subshell for OpenClaw entry lookup"
 fi
 
 grep -Fq 'openclaw-paths.sh' "$MAKEFILE" || fail "package makefile should install path helper"
