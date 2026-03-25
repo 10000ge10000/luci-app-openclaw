@@ -28,7 +28,14 @@ grep -Fq 'verify_prefix /opt/openclaw/node' "$WORKFLOW" || fail "workflow should
 grep -Fq 'verify_prefix /tmp/custom-openclaw-root/openclaw/node' "$WORKFLOW" || fail "workflow should verify custom install path"
 
 grep -Fq 'oc_node_version_ge "$installed_ver" "$node_ver"' "$ENV_SCRIPT" || fail "installer should enforce minimum node version after extraction"
-grep -Fq 'NODE_VERSION_V2="23.2.0"' "$ENV_SCRIPT" || fail "installer should default V2 to Node.js 23.2.0"
+grep -Fq 'NODE_VERSION_V2="24.14.1"' "$ENV_SCRIPT" || fail "installer should default V2 to Node.js 24.14.1"
+grep -Fq "description: 'Build V2 (24.14.1) - Current LTS version'" "$WORKFLOW" || fail "workflow should describe V2 as Node.js 24.14.1 LTS"
+grep -Fq 'NODE_VER="24.14.1"' "$WORKFLOW" || fail "workflow should request Node.js 24.14.1 for V2"
+grep -Fq 'Build Node.js V2 ARM64 musl (apk lts mode)' "$WORKFLOW" || fail "workflow should build V2 in apk lts mode"
+grep -Fq 'PKG_TYPE=lts' "$WORKFLOW" || fail "workflow should use Alpine nodejs LTS package for V2"
+grep -Fq 'alpine:edge sh /build-node-musl.sh' "$WORKFLOW" || fail "workflow should build V2 from Alpine edge to get the latest Node.js 24 LTS package"
+grep -Fq 'EXPECTED_ARTIFACT="node-v24.14.1-linux-arm64-musl.tar.xz"' "$WORKFLOW" || fail "workflow should require the exact Node.js 24.14.1 V2 artifact name"
+grep -Fq '`node-v24.14.1-linux-arm64-musl.tar.xz`' "$WORKFLOW" || fail "release notes should mention the Node.js 24.14.1 ARM64 musl tarball"
 if grep -Fq 'mirror_list="$mirror_list ${NODE_SELF_HOST}/${v1_tarball}"' "$ENV_SCRIPT"; then
 	fail "installer should not auto-fallback from V2 to V1 tarball"
 fi

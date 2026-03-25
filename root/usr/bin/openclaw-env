@@ -15,9 +15,9 @@ set -e
 . /usr/libexec/openclaw-node.sh
 
 # ── Node.js 版本策略 ──
-# V2: 当前推荐版本，用于 OpenClaw v2026.3.11+ (默认下载 23.2.0，满足 >= 22.16.0)
+# V2: 当前推荐版本，用于 OpenClaw v2026.3.11+ (默认下载 24.14.1，满足 >= 22.16.0)
 # V1: 保留给显式指定旧版环境时使用，不再作为 V2 的自动回退
-NODE_VERSION_V2="23.2.0"
+NODE_VERSION_V2="24.14.1"
 NODE_VERSION_V1="22.15.1"
 # 默认使用 V2 版本 (可通过 NODE_VERSION 环境变量覆盖)
 NODE_VERSION="${NODE_VERSION:-${NODE_VERSION_V2}}"
