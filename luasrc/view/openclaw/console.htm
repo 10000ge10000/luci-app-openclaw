@@ -51,17 +51,53 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 	box-shadow: 0 1px 4px rgba(0,0,0,0.06);
 }
 
-#oc-console-iframe { width: 100%; height: 700px; border: none; display: block; }
-
 .oc-console-loading {
 	display: flex; flex-direction: column; align-items: center; justify-content: center;
-	height: 300px; color: #666; font-size: 14px; background: #fafafa;
+	min-height: 320px; color: #666; font-size: 14px; background: #fafafa;
+	padding: 32px 24px;
+	text-align: center;
 }
 .oc-console-loading .spinner {
 	width: 32px; height: 32px; border: 3px solid #e0e0e0; border-top: 3px solid #4a90d9;
 	border-radius: 50%; animation: oc-spin .8s linear infinite; margin-bottom: 12px;
 }
 @keyframes oc-spin { to { transform: rotate(360deg); } }
+
+.oc-console-note {
+	max-width: 640px;
+	line-height: 1.8;
+}
+
+.oc-console-note strong {
+	color: #333;
+}
+
+.oc-console-note code {
+	padding: 2px 6px;
+	background: #f0f3f6;
+	border-radius: 4px;
+	font-family: monospace;
+}
+
+.oc-console-actions {
+	display: flex;
+	justify-content: center;
+	gap: 10px;
+	flex-wrap: wrap;
+	margin-top: 16px;
+}
+
+.oc-console-link {
+	font-size: 12px;
+	color: #666;
+	word-break: break-all;
+	margin-top: 14px;
+}
+
+.oc-console-link a {
+	color: #4a90d9;
+	text-decoration: none;
+}
 </style>
 
 <div class="oc-page-header">
@@ -107,11 +143,26 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 	var openBtn = document.getElementById('oc-console-open-btn');
 
 	function getConsoleUrl() {
-		var proto = window.location.protocol;
 		var host = window.location.hostname;
-		var url = proto + '//' + host + ':' + gwPort + '/';
+		var url = 'http://' + host + ':' + gwPort + '/';
 		if (gwToken) url += '#token=' + encodeURIComponent(gwToken);
 		return url;
+	}
+
+	function showOpenMessage(url) {
+		loading.innerHTML =
+			'<div class="oc-console-note">' +
+				'<div style="font-size:42px;margin-bottom:12px;">🪟</div>' +
+				'<div style="font-size:16px;margin-bottom:8px;"><strong>请在新窗口中打开 OpenClaw 控制台</strong></div>' +
+				'<div style="font-size:13px;color:#666;">' +
+					'OpenClaw 控制台会返回浏览器安全头，拒绝被 LuCI 页面内嵌。' +
+					'请点击上方「新窗口打开」访问控制台。' +
+				'</div>' +
+				'<div class="oc-console-actions">' +
+					'<a class="btn cbi-button cbi-button-action" href="' + url + '" target="_blank" rel="noopener">↗ 新窗口打开</a>' +
+				'</div>' +
+				'<div class="oc-console-link">直接地址：<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a></div>' +
+			'</div>';
 	}
 
 	function checkAndLoad() {
@@ -135,7 +186,7 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 						statusTextEl.innerHTML = '<span style="color:#1a7f37;">● 网关运行中</span>';
 						openBtn.href = url;
 						openBtn.style.display = '';
-						showIframe(url);
+						showOpenMessage(url);
 					} else if (d.gateway_starting) {
 						statusTextEl.innerHTML = '<span style="color:#9a6700;">⏳ 网关正在启动</span>';
 						openBtn.style.display = 'none';
@@ -158,21 +209,6 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 				}
 			});
 		});
-	}
-
-	function showIframe(url) {
-		loading.style.display = 'none';
-		var existing = document.getElementById('oc-console-iframe');
-		if (existing) return;
-
-		var iframe = document.createElement('iframe');
-		iframe.id = 'oc-console-iframe';
-		iframe.src = url;
-		iframe.style.width = '100%';
-		iframe.style.height = '700px';
-		iframe.style.border = 'none';
-		iframe.setAttribute('allowfullscreen', 'true');
-		container.appendChild(iframe);
 	}
 
 	checkAndLoad();
