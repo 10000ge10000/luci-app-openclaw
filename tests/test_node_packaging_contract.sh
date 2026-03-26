@@ -12,6 +12,11 @@ BUILD_RUN="$REPO_ROOT/scripts/build_run.sh"
 ENV_SCRIPT="$REPO_ROOT/root/usr/bin/openclaw-env"
 CONTROLLER_SCRIPT="$REPO_ROOT/luasrc/controller/openclaw.lua"
 BASIC_LUA="$REPO_ROOT/luasrc/model/cbi/openclaw/basic.lua"
+PROFILE_SCRIPT="$REPO_ROOT/root/etc/profile.d/openclaw.sh"
+UCI_DEFAULTS_SCRIPT="$REPO_ROOT/root/etc/uci-defaults/99-openclaw"
+INIT_SCRIPT="$REPO_ROOT/root/etc/init.d/openclaw"
+PATHS_HELPER="$REPO_ROOT/root/usr/libexec/openclaw-paths.sh"
+NODE_HELPER="$REPO_ROOT/root/usr/libexec/openclaw-node.sh"
 
 fail() {
 	echo "FAIL: $1" >&2
@@ -71,6 +76,24 @@ grep -Fq 'openclaw/paths.lua' "$BUILD_IPK" || fail "ipk builder should package L
 grep -Fq 'openclaw-paths.sh' "$BUILD_RUN" || fail "run builder should package path helper"
 grep -Fq 'openclaw-node.sh' "$BUILD_RUN" || fail "run builder should package node helper"
 grep -Fq 'openclaw/paths.lua' "$BUILD_RUN" || fail "run builder should package Lua path helper"
+
+python - "$ENV_SCRIPT" "$PROFILE_SCRIPT" "$UCI_DEFAULTS_SCRIPT" "$INIT_SCRIPT" "$PATHS_HELPER" "$NODE_HELPER" "$BUILD_IPK" "$BUILD_RUN" "$BUILD_SCRIPT" <<'PY' || fail "shell-oriented source files must use LF line endings"
+from pathlib import Path
+import sys
+
+bad = []
+for arg in sys.argv[1:]:
+    data = Path(arg).read_bytes()
+    if b"\r\n" in data:
+        bad.append(arg)
+
+if bad:
+    print("CRLF detected in:", file=sys.stderr)
+    for path in bad:
+        print(path, file=sys.stderr)
+    raise SystemExit(1)
+PY
+
 grep -Fq 'local GITHUB_REPO = "hotwa/luci-app-openclaw"' "$CONTROLLER_SCRIPT" || fail "controller should default to hotwa repo"
 grep -Fq 'local GITHUB_RELEASES_URL = "https://github.com/" .. GITHUB_REPO .. "/releases"' "$CONTROLLER_SCRIPT" || fail "controller should derive release URLs from hotwa repo"
 grep -Fq 'local GITHUB_API_RELEASES_URL = "https://api.github.com/repos/" .. GITHUB_REPO .. "/releases"' "$CONTROLLER_SCRIPT" || fail "controller should derive API URLs from hotwa repo"

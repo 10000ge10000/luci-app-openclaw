@@ -1,0 +1,9 @@
+*.sh text eol=lf
+*.bash text eol=lf
+Makefile text eol=lf
+VERSION text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.lua text eol=lf
+*.htm text eol=lf
+*.md text eol=lf
