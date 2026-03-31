@@ -19,6 +19,16 @@ esac
 
 # 设置 Node.js ICU 数据路径
 export NODE_ICU_DATA="${NODE_BASE}/share/icu"
+export NPM_CONFIG_PREFIX="$OC_GLOBAL"
+export npm_config_prefix="$OC_GLOBAL"
+export NPM_CONFIG_CACHE="${OC_DATA}/.npm"
+export npm_config_cache="${OC_DATA}/.npm"
+export XDG_CACHE_HOME="${OC_DATA}/.cache"
+export COREPACK_HOME="${OC_DATA}/.cache/corepack"
+export PNPM_HOME="${OC_GLOBAL}/bin"
+export TMPDIR="${OC_DATA}/tmp"
+export TMP="${OC_DATA}/tmp"
+export TEMP="${OC_DATA}/tmp"
 
 # 设置 OpenClaw 核心环境变量
 # 这些变量确保 openclaw 命令使用正确的配置路径

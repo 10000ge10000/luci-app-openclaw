@@ -200,6 +200,16 @@ class PtySession {
       OPENCLAW_HOME: OC_DATA,
       OPENCLAW_STATE_DIR: `${OC_DATA}/.openclaw`,
       OPENCLAW_CONFIG_PATH: `${OC_DATA}/.openclaw/openclaw.json`,
+      NPM_CONFIG_PREFIX: OC_GLOBAL,
+      npm_config_prefix: OC_GLOBAL,
+      NPM_CONFIG_CACHE: `${OC_DATA}/.npm`,
+      npm_config_cache: `${OC_DATA}/.npm`,
+      XDG_CACHE_HOME: `${OC_DATA}/.cache`,
+      COREPACK_HOME: `${OC_DATA}/.cache/corepack`,
+      PNPM_HOME: `${OC_GLOBAL}/bin`,
+      TMPDIR: `${OC_DATA}/tmp`,
+      TMP: `${OC_DATA}/tmp`,
+      TEMP: `${OC_DATA}/tmp`,
       PATH: `${NODE_BASE}/bin:${OC_GLOBAL}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
     };
     // 检测 script 命令是否可用 (OpenWrt 默认不包含 util-linux-script)

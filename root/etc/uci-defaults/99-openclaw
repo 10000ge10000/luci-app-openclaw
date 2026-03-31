@@ -74,6 +74,9 @@ if oc_install_root_uses_opt_workaround "$OPENCLAW_INSTALL_ROOT"; then
 	fi
 fi
 mkdir -p "${OC_DATA}/.openclaw"
+mkdir -p "${OC_DATA}/.npm"
+mkdir -p "${OC_DATA}/.cache/corepack"
+mkdir -p "${OC_DATA}/tmp"
 mkdir -p "$NODE_BASE"
 mkdir -p "$OC_GLOBAL"
 chown -R openclaw:openclaw "$OC_ROOT" 2>/dev/null || true
