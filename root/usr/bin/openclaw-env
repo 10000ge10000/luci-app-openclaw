@@ -68,6 +68,16 @@ NODE_RELEASE_PAGE_FALLBACK="${NODE_RELEASE_PAGE_FALLBACK:-https://gitea.jmsu.top
 
 export PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:$PATH"
 export NODE_ICU_DATA="${NODE_BASE}/share/icu"
+export NPM_CONFIG_PREFIX="${OC_GLOBAL}"
+export npm_config_prefix="${OC_GLOBAL}"
+export NPM_CONFIG_CACHE="${OC_DATA}/.npm"
+export npm_config_cache="${OC_DATA}/.npm"
+export XDG_CACHE_HOME="${OC_DATA}/.cache"
+export COREPACK_HOME="${OC_DATA}/.cache/corepack"
+export PNPM_HOME="${OC_GLOBAL}/bin"
+export TMPDIR="${OC_DATA}/tmp"
+export TMP="${OC_DATA}/tmp"
+export TEMP="${OC_DATA}/tmp"
 
 log_info() { echo "  [✓] $1"; }
 log_warn() { echo "  [!] $1"; }
@@ -130,6 +140,14 @@ ensure_mkdir() {
 		fi
 		return 1
 	fi
+}
+
+ensure_runtime_cache_dirs() {
+	ensure_mkdir "$OC_DATA"
+	ensure_mkdir "${OC_DATA}/.npm"
+	ensure_mkdir "${OC_DATA}/.cache"
+	ensure_mkdir "${OC_DATA}/.cache/corepack"
+	ensure_mkdir "${OC_DATA}/tmp"
 }
 
 # 检测 C 运行时类型 (glibc vs musl)
@@ -368,6 +386,7 @@ install_pnpm() {
 
 	# 使用 npm 安装 pnpm 到全局目录
 	ensure_mkdir "$OC_GLOBAL"
+	ensure_runtime_cache_dirs
 	"$NPM_BIN" install -g pnpm --prefix="$OC_GLOBAL" 2>/dev/null
 
 	if [ -x "$OC_GLOBAL/bin/pnpm" ]; then
@@ -422,6 +441,7 @@ install_openclaw() {
 	local npm_ok=0
 	if [ -x "$NPM_BIN" ]; then
 		ensure_mkdir "$OC_GLOBAL"
+		ensure_runtime_cache_dirs
 		"$NPM_BIN" install -g "$oc_pkg" --prefix="$OC_GLOBAL" $install_flags 2>&1 | tail -10
 		# 检查是否安装成功
 		if [ -n "$(find_oc_entry)" ]; then
@@ -458,6 +478,7 @@ install_openclaw() {
 	if [ -x "$NPM_BIN" ]; then
 		echo ""
 		echo "=== 安装 Gemini CLI (Google OAuth 依赖) ==="
+		ensure_runtime_cache_dirs
 		"$NPM_BIN" install -g @google/gemini-cli --prefix="$OC_GLOBAL" $install_flags 2>&1 | tail -3
 		if command -v gemini >/dev/null 2>&1 || [ -x "$OC_GLOBAL/bin/gemini" ]; then
 			log_info "Gemini CLI 安装成功"
@@ -628,6 +649,7 @@ do_upgrade() {
 
 	echo "=== 正在升级 OpenClaw ==="
 	echo ""
+	ensure_runtime_cache_dirs
 	"$NPM_BIN" install -g openclaw@latest --prefix="$OC_GLOBAL" $install_flags 2>&1
 
 	# 验证升级结果

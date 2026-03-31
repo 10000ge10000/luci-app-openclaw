@@ -17,6 +17,7 @@ UCI_DEFAULTS_SCRIPT="$REPO_ROOT/root/etc/uci-defaults/99-openclaw"
 INIT_SCRIPT="$REPO_ROOT/root/etc/init.d/openclaw"
 PATHS_HELPER="$REPO_ROOT/root/usr/libexec/openclaw-paths.sh"
 NODE_HELPER="$REPO_ROOT/root/usr/libexec/openclaw-node.sh"
+WEB_PTY_SCRIPT="$REPO_ROOT/root/usr/share/openclaw/web-pty.js"
 
 fail() {
 	echo "FAIL: $1" >&2
@@ -62,6 +63,11 @@ grep -Fq 'while IFS= read -r d; do' "$ENV_SCRIPT" || fail "installer should trav
 if grep -Fq 'echo "$search_dirs" | while read -r d; do' "$ENV_SCRIPT"; then
 	fail "installer should not rely on a pipeline subshell for OpenClaw entry lookup"
 fi
+grep -Fq 'NPM_CONFIG_PREFIX="${OC_GLOBAL}"' "$ENV_SCRIPT" || fail "installer should force npm global prefix into custom install root"
+grep -Fq 'NPM_CONFIG_CACHE="${OC_DATA}/.npm"' "$ENV_SCRIPT" || fail "installer should force npm cache into custom data root"
+grep -Fq 'XDG_CACHE_HOME="${OC_DATA}/.cache"' "$ENV_SCRIPT" || fail "installer should force generic caches into custom data root"
+grep -Fq 'COREPACK_HOME="${OC_DATA}/.cache/corepack"' "$ENV_SCRIPT" || fail "installer should force corepack cache into custom data root"
+grep -Fq 'TMPDIR="${OC_DATA}/tmp"' "$ENV_SCRIPT" || fail "installer should force temp files into custom data root"
 
 grep -Fq 'openclaw-paths.sh' "$MAKEFILE" || fail "package makefile should install path helper"
 grep -Fq 'openclaw-node.sh' "$MAKEFILE" || fail "package makefile should install node helper"
@@ -97,6 +103,15 @@ PY
 grep -Fq 'local GITHUB_REPO = "hotwa/luci-app-openclaw"' "$CONTROLLER_SCRIPT" || fail "controller should default to hotwa repo"
 grep -Fq 'local GITHUB_RELEASES_URL = "https://github.com/" .. GITHUB_REPO .. "/releases"' "$CONTROLLER_SCRIPT" || fail "controller should derive release URLs from hotwa repo"
 grep -Fq 'local GITHUB_API_RELEASES_URL = "https://api.github.com/repos/" .. GITHUB_REPO .. "/releases"' "$CONTROLLER_SCRIPT" || fail "controller should derive API URLs from hotwa repo"
+grep -Fq 'export NPM_CONFIG_PREFIX="$OC_GLOBAL"' "$PROFILE_SCRIPT" || fail "shell profile should export npm prefix into custom install root"
+grep -Fq 'export NPM_CONFIG_CACHE="${OC_DATA}/.npm"' "$PROFILE_SCRIPT" || fail "shell profile should export npm cache into custom data root"
+grep -Fq 'export XDG_CACHE_HOME="${OC_DATA}/.cache"' "$PROFILE_SCRIPT" || fail "shell profile should export cache home into custom data root"
+grep -Fq 'NPM_CONFIG_PREFIX="$OC_GLOBAL" \' "$INIT_SCRIPT" || fail "service environment should pass npm prefix into custom install root"
+grep -Fq 'NPM_CONFIG_CACHE="${OC_DATA}/.npm" \' "$INIT_SCRIPT" || fail "service environment should pass npm cache into custom data root"
+grep -Fq 'XDG_CACHE_HOME="${OC_DATA}/.cache" \' "$INIT_SCRIPT" || fail "service environment should pass cache home into custom data root"
+grep -Fq 'NPM_CONFIG_PREFIX: OC_GLOBAL' "$WEB_PTY_SCRIPT" || fail "web PTY environment should pass npm prefix into custom install root"
+grep -Fq 'NPM_CONFIG_CACHE: `${OC_DATA}/.npm`' "$WEB_PTY_SCRIPT" || fail "web PTY environment should pass npm cache into custom data root"
+grep -Fq 'COREPACK_HOME: `${OC_DATA}/.cache/corepack`' "$WEB_PTY_SCRIPT" || fail "web PTY environment should pass corepack cache into custom data root"
 grep -Fq "https://github.com/hotwa/luci-app-openclaw/releases/latest" "$BASIC_LUA" || fail "UI should link manual download to hotwa repo"
 grep -Fq "ARM64 musl" "$BASIC_LUA" || fail "UI should mention ARM64 musl specific guidance"
 grep -Fq "hotwa/luci-app-openclaw" "$BASIC_LUA" || fail "UI should point ARM64 musl guidance at hotwa repo"
