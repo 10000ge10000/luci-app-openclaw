@@ -24,6 +24,9 @@ function index()
 	-- 服务控制 API
 	entry({"admin", "services", "openclaw", "service_ctl"}, call("action_service_ctl"), nil).leaf = true
 
+	-- 登录认证配置 API (v2026.3.9+)
+	entry({"admin", "services", "openclaw", "auth_config"}, call("action_auth_config"), nil).leaf = true
+
 	-- 安装/升级日志 API (轮询)
 	entry({"admin", "services", "openclaw", "setup_log"}, call("action_setup_log"), nil).leaf = true
 
@@ -344,6 +347,122 @@ function action_service_ctl()
 
 	http.prepare_content("application/json")
 	http.write_json({ status = "ok", action = action })
+end
+
+-- ═══════════════════════════════════════════
+-- 登录认证配置 API (v2026.3.9+)
+-- GET ?action=save&auth_mode=token|password&auth_password=xxx
+-- GET ?action=load  (default)
+-- ═══════════════════════════════════════════
+function action_auth_config()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+	local uci = require "luci.model.uci".cursor()
+
+	local action = http.formvalue("action") or "load"
+
+	-- 获取安装路径
+	local install_path_uci = uci:get("openclaw", "main", "install_path") or "/opt"
+	local install_path = install_path_uci .. "/openclaw"
+
+	if action == "save" then
+		local auth_mode = http.formvalue("auth_mode") or "token"
+		local auth_password = http.formvalue("auth_password") or ""
+
+		-- 安全检查: auth_mode 只允许 token 或 password
+		if auth_mode ~= "token" and auth_mode ~= "password" then
+			http.prepare_content("application/json")
+			http.write_json({ status = "error", message = "无效的认证模式: " .. auth_mode })
+			return
+		end
+
+		-- 如果切换到 password 模式，密码不能为空
+		if auth_mode == "password" and auth_password == "" then
+			http.prepare_content("application/json")
+			http.write_json({ status = "error", message = "密码模式必须设置密码" })
+			return
+		end
+
+		-- 保存到 UCI 配置
+		uci:set("openclaw", "main", "auth_mode", auth_mode)
+		if auth_password ~= "" then
+			uci:set("openclaw", "main", "auth_password", auth_password)
+		end
+		uci:commit("openclaw")
+
+		-- 同步到 JSON 配置文件 (触发 init 脚本的 sync_uci_to_json)
+		-- init 脚本会读取 UCI 的 auth_mode 和 auth_password 并写入 openclaw.json
+		-- 但为了立即生效，我们直接修改 JSON (init 脚本重启后会再次同步)
+		local config_file = install_path .. "/data/.openclaw/openclaw.json"
+		local f = io.open(config_file, "r")
+		local content = ""
+		if f then
+			content = f:read("*a") or ""
+			f:close()
+		end
+
+		-- 解析并修改 JSON (简单字符串替换，避免依赖外部库)
+		-- 修改或添加 auth.mode
+		if content:match('"auth"%s*:%s*{') then
+			content = content:gsub('"mode"%s*:%s*"[^"]*"', '"mode": "' .. auth_mode .. '"')
+			if auth_mode == "password" and auth_password ~= "" then
+				-- 修改或添加 password 字段
+				if content:match('"password"%s*:%s*"[^"]*"') then
+					content = content:gsub('"password"%s*:%s*"[^"]*"', '"password": "' .. auth_password .. '"')
+				else
+					content = content:gsub('"auth"%s*:%s*{', '{"auth": {"password": "' .. auth_password .. '", ', 1)
+				end
+			end
+			-- 清空 token 以避免 OpenClaw 的 assertExplicitGatewayAuthModeWhenBothConfigured 强制覆盖
+			if content:match('"token"%s*:%s*""') then
+				-- already empty
+			elseif content:match('"token"%s*:%s*"[^"]*"') then
+				content = content:gsub('"token"%s*:%s*"[^"]*"', '"token": ""')
+			end
+		end
+
+		local wf = io.open(config_file, "w")
+		if wf then
+			wf:write(content)
+			wf:close()
+			sys.exec("chown openclaw:openclaw " .. config_file .. " 2>/dev/null")
+		end
+
+		-- 重启服务使配置生效
+		sys.exec("/etc/init.d/openclaw stop >/dev/null 2>&1")
+		sys.exec("sleep 2")
+		sys.exec("/etc/init.d/openclaw start >/dev/null 2>&1 &")
+
+		http.prepare_content("application/json")
+		http.write_json({
+			status = "ok",
+			message = "认证模式已切换为 " .. (auth_mode == "password" and "密码模式" or "令牌模式") .. "，服务正在重启"
+		})
+		return
+	end
+
+	-- action == "load" (default)
+	local auth_mode = uci:get("openclaw", "main", "auth_mode") or "token"
+	-- 从 JSON 读取真实值（以 JSON 为准，因为 init 脚本可能已同步）
+	local config_file = install_path .. "/data/.openclaw/openclaw.json"
+	local token_hint = ""
+	local f = io.open(config_file, "r")
+	if f then
+		local content = f:read("*a") or ""
+		f:close()
+		-- 提取 token 前 8 位作为 hint
+		local token = content:match('"token"%s*:%s*"([^"]+)"')
+		if token and token ~= "" then
+			token_hint = string.sub(token, 1, 8) .. "..."
+		end
+	end
+
+	http.prepare_content("application/json")
+	http.write_json({
+		status = "ok",
+		auth_mode = auth_mode,
+		token_hint = token_hint
+	})
 end
 
 -- ═══════════════════════════════════════════

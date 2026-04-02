@@ -93,9 +93,11 @@ done
 
 sync_uci_to_json() {
 # 将 UCI 配置同步到 openclaw.json，同时确保 token 双向同步
-local port bind token
+local port bind token auth_mode auth_password
 port=$(uci -q get openclaw.main.port || echo "18789")
 bind=$(uci -q get openclaw.main.bind || echo "lan")
+auth_mode=$(uci -q get openclaw.main.auth_mode || echo "")
+auth_password=$(uci -q get openclaw.main.auth_password || echo "")
 token=$(uci -q get openclaw.main.token || echo "")
 
 # 确保配置目录和文件存在 (路径已在脚本开头做 OverlayFS 重映射)
@@ -127,7 +129,7 @@ fi
 
 # 使用 Node.js 写入 JSON (如果可用)
 if [ -x "$NODE_BIN" ]; then
-OC_SYNC_PORT="$port" OC_SYNC_BIND="$bind" OC_SYNC_TOKEN="$token" OC_SYNC_FILE="$CONFIG_FILE" \
+OC_SYNC_PORT="$port" OC_SYNC_BIND="$bind" OC_SYNC_TOKEN="$token" OC_SYNC_AUTH_MODE="$auth_mode" OC_SYNC_AUTH_PASSWORD="$auth_password" OC_SYNC_FILE="$CONFIG_FILE" \
 "$NODE_BIN" -e "
 const fs=require('fs');
 const f=process.env.OC_SYNC_FILE;
@@ -138,8 +140,9 @@ d.gateway.port=parseInt(process.env.OC_SYNC_PORT)||18789;
 d.gateway.bind=process.env.OC_SYNC_BIND||'lan';
 d.gateway.mode='local';
 if(!d.gateway.auth)d.gateway.auth={};
-d.gateway.auth.mode='token';
+d.gateway.auth.mode=process.env.OC_SYNC_AUTH_MODE||d.gateway.auth.mode||'token';
 d.gateway.auth.token=process.env.OC_SYNC_TOKEN||'';
+if(process.env.OC_SYNC_AUTH_PASSWORD)d.gateway.auth.password=process.env.OC_SYNC_AUTH_PASSWORD;
 if(!d.gateway.controlUi)d.gateway.controlUi={};
 d.gateway.controlUi.allowInsecureAuth=true;
 d.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
