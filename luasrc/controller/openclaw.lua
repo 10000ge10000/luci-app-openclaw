@@ -351,7 +351,7 @@ end
 
 -- ═══════════════════════════════════════════
 -- 登录认证配置 API (v2026.3.9+)
--- GET ?action=save&auth_mode=token|password&auth_password=xxx
+-- GET ?action=save&auth_mode=token|password|trusted-proxy|none&auth_password=xxx
 -- GET ?action=load  (default)
 -- ═══════════════════════════════════════════
 function action_auth_config()
@@ -369,8 +369,8 @@ function action_auth_config()
 		local auth_mode = http.formvalue("auth_mode") or "token"
 		local auth_password = http.formvalue("auth_password") or ""
 
-		-- 安全检查: auth_mode 只允许 token, password 或 trusted-proxy
-		if auth_mode ~= "token" and auth_mode ~= "password" and auth_mode ~= "trusted-proxy" then
+		-- 安全检查: auth_mode 只允许 token, password, trusted-proxy 或 none
+		if auth_mode ~= "token" and auth_mode ~= "password" and auth_mode ~= "trusted-proxy" and auth_mode ~= "none" then
 			http.prepare_content("application/json")
 			http.write_json({ status = "error", message = "无效的认证模式: " .. auth_mode })
 			return
@@ -436,7 +436,7 @@ function action_auth_config()
 		http.prepare_content("application/json")
 		http.write_json({
 			status = "ok",
-			message = "认证模式已切换为 " .. (auth_mode == "password" and "密码模式" or auth_mode == "trusted-proxy" and "信任代理模式" or "令牌模式") .. "，服务正在重启"
+			message = "认证模式已切换为 " .. (auth_mode == "password" and "密码模式" or auth_mode == "trusted-proxy" and "信任代理模式" or auth_mode == "none" and "无需认证模式" or "令牌模式") .. "，服务正在重启"
 		})
 		return
 	end
