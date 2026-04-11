@@ -42,6 +42,37 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '<div id="action-result" style="margin-top:8px;"></div>'
 	html[#html+1] = '<div id="oc-update-action" style="margin-top:8px;display:none;"></div>'
 
+	-- ═══════════════════════════════════════════
+	-- 登录认证设置 (v2026.3.9+)
+	-- ═══════════════════════════════════════════
+	local auth_mode_url = luci.dispatcher.build_url("admin", "services", "openclaw", "auth_config")
+	html[#html+1] = '<div id="oc-auth-section" style="margin:16px 0 10px;padding:14px 16px;background:#f8f9fa;border:1px solid #d0d7de;border-radius:8px;">'
+	html[#html+1] = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
+	html[#html+1] = '<span style="font-weight:600;font-size:14px;color:#24292f;">🔐 登录认证方式</span>'
+	html[#html+1] = '<button class="btn cbi-button cbi-button-action" type="button" onclick="ocLoadAuthConfig()" style="font-size:11px;padding:2px 10px;">🔄 刷新</button>'
+	html[#html+1] = '</div>'
+	html[#html+1] = '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">'
+	html[#html+1] = '<div style="display:flex;align-items:center;gap:6px;">'
+	html[#html+1] = '<label for="oc-auth-mode" style="font-size:13px;color:#555;font-weight:500;">认证模式</label>'
+	html[#html+1] = '<select id="oc-auth-mode" style="padding:5px 8px;border:1px solid #d0d7de;border-radius:6px;font-size:13px;background:#fff;min-width:110px;" onchange="ocOnAuthModeChange()">'
+	html[#html+1] = '<option value="token">🔑 令牌 (Token)</option>'
+	html[#html+1] = '<option value="password">🔒 密码 (Password)</option>'
+	html[#html+1] = '<option value="trusted-proxy">🌐 信任代理 (Trusted Proxy)</option>'
+	html[#html+1] = '<option value="none">⏭ 无需认证 (None)</option>'
+	html[#html+1] = '</select>'
+	html[#html+1] = '</div>'
+	html[#html+1] = '<div id="oc-auth-password-row" style="display:none;flex:1;min-width:200px;">'
+	html[#html+1] = '<div style="display:flex;align-items:center;gap:6px;">'
+	html[#html+1] = '<label for="oc-auth-password" style="font-size:13px;color:#555;font-weight:500;white-space:nowrap;">网关密码</label>'
+	html[#html+1] = '<input type="password" id="oc-auth-password" placeholder="设置网关登录密码" style="flex:1;padding:5px 8px;border:1px solid #d0d7de;border-radius:6px;font-size:13px;min-width:140px;"/>'
+	html[#html+1] = '</div>'
+	html[#html+1] = '</div>'
+	html[#html+1] = '<button class="btn cbi-button cbi-button-apply" type="button" onclick="ocSaveAuthConfig()" id="btn-save-auth" style="font-size:12px;padding:4px 14px;">💾 保存并重启</button>'
+	html[#html+1] = '</div>'
+	html[#html+1] = '<div id="oc-auth-tips" style="margin-top:8px;font-size:11px;color:#888;"></div>'
+	html[#html+1] = '<div id="oc-auth-result" style="margin-top:8px;display:none;"></div>'
+	html[#html+1] = '</div>'
+
 	-- 版本选择对话框 (默认隐藏) - 支持自定义安装路径
 	html[#html+1] = '<div id="oc-setup-dialog" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;align-items:center;justify-content:center;">'
 	html[#html+1] = '<div style="background:#fff;border-radius:12px;padding:24px 28px;max-width:520px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,0.2);">'
@@ -188,13 +219,13 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '});'
 	html[#html+1] = '}'
 
-	-- 轮询安装日志 (智能滚动: 用户向上滚动时暂停自动滚动，滚动到底部时恢复)
+	-- 轮询安装日志
 	html[#html+1] = 'var _lastLogLen=0;'
-	html[#html+1] = 'var _autoScrollEnabled=true;'  -- 智能滚动状态标志
+	html[#html+1] = 'var _autoScrollEnabled=true;'  -- 智能滚动状态标志'
 	html[#html+1] = 'function ocPollSetupLog(){'
 	html[#html+1] = 'if(_setupTimer)clearInterval(_setupTimer);'
 	html[#html+1] = '_lastLogLen=0;'
-	html[#html+1] = '_autoScrollEnabled=true;'  -- 初始状态: 启用自动滚动
+	html[#html+1] = '_autoScrollEnabled=true;'  -- 初始状态: 启用自动滚动'
 	html[#html+1] = 'var logEl=document.getElementById("setup-log-content");'
 	-- 绑定滚动事件监听器 (只绑定一次)
 	html[#html+1] = 'if(!logEl._scrollListenerAttached){'
@@ -202,9 +233,9 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var el=this;'
 	html[#html+1] = 'var atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<5;'
 	html[#html+1] = 'if(atBottom){'
-	html[#html+1] = '_autoScrollEnabled=true;'  -- 滚动到底部: 恢复自动滚动
+	html[#html+1] = '_autoScrollEnabled=true;'  -- 滚动到底部: 恢复自动滚动'
 	html[#html+1] = '}else{'
-	html[#html+1] = '_autoScrollEnabled=false;'  -- 用户向上滚动: 暂停自动滚动
+	html[#html+1] = '_autoScrollEnabled=false;'  -- 用户向上滚动: 暂停自动滚动'
 	html[#html+1] = '}'
 	html[#html+1] = '});'
 	html[#html+1] = 'logEl._scrollListenerAttached=true;'
@@ -220,7 +251,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'logEl.textContent+=newLog;'
 	html[#html+1] = '_lastLogLen=r.log.length;'
 	html[#html+1] = '}'
-	-- 智能滚动: 仅在自动滚动启用时滚动到底部
+	html[#html+1] = '-- 智能滚动: 仅在自动滚动启用时滚动到底部'
 	html[#html+1] = 'if(_autoScrollEnabled){'
 	html[#html+1] = 'logEl.scrollTop=logEl.scrollHeight;'
 	html[#html+1] = '}'
@@ -314,38 +345,35 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}catch(e){el.innerHTML="<span style=\\"color:red\\">❌ 错误</span>";}'
 	html[#html+1] = '});}'
 
-	-- Markdown 转 HTML 函数 (优化版 - 用于渲染 GitHub Release Notes)
-	-- 特性：中英文字体栈、代码块样式、链接悬停效果、列表美化
+	-- 简单的 Markdown 转 HTML 函数 (用于渲染 GitHub Release Notes)
 	html[#html+1] = 'function ocMarkdownToHtml(md){'
 	html[#html+1] = 'if(!md)return "";'
 	-- 转义 HTML 特殊字符
 	html[#html+1] = 'var html=md.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");'
-	-- 代码块 (```code```) - 圆角边框 + 等宽字体栈
-	html[#html+1] = 'html=html.replace(/```(\\w*)\\n([\\s\\S]*?)```/g,function(m,lang,code){return"<pre style=\\"background:#f6f8fa;padding:12px 16px;border-radius:8px;overflow-x:auto;font-size:13px;line-height:1.6;font-family:SF Mono,Consolas,Menlo,monospace;border:1px solid #d0d7de;\\"><code>"+code.trim()+"</code></pre>";});'
+	-- 代码块 (```code```)
+	html[#html+1] = 'html=html.replace(/```(\\w*)\\n([\\s\\S]*?)```/g,function(m,lang,code){return"<pre style=\\"background:#f6f8fa;padding:10px 14px;border-radius:6px;overflow-x:auto;font-size:13px;line-height:1.5;\\"><code>"+code.trim()+"</code></pre>";});'
 	-- 行内代码 (`code`)
-	html[#html+1] = 'html=html.replace(/`([^`]+)`/g,"<code style=\\"background:#f6f8fa;padding:2px 6px;border-radius:4px;font-size:13px;font-family:SF Mono,Consolas,Menlo,monospace;border:1px solid #e1e4e8;\\">$1</code>");'
-	-- 标题层级 (优化比例: h1=20px, h2=17px, h3=15px, h4=14px)
-	html[#html+1] = 'html=html.replace(/^#### (.+)$/gm,"<h5 style=\\"margin:12px 0 6px;font-size:14px;font-weight:600;color:#1f2328;letter-spacing:-0.02em;\\">$1</h5>");'
-	html[#html+1] = 'html=html.replace(/^### (.+)$/gm,"<h4 style=\\"margin:14px 0 8px;font-size:15px;font-weight:600;color:#1f2328;letter-spacing:-0.02em;\\">$1</h4>");'
-	html[#html+1] = 'html=html.replace(/^## (.+)$/gm,"<h3 style=\\"margin:16px 0 10px;font-size:17px;font-weight:600;color:#1f2328;letter-spacing:-0.02em;\\">$1</h3>");'
-	html[#html+1] = 'html=html.replace(/^# (.+)$/gm,"<h2 style=\\"margin:18px 0 12px;font-size:20px;font-weight:600;color:#1f2328;border-bottom:1px solid #d0d7de;padding-bottom:8px;letter-spacing:-0.02em;\\">$1</h2>");'
+	html[#html+1] = 'html=html.replace(/`([^`]+)`/g,"<code style=\\"background:#f6f8fa;padding:2px 6px;border-radius:3px;font-size:13px;\\">$1</code>");'
+	-- 标题 (### ## #)
+	html[#html+1] = 'html=html.replace(/^### (.+)$/gm,"<h4 style=\\"margin:14px 0 8px;font-size:15px;font-weight:600;color:#24292f;\\">$1</h4>");'
+	html[#html+1] = 'html=html.replace(/^## (.+)$/gm,"<h3 style=\\"margin:16px 0 10px;font-size:16px;font-weight:600;color:#24292f;\\">$1</h3>");'
+	html[#html+1] = 'html=html.replace(/^# (.+)$/gm,"<h2 style=\\"margin:18px 0 12px;font-size:17px;font-weight:600;color:#24292f;border-bottom:1px solid #d0d7de;padding-bottom:6px;\\">$1</h2>");'
 	-- 粗体和斜体
-	html[#html+1] = 'html=html.replace(/\\*\\*([^*]+)\\*\\*/g,"<strong style=\\"font-weight:600;\\">$1</strong>");'
+	html[#html+1] = 'html=html.replace(/\\*\\*([^*]+)\\*\\*/g,"<strong>$1</strong>");'
 	html[#html+1] = 'html=html.replace(/\\*([^*]+)\\*/g,"<em>$1</em>");'
-	-- 链接 [text](url) - 悬停效果
-	html[#html+1] = 'html=html.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g,"<a href=\\"$2\\" target=\\"_blank\\" rel=\\"noopener\\" style=\\"color:#0969da;text-decoration:none;border-bottom:1px solid transparent;transition:border-color 0.2s;\\">$1</a>");'
+	-- 链接 [text](url)
+	html[#html+1] = 'html=html.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g,"<a href=\\"$2\\" target=\\"_blank\\" rel=\\"noopener\\" style=\\"color:#0969da;text-decoration:none;\\">$1</a>");'
 	-- 无序列表 (- 或 *)
-	html[#html+1] = 'html=html.replace(/^[*-] (.+)$/gm,"<li style=\\"margin:4px 0 4px 0;padding-left:4px;line-height:1.75;list-style-position:inside;color:#32383f;\\">$1</li>");'
+	html[#html+1] = 'html=html.replace(/^[*-] (.+)$/gm,"<li style=\\"margin:6px 0 6px 20px;line-height:1.7;\\">$1</li>");'
 	-- 有序列表 (1. 2. 等)
-	html[#html+1] = 'html=html.replace(/^(\\d+)\\. (.+)$/gm,"<li style=\\"margin:4px 0 4px 0;padding-left:4px;line-height:1.75;list-style-position:inside;color:#32383f;\\"><span style=\\"color:#656d76;margin-right:4px;\\">$1.</span>$2</li>");'
+	html[#html+1] = 'html=html.replace(/^\\d+\\. (.+)$/gm,"<li style=\\"margin:6px 0 6px 20px;list-style-type:decimal;line-height:1.7;\\">$1</li>");'
 	-- 水平线 (--- 或 ***)
-	html[#html+1] = 'html=html.replace(/^(---|\\*\\*\\*)$/gm,"<hr style=\\"border:none;border-top:1px solid #d0d7de;margin:16px 0;\\"/>");'
-	-- 段落: 连续空行合并为段落分隔 (简化处理，避免生成未闭合标签)
-	html[#html+1] = 'html=html.replace(/\\n\\n+/g,"<br/><br/>");'
+	html[#html+1] = 'html=html.replace(/^(---|\\*\\*\\*)$/gm,"<hr style=\\"border:none;border-top:1px solid #d0d7de;margin:14px 0;\\"/>");'
+	-- 段落 (连续的非空行合并)
+	html[#html+1] = 'html=html.replace(/\\n\\n/g,"</p><p style=\\"margin:10px 0;line-height:1.7;\\">");'
 	-- 换行
 	html[#html+1] = 'html=html.replace(/\\n/g,"<br/>");'
-	-- 外层容器 - 中英文字体栈
-	html[#html+1] = 'return"<div style=\\"font-size:14px;line-height:1.75;color:#32383f;font-family:PingFang SC,Microsoft YaHei,Noto Sans SC,sans-serif;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased;\\">"+html+"</div>";'
+	html[#html+1] = 'return"<div style=\\"font-size:14px;color:#24292f;line-height:1.7;\\">"+html+"</div>";'
 	html[#html+1] = '}'
 
 	-- 检测升级 (只检查插件版本，有新版本时显示更新内容)
@@ -359,31 +387,29 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var dot=document.getElementById("update-dot");if(dot)dot.style.display="none";'
 	html[#html+1] = 'try{var r=JSON.parse(x.responseText);'
 	html[#html+1] = 'var msgs=[];'
-	-- 版本状态徽章样式
-	html[#html+1] = 'var badgeNew="display:inline-flex;align-items:center;padding:3px 10px;border-radius:16px;font-size:12px;font-weight:600;background:linear-gradient(135deg,#fff7e6 0%,#ffe7ba 100%);color:#9a6700;border:1px solid #f5a623;";'
-	html[#html+1] = 'var badgeLatest="display:inline-flex;align-items:center;padding:3px 10px;border-radius:16px;font-size:12px;font-weight:600;background:linear-gradient(135deg,#e6f7e6 0%,#c8f7c8 100%);color:#1a7f1a;border:1px solid #28a745;";'
-	html[#html+1] = 'var badgeUnknown="display:inline-flex;align-items:center;padding:3px 10px;border-radius:16px;font-size:12px;font-weight:600;background:#f6f8fa;color:#656d76;border:1px solid #d0d7de;";'
-	html[#html+1] = 'var verBadge="display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;font-family:SF Mono,Consolas,Menlo,monospace;background:#e1e4e8;color:#24292f;margin-left:4px;";'
-	-- 插件版本检查 (带渐变徽章)
+	-- 插件版本检查
 	html[#html+1] = 'if(r.plugin_current){'
-	html[#html+1] = 'if(r.plugin_has_update){msgs.push("<span style=\\""+badgeNew+"\\">🔌 有新版本</span> v"+r.plugin_current+" → <span style=\\""+verBadge+"\\">v"+r.plugin_latest+"</span>");}'
-	html[#html+1] = 'else if(r.plugin_latest){msgs.push("<span style=\\""+badgeLatest+"\\">✅ 已是最新</span> v"+r.plugin_current);}'
-	html[#html+1] = 'else{msgs.push("<span style=\\""+badgeUnknown+"\\">🔌 无法检查</span> v"+r.plugin_current);}'
+	html[#html+1] = 'if(r.plugin_has_update){msgs.push("<span style=\\"color:#e36209\\">🔌 插件: v"+r.plugin_current+" → v"+r.plugin_latest+" (有新版本)</span>");}'
+	html[#html+1] = 'else if(r.plugin_latest){msgs.push("<span style=\\"color:green\\">✅ 插件: v"+r.plugin_current+" (已是最新)</span>");}'
+	html[#html+1] = 'else{msgs.push("<span style=\\"color:#999\\">🔌 插件: v"+r.plugin_current+" (无法检查最新版本)</span>");}'
 	html[#html+1] = '}'
-	html[#html+1] = 'if(msgs.length===0)msgs.push("<span style=\\""+badgeUnknown+"\\">无法获取版本信息</span>");'
+	html[#html+1] = 'if(msgs.length===0)msgs.push("<span style=\\"color:#999\\">无法获取版本信息</span>");'
 	html[#html+1] = 'el.innerHTML=msgs.join("<br/>");'
-	-- 插件有更新时: 卡片式更新日志 + 操作按钮
+	-- 插件有更新时: release notes + 一键升级按钮 + GitHub 下载链接
 	html[#html+1] = 'if(r.plugin_has_update){'
 	html[#html+1] = 'act.style.display="block";'
 	html[#html+1] = 'window._pluginLatestVer=r.plugin_latest;'
 	html[#html+1] = 'var notesHtml="";'
 	html[#html+1] = 'if(r.release_notes){'
 	html[#html+1] = 'var rendered=ocMarkdownToHtml(r.release_notes);'
-	-- 卡片式容器: 圆角边框 + 微阴影 + 版本标题栏
-	html[#html+1] = 'notesHtml="<div style=\\"margin:12px 0;border:1px solid #d0d7de;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);\\"><div style=\\"background:linear-gradient(135deg,#f6f8fa 0%,#ffffff 100%);padding:12px 16px;border-bottom:1px solid #d0d7de;display:flex;align-items:center;justify-content:space-between;\\"><span style=\\"font-size:14px;font-weight:600;color:#24292f;\\">📋 更新日志</span><span style=\\"display:inline-flex;align-items:center;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;background:linear-gradient(135deg,#e3f2fd 0%,#bbdefb 100%);color:#1565c0;border:1px solid #64b5f6;\\">v"+r.plugin_latest+"</span></div><div style=\\"padding:16px;max-height:450px;overflow-y:auto;background:#fff;\\">"+rendered+"</div></div>";'
+	html[#html+1] = 'notesHtml=\'<div style="margin:10px 0 8px;padding:12px 16px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;max-height:400px;overflow-y:auto;">\''
+	html[#html+1] = '+\'<div style="font-size:13px;font-weight:600;color:#24292f;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #d0d7de;">📋 v\'+r.plugin_latest+\' 更新内容</div>\''
+	html[#html+1] = '+rendered'
+	html[#html+1] = '+\'</div>\';'
 	html[#html+1] = '}'
-	-- 操作按钮区: 分组设计
-	html[#html+1] = 'act.innerHTML=notesHtml+"<div style=\\"margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;\\"><button class=\\"btn cbi-button cbi-button-apply\\" type=\\"button\\" onclick=\\"ocPluginUpgrade()\\" id=\\"btn-plugin-upgrade\\" style=\\"box-shadow:0 2px 4px rgba(0,0,0,0.1);\\">⬆️ 一键升级 v"+r.plugin_latest+"</button><a href=\\"https://github.com/10000ge10000/luci-app-openclaw/releases/latest\\" target=\\"_blank\\" rel=\\"noopener\\" class=\\"btn cbi-button cbi-button-action\\" style=\\"text-decoration:none;\\">📥 GitHub 下载</a></div>";'
+	html[#html+1] = 'act.innerHTML=notesHtml'
+	html[#html+1] = '+\'<button class="btn cbi-button cbi-button-apply" type="button" onclick="ocPluginUpgrade()" id="btn-plugin-upgrade">⬆️ 升级插件 v\'+r.plugin_latest+\'</button>\''
+	html[#html+1] = '+\' <a href="https://github.com/10000ge10000/luci-app-openclaw/releases/latest" target="_blank" rel="noopener" class="btn cbi-button cbi-button-action" style="text-decoration:none;">📥 手动下载</a>\';'
 	html[#html+1] = '}'
 	html[#html+1] = '}catch(e){el.innerHTML="<span style=\\"color:red\\">❌ 检测失败</span>";}'
 	html[#html+1] = '});}'
@@ -414,12 +440,11 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}'
 
 	-- 轮询插件升级日志 (带容错: 安装时文件被替换可能导致API暂时不可用)
-	-- 复用安装日志的智能滚动机制
 	html[#html+1] = 'var _pluginPollErrors=0;'
 	html[#html+1] = 'function ocPollPluginUpgradeLog(){'
 	html[#html+1] = 'if(_pluginUpgradeTimer)clearInterval(_pluginUpgradeTimer);'
 	html[#html+1] = '_pluginPollErrors=0;'
-	html[#html+1] = '_autoScrollEnabled=true;'  -- 重置: 启用自动滚动
+	html[#html+1] = '_autoScrollEnabled=true;'  -- 重置: 启用自动滚动'
 	html[#html+1] = '_pluginUpgradeTimer=setInterval(function(){'
 	html[#html+1] = '(new XHR()).get("' .. plugin_upgrade_log_url .. '",null,function(x){'
 	html[#html+1] = 'try{'
@@ -428,7 +453,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var logEl=document.getElementById("setup-log-content");'
 	html[#html+1] = 'var statusEl=document.getElementById("setup-log-status");'
 	html[#html+1] = 'if(r.log)logEl.textContent=r.log;'
-	-- 智能滚动: 仅在自动滚动启用时滚动到底部
+	html[#html+1] = '-- 智能滚动: 仅在自动滚动启用时滚动到底部'
 	html[#html+1] = 'if(_autoScrollEnabled){'
 	html[#html+1] = 'logEl.scrollTop=logEl.scrollHeight;'
 	html[#html+1] = '}'
@@ -492,6 +517,84 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}else{el.innerHTML="<span style=\\"color:red\\">❌ "+(r.message||"卸载失败")+"</span>";}'
 	html[#html+1] = '}catch(e){el.innerHTML="<span style=\\"color:red\\">❌ 请求失败</span>";}'
 	html[#html+1] = '});}'
+
+	-- ═══ 登录认证设置 (v2026.3.9+) ═══
+	html[#html+1] = 'var _oc_auth_loaded=false;'
+	html[#html+1] = 'function ocLoadAuthConfig(){'
+	html[#html+1] = 'var el=document.getElementById("oc-auth-result");'
+	html[#html+1] = 'var tips=document.getElementById("oc-auth-tips");'
+	html[#html+1] = 'var modeSel=document.getElementById("oc-auth-mode");'
+	html[#html+1] = 'var pwdRow=document.getElementById("oc-auth-password-row");'
+	html[#html+1] = 'var pwdInput=document.getElementById("oc-auth-password");'
+	html[#html+1] = 'if(tips)tips.innerHTML="⏳ 正在读取认证配置...";'
+	html[#html+1] = '(new XHR()).get("' .. auth_mode_url .. '",null,function(x){'
+	html[#html+1] = 'try{var r=JSON.parse(x.responseText);'
+	html[#html+1] = 'if(r.status==="ok"){'
+	html[#html+1] = 'if(modeSel)modeSel.value=r.auth_mode||"token";'
+	html[#html+1] = 'if(pwdRow)pwdRow.style.display=(r.auth_mode==="password")?"flex":"none";'
+	html[#html+1] = 'if(pwdInput)pwdInput.value="";'
+	html[#html+1] = 'if(tips){'
+	html[#html+1] = 'if(r.auth_mode==="password"){'
+	html[#html+1] = 'tips.innerHTML="🔒 当前: 密码模式 | 令牌认证已禁用";'
+	html[#html+1] = '}else if(r.auth_mode==="trusted-proxy"){'
+	html[#html+1] = 'tips.innerHTML="🌐 当前: 信任代理模式 | 从请求头提取用户身份，无需认证";'
+	html[#html+1] = '}else if(r.auth_mode==="none"){'
+	html[#html+1] = 'tips.innerHTML="⏭ 当前: 无需认证模式 | 网关完全开放，请谨慎使用";'
+	html[#html+1] = '}else{'
+	html[#html+1] = 'tips.innerHTML="🔑 当前: 令牌模式 | 令牌: <code style=\\"background:#f6f8fa;padding:1px 4px;border-radius:3px;\\">"+r.token_hint+"</code> (仅显示前8位)";'
+	html[#html+1] = '}'
+	html[#html+1] = '}'
+	html[#html+1] = 'if(el)el.style.display="none";'
+	html[#html+1] = '_oc_auth_loaded=true;'
+	html[#html+1] = '}else{'
+	html[#html+1] = 'if(tips)tips.innerHTML="<span style=\\"color:#e36209;\\">⚠️ "+r.message+"</span>";'
+	html[#html+1] = '}'
+	html[#html+1] = '}catch(e){if(tips)tips.innerHTML="<span style=\\"color:#cf222e;\\">❌ 读取配置失败</span>";}'
+	html[#html+1] = '});}'
+	html[#html+1] = 'function ocOnAuthModeChange(){'
+	html[#html+1] = 'var modeSel=document.getElementById("oc-auth-mode");'
+	html[#html+1] = 'var pwdRow=document.getElementById("oc-auth-password-row");'
+	html[#html+1] = 'if(modeSel&&pwdRow){'
+	html[#html+1] = 'pwdRow.style.display=(modeSel.value==="password")?"flex":"none";'
+	html[#html+1] = '}'
+	html[#html+1] = '}'
+	html[#html+1] = 'function ocSaveAuthConfig(){'
+	html[#html+1] = 'var modeSel=document.getElementById("oc-auth-mode");'
+	html[#html+1] = 'var pwdInput=document.getElementById("oc-auth-password");'
+	html[#html+1] = 'var btn=document.getElementById("btn-save-auth");'
+	html[#html+1] = 'var el=document.getElementById("oc-auth-result");'
+	html[#html+1] = 'var tips=document.getElementById("oc-auth-tips");'
+	html[#html+1] = 'if(!modeSel)return;'
+	html[#html+1] = 'var auth_mode=modeSel.value;'
+	html[#html+1] = 'var auth_password="";'
+	html[#html+1] = 'if(auth_mode==="password"){'
+	html[#html+1] = 'auth_password=(pwdInput?pwdInput.value:"").trim();'
+	html[#html+1] = 'if(auth_password===""){'
+	html[#html+1] = 'if(el){el.style.display="block";el.innerHTML="<span style=\\"color:#cf222e;font-size:12px;\\">❌ 密码模式必须设置密码</span>";}'
+	html[#html+1] = 'return;'
+	html[#html+1] = '}'
+	html[#html+1] = '}'
+	html[#html+1] = 'if(!confirm("确定要切换到 "+((auth_mode==="password")?"密码":(auth_mode==="trusted-proxy")?"信任代理":(auth_mode==="none")?"无需认证":"令牌"))+" 认证模式并重启服务？\\n\\n重启后网关将以新认证模式运行。"))return;'
+	html[#html+1] = 'if(btn)btn.disabled=true;btn.textContent="⏳ 保存中...";'
+	html[#html+1] = 'if(tips)tips.innerHTML="⏳ 正在保存配置并重启网关...";'
+	html[#html+1] = 'if(el)el.style.display="none";'
+	html[#html+1] = '(new XHR()).get("' .. auth_mode_url .. '?action=save&auth_mode="+encodeURIComponent(auth_mode)+"&auth_password="+encodeURIComponent(auth_password),null,function(x){'
+	html[#html+1] = 'if(btn){btn.disabled=false;btn.textContent="💾 保存并重启";}'
+	html[#html+1] = 'try{var r=JSON.parse(x.responseText);'
+	html[#html+1] = 'if(r.status==="ok"){'
+	html[#html+1] = 'if(tips)tips.innerHTML="<span style=\\"color:#1a7f37;\\">✅ 配置已保存，服务正在重启...</span>";'
+	html[#html+1] = 'if(el){el.style.display="block";el.innerHTML="<div style=\\"border:1px solid #c6e9c9;background:#e6f7e9;padding:10px 14px;border-radius:6px;font-size:12px;\\">"+'
+	html[#html+1] = '"<strong style=\\"color:#1a7f37;\\">✅ "+r.message+"</strong><br/>"+'
+	html[#html+1] = '"<span style=\\"color:#555;\\">服务重启中，请稍等约 10 秒后刷新页面确认运行状态。</span></div>";'
+	html[#html+1] = '}'
+	html[#html+1] = '}else{'
+	html[#html+1] = 'if(tips)tips.innerHTML="<span style=\\"color:#cf222e;\\">❌ "+r.message+"</span>";'
+	html[#html+1] = '}'
+	html[#html+1] = '}catch(e){if(tips)tips.innerHTML="<span style=\\"color:#cf222e;\\">❌ 保存失败</span>";}'
+	html[#html+1] = '});}'
+	html[#html+1] = '// 页面加载时自动读取当前认证配置'
+	html[#html+1] = 'setTimeout(function(){ocLoadAuthConfig();},800);'
+
 	html[#html+1] = 'console.log("OpenClaw JS first block loaded");'
 
 	-- ═══ 备份/恢复 对话框 + 功能 (v2026.3.8+ openclaw backup) ═══

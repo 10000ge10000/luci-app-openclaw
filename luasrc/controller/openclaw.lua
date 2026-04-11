@@ -24,6 +24,9 @@ function index()
 	-- 服务控制 API
 	entry({"admin", "services", "openclaw", "service_ctl"}, call("action_service_ctl"), nil).leaf = true
 
+	-- 登录认证配置 API (v2026.3.9+)
+	entry({"admin", "services", "openclaw", "auth_config"}, call("action_auth_config"), nil).leaf = true
+
 	-- 安装/升级日志 API (轮询)
 	entry({"admin", "services", "openclaw", "setup_log"}, call("action_setup_log"), nil).leaf = true
 
@@ -372,6 +375,97 @@ function action_service_ctl()
 
 	http.prepare_content("application/json")
 	http.write_json({ status = "ok", action = action })
+end
+
+-- ═══════════════════════════════════════════
+-- 登录认证配置 API (v2026.3.9+)
+-- GET ?action=save&auth_mode=token|password|trusted-proxy|none&auth_password=xxx
+-- GET ?action=load  (default)
+-- ═══════════════════════════════════════════
+function action_auth_config()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+	local uci = require "luci.model.uci".cursor()
+
+	local action = http.formvalue("action") or "load"
+
+	-- 获取安装路径
+	local install_path_uci = uci:get("openclaw", "main", "install_path") or "/opt"
+	local install_path = install_path_uci .. "/openclaw"
+
+	if action == "save" then
+		local auth_mode = http.formvalue("auth_mode") or "token"
+		local auth_password = http.formvalue("auth_password") or ""
+
+		-- 安全检查: auth_mode 只允许 token, password, trusted-proxy 或 none
+		if auth_mode ~= "token" and auth_mode ~= "password" and auth_mode ~= "trusted-proxy" and auth_mode ~= "none" then
+			http.prepare_content("application/json")
+			http.write_json({ status = "error", message = "无效的认证模式: " .. auth_mode })
+			return
+		end
+
+		-- 如果切换到 password 模式，密码不能为空
+		if auth_mode == "password" and auth_password == "" then
+			http.prepare_content("application/json")
+			http.write_json({ status = "error", message = "密码模式必须设置密码" })
+			return
+		end
+
+		-- 密码使用 SHA-256 哈希存储（避免明文）
+		local password_hash = ""
+		if auth_password ~= "" and auth_mode == "password" then
+			local fp = io.popen("echo -n '" .. auth_password:gsub("'", "'\\''") .. "' | sha256sum | cut -d' ' -f1", "r")
+			if fp then
+				password_hash = fp:read("*a"):gsub("%s+", "")
+				fp:close()
+			end
+		end
+
+		-- 保存到 UCI 配置 (auth_password 存哈希值)
+		uci:set("openclaw", "main", "auth_mode", auth_mode)
+		if password_hash ~= "" then
+			uci:set("openclaw", "main", "auth_password", password_hash)
+		else
+			uci:delete("openclaw", "main", "auth_password")
+		end
+		uci:commit("openclaw")
+
+		-- 使用 init 脚本同步配置到 JSON，重启服务使配置生效
+		sys.exec("/etc/init.d/openclaw sync_uci_to_json >/dev/null 2>&1")
+		sys.exec("/etc/init.d/openclaw stop >/dev/null 2>&1")
+		sys.exec("sleep 2")
+		sys.exec("/etc/init.d/openclaw start >/dev/null 2>&1 &")
+
+		http.prepare_content("application/json")
+		http.write_json({
+			status = "ok",
+			message = "认证模式已切换为 " .. (auth_mode == "password" and "密码模式" or auth_mode == "trusted-proxy" and "信任代理模式" or auth_mode == "none" and "无需认证模式" or "令牌模式") .. "，服务正在重启"
+		})
+		return
+	end
+
+	-- action == "load" (default)
+	local auth_mode = uci:get("openclaw", "main", "auth_mode") or "token"
+	-- 从 JSON 读取真实值（以 JSON 为准，因为 init 脚本可能已同步）
+	local config_file = install_path .. "/data/.openclaw/openclaw.json"
+	local token_hint = ""
+	local f = io.open(config_file, "r")
+	if f then
+		local content = f:read("*a") or ""
+		f:close()
+		-- 提取 token 前 8 位作为 hint
+		local token = content:match('"token"%s*:%s*"([^"]+)"')
+		if token and token ~= "" then
+			token_hint = string.sub(token, 1, 8) .. "..."
+		end
+	end
+
+	http.prepare_content("application/json")
+	http.write_json({
+		status = "ok",
+		auth_mode = auth_mode,
+		token_hint = token_hint
+	})
 end
 
 -- ═══════════════════════════════════════════
