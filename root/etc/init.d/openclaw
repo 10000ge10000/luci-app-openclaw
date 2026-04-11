@@ -142,7 +142,11 @@ d.gateway.mode='local';
 if(!d.gateway.auth)d.gateway.auth={};
 d.gateway.auth.mode=process.env.OC_SYNC_AUTH_MODE||d.gateway.auth.mode||'token';
 d.gateway.auth.token=process.env.OC_SYNC_TOKEN||'';
-if(process.env.OC_SYNC_AUTH_PASSWORD)d.gateway.auth.password=process.env.OC_SYNC_AUTH_PASSWORD;
+if(process.env.OC_SYNC_AUTH_MODE==='password'&&process.env.OC_SYNC_AUTH_PASSWORD){
+ d.gateway.auth.password=process.env.OC_SYNC_AUTH_PASSWORD;
+}else{
+ delete d.gateway.auth.password;
+}
 if(!d.gateway.controlUi)d.gateway.controlUi={};
 d.gateway.controlUi.allowInsecureAuth=true;
 d.gateway.controlUi.dangerouslyDisableDeviceAuth=true;

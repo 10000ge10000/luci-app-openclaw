@@ -383,52 +383,27 @@ function action_auth_config()
 			return
 		end
 
-		-- 保存到 UCI 配置
+		-- 密码使用 SHA-256 哈希存储（避免明文）
+		local password_hash = ""
+		if auth_password ~= "" and auth_mode == "password" then
+			local fp = io.popen("echo -n '" .. auth_password:gsub("'", "'\\''") .. "' | sha256sum | cut -d' ' -f1", "r")
+			if fp then
+				password_hash = fp:read("*a"):gsub("%s+", "")
+				fp:close()
+			end
+		end
+
+		-- 保存到 UCI 配置 (auth_password 存哈希值)
 		uci:set("openclaw", "main", "auth_mode", auth_mode)
-		if auth_password ~= "" then
-			uci:set("openclaw", "main", "auth_password", auth_password)
+		if password_hash ~= "" then
+			uci:set("openclaw", "main", "auth_password", password_hash)
+		else
+			uci:delete("openclaw", "main", "auth_password")
 		end
 		uci:commit("openclaw")
 
-		-- 同步到 JSON 配置文件 (触发 init 脚本的 sync_uci_to_json)
-		-- init 脚本会读取 UCI 的 auth_mode 和 auth_password 并写入 openclaw.json
-		-- 但为了立即生效，我们直接修改 JSON (init 脚本重启后会再次同步)
-		local config_file = install_path .. "/data/.openclaw/openclaw.json"
-		local f = io.open(config_file, "r")
-		local content = ""
-		if f then
-			content = f:read("*a") or ""
-			f:close()
-		end
-
-		-- 解析并修改 JSON (简单字符串替换，避免依赖外部库)
-		-- 修改或添加 auth.mode
-		if content:match('"auth"%s*:%s*{') then
-			content = content:gsub('"mode"%s*:%s*"[^"]*"', '"mode": "' .. auth_mode .. '"')
-			if auth_mode == "password" and auth_password ~= "" then
-				-- 修改或添加 password 字段
-				if content:match('"password"%s*:%s*"[^"]*"') then
-					content = content:gsub('"password"%s*:%s*"[^"]*"', '"password": "' .. auth_password .. '"')
-				else
-					content = content:gsub('"auth"%s*:%s*{', '{"auth": {"password": "' .. auth_password .. '", ', 1)
-				end
-			end
-			-- 清空 token 以避免 OpenClaw 的 assertExplicitGatewayAuthModeWhenBothConfigured 强制覆盖
-			if content:match('"token"%s*:%s*""') then
-				-- already empty
-			elseif content:match('"token"%s*:%s*"[^"]*"') then
-				content = content:gsub('"token"%s*:%s*"[^"]*"', '"token": ""')
-			end
-		end
-
-		local wf = io.open(config_file, "w")
-		if wf then
-			wf:write(content)
-			wf:close()
-			sys.exec("chown openclaw:openclaw " .. config_file .. " 2>/dev/null")
-		end
-
-		-- 重启服务使配置生效
+		-- 使用 init 脚本同步配置到 JSON，重启服务使配置生效
+		sys.exec("/etc/init.d/openclaw sync_uci_to_json >/dev/null 2>&1")
 		sys.exec("/etc/init.d/openclaw stop >/dev/null 2>&1")
 		sys.exec("sleep 2")
 		sys.exec("/etc/init.d/openclaw start >/dev/null 2>&1 &")
