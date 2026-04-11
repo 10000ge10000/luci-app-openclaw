@@ -219,11 +219,27 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '});'
 	html[#html+1] = '}'
 
-	-- 轮询安装日志
+	-- 轮询安装日志 (智能滚动: 用户向上滚动时暂停自动滚动，滚动到底部时恢复)
 	html[#html+1] = 'var _lastLogLen=0;'
+	html[#html+1] = 'var _autoScrollEnabled=true;'  -- 智能滚动状态标志
 	html[#html+1] = 'function ocPollSetupLog(){'
 	html[#html+1] = 'if(_setupTimer)clearInterval(_setupTimer);'
 	html[#html+1] = '_lastLogLen=0;'
+	html[#html+1] = '_autoScrollEnabled=true;'  -- 初始状态: 启用自动滚动'
+	html[#html+1] = 'var logEl=document.getElementById("setup-log-content");'
+	-- 绑定滚动事件监听器 (只绑定一次)
+	html[#html+1] = 'if(!logEl._scrollListenerAttached){'
+	html[#html+1] = 'logEl.addEventListener("scroll",function(){'
+	html[#html+1] = 'var el=this;'
+	html[#html+1] = 'var atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<5;'
+	html[#html+1] = 'if(atBottom){'
+	html[#html+1] = '_autoScrollEnabled=true;'  -- 滚动到底部: 恢复自动滚动'
+	html[#html+1] = '}else{'
+	html[#html+1] = '_autoScrollEnabled=false;'  -- 用户向上滚动: 暂停自动滚动'
+	html[#html+1] = '}'
+	html[#html+1] = '});'
+	html[#html+1] = 'logEl._scrollListenerAttached=true;'
+	html[#html+1] = '}'
 	html[#html+1] = '_setupTimer=setInterval(function(){'
 	html[#html+1] = '(new XHR()).get("' .. log_url .. '",null,function(x){'
 	html[#html+1] = 'try{'
@@ -235,7 +251,10 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'logEl.textContent+=newLog;'
 	html[#html+1] = '_lastLogLen=r.log.length;'
 	html[#html+1] = '}'
+	html[#html+1] = '-- 智能滚动: 仅在自动滚动启用时滚动到底部'
+	html[#html+1] = 'if(_autoScrollEnabled){'
 	html[#html+1] = 'logEl.scrollTop=logEl.scrollHeight;'
+	html[#html+1] = '}'
 	html[#html+1] = 'if(r.state==="running"){'
 	html[#html+1] = 'statusEl.innerHTML="<span style=\\"color:#7aa2f7;\\">⏳ 安装进行中...</span>";'
 	html[#html+1] = '}else if(r.state==="success"){'
@@ -425,6 +444,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'function ocPollPluginUpgradeLog(){'
 	html[#html+1] = 'if(_pluginUpgradeTimer)clearInterval(_pluginUpgradeTimer);'
 	html[#html+1] = '_pluginPollErrors=0;'
+	html[#html+1] = '_autoScrollEnabled=true;'  -- 重置: 启用自动滚动'
 	html[#html+1] = '_pluginUpgradeTimer=setInterval(function(){'
 	html[#html+1] = '(new XHR()).get("' .. plugin_upgrade_log_url .. '",null,function(x){'
 	html[#html+1] = 'try{'
@@ -433,7 +453,10 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var logEl=document.getElementById("setup-log-content");'
 	html[#html+1] = 'var statusEl=document.getElementById("setup-log-status");'
 	html[#html+1] = 'if(r.log)logEl.textContent=r.log;'
+	html[#html+1] = '-- 智能滚动: 仅在自动滚动启用时滚动到底部'
+	html[#html+1] = 'if(_autoScrollEnabled){'
 	html[#html+1] = 'logEl.scrollTop=logEl.scrollHeight;'
+	html[#html+1] = '}'
 	html[#html+1] = 'if(r.state==="running"){'
 	html[#html+1] = 'statusEl.innerHTML="<span style=\\"color:#7aa2f7;\\">⏳ 插件升级中...</span>";'
 	html[#html+1] = '}else if(r.state==="success"){'
@@ -494,7 +517,6 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}else{el.innerHTML="<span style=\\"color:red\\">❌ "+(r.message||"卸载失败")+"</span>";}'
 	html[#html+1] = '}catch(e){el.innerHTML="<span style=\\"color:red\\">❌ 请求失败</span>";}'
 	html[#html+1] = '});}'
-	html[#html+1] = 'console.log("OpenClaw JS first block loaded");'
 
 	-- ═══ 登录认证设置 (v2026.3.9+) ═══
 	html[#html+1] = 'var _oc_auth_loaded=false;'
@@ -519,7 +541,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}else if(r.auth_mode==="none"){'
 	html[#html+1] = 'tips.innerHTML="⏭ 当前: 无需认证模式 | 网关完全开放，请谨慎使用";'
 	html[#html+1] = '}else{'
-	html[#html+1] = 'tips.innerHTML="🔑 当前: 令牌模式 | 令牌: <code style="background:#f6f8fa;padding:1px 4px;border-radius:3px;">"+r.token_hint+"</code> (仅显示前8位)";'
+	html[#html+1] = 'tips.innerHTML="🔑 当前: 令牌模式 | 令牌: <code style=\\"background:#f6f8fa;padding:1px 4px;border-radius:3px;\\">"+r.token_hint+"</code> (仅显示前8位)";'
 	html[#html+1] = '}'
 	html[#html+1] = '}'
 	html[#html+1] = 'if(el)el.style.display="none";'
@@ -572,6 +594,8 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '});}'
 	html[#html+1] = '// 页面加载时自动读取当前认证配置'
 	html[#html+1] = 'setTimeout(function(){ocLoadAuthConfig();},800);'
+
+	html[#html+1] = 'console.log("OpenClaw JS first block loaded");'
 
 	-- ═══ 备份/恢复 对话框 + 功能 (v2026.3.8+ openclaw backup) ═══
 	local backup_url = luci.dispatcher.build_url("admin", "services", "openclaw", "backup")
