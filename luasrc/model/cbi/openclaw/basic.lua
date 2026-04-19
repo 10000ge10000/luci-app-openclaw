@@ -253,7 +253,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}'
 	-- 网络问题
 	html[#html+1] = 'if(ll.indexOf("could not resolve")>=0||ll.indexOf("connection timed out")>=0||ll.indexOf("curl")>=0&&ll.indexOf("fail")>=0||ll.indexOf("wget")>=0&&ll.indexOf("fail")>=0||ll.indexOf("所有镜像均下载失败")>=0){'
-	html[#html+1] = 'reasons.push("🌐 <b>网络连接失败</b> — 无法下载 Node.js。请检查路由器是否能访问外网。<br/>&nbsp;&nbsp;💡 解决: 检查 DNS 设置和网络连接，或手动指定镜像: <code>NODE_MIRROR=https://npmmirror.com/mirrors/node openclaw-env setup</code>");'
+html[#html+1] = 'reasons.push("🌐 <b>网络连接失败</b> — 无法下载 Node.js。请检查路由器是否能访问外网。<br/>&nbsp;&nbsp;💡 解决: 检查 DNS 设置和网络连接；ARM64 musl 设备可优先查看 hotwa/luci-app-openclaw 最新发布与内置备用源状态。");'
 	html[#html+1] = '}'
 	-- 磁盘空间
 	html[#html+1] = 'if(ll.indexOf("no space")>=0||ll.indexOf("disk full")>=0||ll.indexOf("enospc")>=0){'

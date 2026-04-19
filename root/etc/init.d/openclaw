@@ -514,6 +514,13 @@ _get_pid_by_port() {
 	fi
 }
 
+_get_gateway_procd_field() {
+	local field="$1"
+	command -v ubus >/dev/null 2>&1 || return 0
+	command -v jsonfilter >/dev/null 2>&1 || return 0
+	ubus call service list '{"name":"openclaw"}' 2>/dev/null | jsonfilter -e "@.openclaw.instances.gateway.${field}" 2>/dev/null || true
+}
+
 # Gateway port
 if _check_port "$port"; then
 echo "网关:     运行中 (端口 $port)"
@@ -537,10 +544,17 @@ local mins=$(( (uptime % 3600) / 60 ))
 echo "运行时间: ${hours}小时 ${mins}分钟"
 fi
 fi
-elif pgrep -f "openclaw.*gateway" >/dev/null 2>&1; then
+else
+local gw_running gw_exit_code
+gw_running=$(_get_gateway_procd_field "running" | tr -d '[:space:]')
+gw_exit_code=$(_get_gateway_procd_field "exit_code" | tr -d '[:space:]')
+if [ "$gw_running" = "true" ]; then
 echo "网关:     正在启动 (首次启动可能需要 2~5 分钟)"
+elif [ -n "$gw_exit_code" ] && [ "$gw_exit_code" != "0" ]; then
+echo "网关:     启动失败 (最近退出码 ${gw_exit_code})"
 else
 echo "网关:     已停止"
+fi
 fi
 
 # PTY port
