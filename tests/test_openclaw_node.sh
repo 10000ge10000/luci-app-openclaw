@@ -68,37 +68,37 @@ cat > "$tmpdir/node-bins-release.json" <<'EOF'
   "assets": [
     {
       "name": "node-v22.15.1-linux-arm64-musl.tar.xz",
-      "browser_download_url": "https://github.com/hotwa/luci-app-openclaw/releases/download/node-bins/node-v22.15.1-linux-arm64-musl.tar.xz"
+      "browser_download_url": "https://github.com/10000ge10000/luci-app-openclaw/releases/download/node-bins/node-v22.15.1-linux-arm64-musl.tar.xz"
     },
     {
       "name": "node-v24.14.1-linux-arm64-musl.tar.xz",
-      "browser_download_url": "https://github.com/hotwa/luci-app-openclaw/releases/download/node-bins/node-v24.14.1-linux-arm64-musl.tar.xz"
+      "browser_download_url": "https://github.com/10000ge10000/luci-app-openclaw/releases/download/node-bins/node-v24.14.1-linux-arm64-musl.tar.xz"
     },
     {
       "name": "node-v22.16.0-linux-x64-musl.tar.xz",
-      "browser_download_url": "https://github.com/hotwa/luci-app-openclaw/releases/download/node-bins/node-v22.16.0-linux-x64-musl.tar.xz"
+      "browser_download_url": "https://github.com/10000ge10000/luci-app-openclaw/releases/download/node-bins/node-v22.16.0-linux-x64-musl.tar.xz"
     }
   ]
 }
 EOF
 
 selected_url=$(oc_select_node_release_asset_url "$tmpdir/node-bins-release.json" "linux-arm64" "24.14.1") || fail "select compatible ARM64 musl asset"
-[ "$selected_url" = "https://github.com/hotwa/luci-app-openclaw/releases/download/node-bins/node-v24.14.1-linux-arm64-musl.tar.xz" ] || fail "selected asset should be newest compatible ARM64 musl release"
+[ "$selected_url" = "https://github.com/10000ge10000/luci-app-openclaw/releases/download/node-bins/node-v24.14.1-linux-arm64-musl.tar.xz" ] || fail "selected asset should be newest compatible ARM64 musl release"
 
-cat > "$tmpdir/gitea-node-bins-release.json" <<'EOF'
+cat > "$tmpdir/mirror-node-bins-release.json" <<'EOF'
 {
   "tag_name": "node-bins",
   "assets": [
     {
       "name": "node-v24.14.1-linux-arm64-musl.tar.xz",
-      "browser_download_url": "http://100.64.0.27:8418/lingyuzeng/luci-app-openclaw/releases/download/node-bins/node-v24.14.1-linux-arm64-musl.tar.xz"
+      "browser_download_url": "https://github.com/10000ge10000/luci-app-openclaw/releases/download/node-bins/node-v24.14.1-linux-arm64-musl.tar.xz"
     }
   ]
 }
 EOF
 
-gitea_selected_url=$(oc_select_node_release_asset_url "$tmpdir/gitea-node-bins-release.json" "linux-arm64" "24.14.1") || fail "select compatible ARM64 musl asset from Gitea release JSON"
-[ "$gitea_selected_url" = "http://100.64.0.27:8418/lingyuzeng/luci-app-openclaw/releases/download/node-bins/node-v24.14.1-linux-arm64-musl.tar.xz" ] || fail "selected Gitea asset should preserve browser_download_url"
+mirror_selected_url=$(oc_select_node_release_asset_url "$tmpdir/mirror-node-bins-release.json" "linux-arm64" "24.14.1") || fail "select compatible ARM64 musl asset from mirror release JSON"
+[ "$mirror_selected_url" = "https://github.com/10000ge10000/luci-app-openclaw/releases/download/node-bins/node-v24.14.1-linux-arm64-musl.tar.xz" ] || fail "selected mirror asset should preserve browser_download_url"
 
 if oc_select_node_release_asset_url "$tmpdir/node-bins-release.json" "linux-arm64" "24.14.2" >/dev/null 2>&1; then
 	fail "asset selection should fail when no compatible version exists"

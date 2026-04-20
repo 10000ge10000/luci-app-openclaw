@@ -4,7 +4,7 @@ module("luci.controller.openclaw", package.seeall)
 local nixio_fs = require "nixio.fs"
 local util = require "luci.util"
 local oc_paths = require "openclaw.paths"
-local GITHUB_REPO = "hotwa/luci-app-openclaw"
+local GITHUB_REPO = "10000ge10000/luci-app-openclaw"
 local GITHUB_RELEASES_URL = "https://github.com/" .. GITHUB_REPO .. "/releases"
 local GITHUB_API_RELEASES_URL = "https://api.github.com/repos/" .. GITHUB_REPO .. "/releases"
 

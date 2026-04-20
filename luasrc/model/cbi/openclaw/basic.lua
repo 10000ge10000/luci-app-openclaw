@@ -253,7 +253,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}'
 	-- ARM64 musl 专属下载问题
 	html[#html+1] = 'if(ll.indexOf("arm64 musl")>=0&&(ll.indexOf("release api")>=0||ll.indexOf("node-bins")>=0||ll.indexOf("未找到兼容的 arm64 musl node.js 资产")>=0||ll.indexOf("无法获取 arm64 musl node.js 发布元数据")>=0)){'
-	html[#html+1] = 'reasons.push("🧩 <b>ARM64 musl Node.js 资产不可用</b> — 当前设备依赖仓库发布的 <code>node-bins</code> 资产，而不是通用 Node 镜像。<br/>&nbsp;&nbsp;💡 解决: 检查 <code>hotwa/luci-app-openclaw</code> 的 <code>node-bins</code> release 是否存在满足 <code>>=22.16.0</code> 的 <code>linux-arm64-musl</code> 资产，并确认路由器可访问 GitHub API 与 release 页面。");'
+	html[#html+1] = 'reasons.push("🧩 <b>ARM64 musl Node.js 资产不可用</b> — 当前设备依赖仓库发布的 <code>node-bins</code> 资产，而不是通用 Node 镜像。<br/>&nbsp;&nbsp;💡 解决: 检查 <code>10000ge10000/luci-app-openclaw</code> 的 <code>node-bins</code> release 是否存在满足 <code>>=22.16.0</code> 的 <code>linux-arm64-musl</code> 资产，并确认路由器可访问 GitHub API 与 release 页面。");'
 	html[#html+1] = '}'
 	-- 通用网络问题
 	html[#html+1] = 'if((ll.indexOf("could not resolve")>=0||ll.indexOf("connection timed out")>=0||ll.indexOf("curl")>=0&&ll.indexOf("fail")>=0||ll.indexOf("wget")>=0&&ll.indexOf("fail")>=0||ll.indexOf("所有镜像均下载失败")>=0)&&!(ll.indexOf("arm64 musl")>=0&&(ll.indexOf("release api")>=0||ll.indexOf("node-bins")>=0||ll.indexOf("未找到兼容的 arm64 musl node.js 资产")>=0||ll.indexOf("无法获取 arm64 musl node.js 发布元数据")>=0))){'
@@ -335,7 +335,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}'
 	html[#html+1] = 'act.innerHTML=notesHtml'
 	html[#html+1] = '+\'<button class="btn cbi-button cbi-button-apply" type="button" onclick="ocPluginUpgrade()" id="btn-plugin-upgrade">⬆️ 升级插件 v\'+r.plugin_latest+\'</button>\''
-	html[#html+1] = '+\' <a href="https://github.com/hotwa/luci-app-openclaw/releases/latest" target="_blank" rel="noopener" class="btn cbi-button cbi-button-action" style="text-decoration:none;">📥 手动下载</a>\';'
+	html[#html+1] = '+\' <a href="https://github.com/10000ge10000/luci-app-openclaw/releases/latest" target="_blank" rel="noopener" class="btn cbi-button cbi-button-action" style="text-decoration:none;">📥 手动下载</a>\';'
 	html[#html+1] = '}'
 	html[#html+1] = '}catch(e){el.innerHTML="<span style=\\"color:red\\">❌ 检测失败</span>";}'
 	html[#html+1] = '});}'
@@ -618,8 +618,8 @@ guide.cfgvalue = function()
 	html[#html+1] = '<a href="https://space.bilibili.com/59438380" target="_blank" rel="noopener" style="color:#00a1d6;font-weight:bold;text-decoration:none;">'
 	html[#html+1] = '🔗 space.bilibili.com/59438380</a>'
 	html[#html+1] = '<span style="margin-left:16px;color:#888;">GitHub 项目：</span>'
-	html[#html+1] = '<a href="https://github.com/hotwa/luci-app-openclaw" target="_blank" rel="noopener" style="color:#24292f;font-weight:bold;text-decoration:none;">'
-	html[#html+1] = '🐙 hotwa/luci-app-openclaw</a></div></div>'
+	html[#html+1] = '<a href="https://github.com/10000ge10000/luci-app-openclaw" target="_blank" rel="noopener" style="color:#24292f;font-weight:bold;text-decoration:none;">'
+	html[#html+1] = '🐙 10000ge10000/luci-app-openclaw</a></div></div>'
 	return table.concat(html, "\n")
 end
 
