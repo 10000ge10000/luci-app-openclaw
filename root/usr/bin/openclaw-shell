@@ -1,0 +1,21 @@
+#!/bin/sh
+
+[ -r /usr/libexec/openclaw-paths.sh ] && . /usr/libexec/openclaw-paths.sh
+
+configured_path="${OPENCLAW_INSTALL_PATH:-$(uci -q get openclaw.main.install_path 2>/dev/null || echo /opt)}"
+oc_load_paths "$configured_path" || { echo "Invalid OpenClaw install path: $configured_path" >&2; exit 1; }
+
+[ -x "$NODE_BASE/bin/node" ] || { echo "OpenClaw Node.js not found: $NODE_BASE/bin/node" >&2; exit 127; }
+
+export HOME="$OC_DATA"
+export OPENCLAW_HOME="$OC_DATA"
+export OPENCLAW_STATE_DIR="$OC_DATA/.openclaw"
+export OPENCLAW_CONFIG_PATH="$CONFIG_FILE"
+export NODE_ICU_DATA="$NODE_BASE/share/icu"
+export PATH="$NODE_BASE/bin:$OC_GLOBAL/bin:$PATH"
+
+echo "OpenClaw environment: $OC_ROOT"
+echo "Exit this shell to restore the parent environment."
+
+if [ -x /usr/bin/zsh ]; then exec /usr/bin/zsh -f; fi
+exec /bin/sh

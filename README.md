@@ -27,9 +27,9 @@
 
 | 组件 | 默认版本 | 说明 |
 |------|----------|------|
-| OpenClaw | `2026.5.12` | npm `latest` 稳定标签；不默认追 `2026.5.14-beta.2` |
-| Node.js | `22.16.0` | 安装后会按 OpenClaw `engines.node` 做强校验，低于要求会直接失败 |
-| 微信插件 | `@tencent-weixin/openclaw-weixin@2.4.3` | CLI 使用 `@tencent-weixin/openclaw-weixin-cli@2.1.4` |
+| OpenClaw | `2026.6.1` | 维护者验证稳定版；升级命令使用 npm 正式 `latest` 标签 |
+| Node.js | `22.19.0` | 安装后会按 OpenClaw `engines.node` 做强校验，低于要求会直接失败 |
+| 微信插件 | 官方兼容版本 | 使用 `@tencent-weixin/openclaw-weixin-cli@latest` 自动选择兼容版本 |
 
 ## 📦 安装
 
@@ -92,6 +92,34 @@ find bin/ -name "luci-app-openclaw*.ipk"
 3. 进入「Web 控制台」添加 AI 模型和 API Key
 4. 进入「配置管理」可使用向导配置消息渠道
 
+## 命令行使用
+
+安装后提供以下命令：
+
+```bash
+# 运行 OpenClaw CLI，仅对当前命令注入 HOME、PATH 和状态目录
+openclaw --version
+openclaw status
+
+# 进入临时隔离的 OpenClaw zsh；执行 exit 后恢复父级 Shell 环境
+openclaw-shell
+
+# 检查运行环境
+openclaw-env check
+
+# 升级到 npm 正式 latest 标签，不安装 beta、rc、next 等测试版本
+openclaw-env upgrade
+
+# 仅下载或更新默认 Node.js 22.19.0
+openclaw-env node
+```
+
+`openclaw` 和 `openclaw-shell` 不会通过 `/etc/profile.d` 修改 SSH 父进程的 `HOME` 或 `PATH`。自定义安装路径时，可为单次命令设置 `OPENCLAW_INSTALL_PATH`：
+
+```bash
+OPENCLAW_INSTALL_PATH=/mnt/data openclaw status
+```
+
 ## 自定义安装路径
 
 UCI 字段仍然是 `openclaw.main.install_path`，语义为基础目录。例如：
@@ -148,7 +176,9 @@ luci-app-openclaw/
 │   │   └── uci-defaults/99-openclaw  # 初始化脚本
 │   └── usr/
 │       ├── libexec/                  # 共享 shell helper
-│       ├── bin/openclaw-env          # 环境管理工具
+│       ├── bin/openclaw              # OpenClaw CLI 隔离环境包装器
+│       ├── bin/openclaw-shell        # 一次性隔离 zsh
+│       ├── bin/openclaw-env          # 环境安装、检查和升级工具
 │       └── share/openclaw/           # 配置终端资源
 ├── scripts/
 │   ├── build_ipk.sh                  # 本地 IPK 构建

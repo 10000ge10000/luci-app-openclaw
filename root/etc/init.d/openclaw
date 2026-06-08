@@ -95,15 +95,40 @@ done < "$_tmpf"
 rm -f "$_tmpf"
 }
 
+fix_managed_plugin_ownership() {
+	local projects="${OC_DATA}/.openclaw/npm/projects"
+	[ -d "$projects" ] || return 0
+	local manifest plugin_dir weixin_found=0
+	for manifest in $(find "$projects" -path '*/node_modules/*/openclaw.plugin.json' -type f 2>/dev/null); do
+		plugin_dir=${manifest%/*}
+		chown -R root:root "$plugin_dir" 2>/dev/null || true
+		chmod -R a+rX "$plugin_dir" 2>/dev/null || true
+		case "$plugin_dir" in
+			*/@tencent-weixin/openclaw-weixin) weixin_found=1 ;;
+		esac
+	done
+	if [ "$weixin_found" = "1" ] && [ -f "$CONFIG_FILE" ] && [ -x "$NODE_BIN" ]; then
+		OC_CONFIG_FILE="$CONFIG_FILE" "$NODE_BIN" -e '
+const fs=require("fs"),f=process.env.OC_CONFIG_FILE;
+let d={};try{d=JSON.parse(fs.readFileSync(f,"utf8"));}catch(e){}
+d.plugins=d.plugins||{};d.plugins.entries=d.plugins.entries||{};
+const entry=d.plugins.entries["openclaw-weixin"]||{};entry.enabled=true;
+d.plugins.entries["openclaw-weixin"]=entry;
+fs.writeFileSync(f,JSON.stringify(d,null,2));
+' 2>/dev/null || true
+		chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+	fi
+}
+
 patch_iframe_headers() {
 # 移除 OpenClaw 网关的 X-Frame-Options 和 frame-ancestors 限制，允许 LuCI iframe 嵌入
-# v2026.4.x: 安全头设置迁移到 server.impl-*.js 文件
+# v2026.5.x: 安全头设置迁移到 control-ui-*.js，兼容 server.impl-*.js
 local patched=0
 
 # 1. 搜索 server.impl-*.js (v2026.4.x 新位置)
-for f in $(find "${OC_GLOBAL}/lib/node_modules/openclaw/dist" -name "server.impl-*.js" -type f 2>/dev/null); do
+for f in $(find "${OC_GLOBAL}/lib/node_modules/openclaw/dist" -type f \( -name "server.impl-*.js" -o -name "control-ui-*.js" \) 2>/dev/null); do
 	if grep -q "X-Frame-Options.*DENY\|frame-ancestors.*none" "$f" 2>/dev/null; then
-		sed -i 's|res\.setHeader("X-Frame-Options", "DENY")|res.setHeader("X-Frame-Options", "ALLOW-FROM *") // patched by luci-app-openclaw|g' "$f"
+		sed -i 's|res\.setHeader("X-Frame-Options", "DENY");|// res.setHeader("X-Frame-Options", "DENY"); // patched by luci-app-openclaw|g' "$f"
 		sed -i "s|\"frame-ancestors 'none'\"|\"frame-ancestors *\"|g" "$f"
 		logger -t openclaw "Patched iframe headers in $f"
 		patched=1
@@ -359,6 +384,7 @@ fi
 
 	# 修复数据目录权限 (防止 root 用户操作后留下无法读取的文件)
 	chown -R openclaw:openclaw "$OC_DATA" 2>/dev/null || true
+	fix_managed_plugin_ownership
 
 	# v2026.4.9: 修复插件目录权限 (OpenClaw 要求插件目录属主为 root)
 	# 详见: https://github.com/nicepkg/openclaw/releases/tag/v2026.4.9
@@ -502,6 +528,8 @@ if(d.gateway&&d.gateway.auth&&d.gateway.auth.token)process.stdout.write(d.gatewa
 		fi
 
 	# Patch iframe 安全头，允许 LuCI 嵌入
+	fix_managed_plugin_ownership
+
 	patch_iframe_headers
 
 # 将 UCI bind 映射到 openclaw gateway --bind 参数

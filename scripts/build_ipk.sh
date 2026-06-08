@@ -41,15 +41,10 @@ mkdir -p "$DATA_DIR/etc/init.d"
 cp "$PKG_DIR/root/etc/init.d/openclaw" "$DATA_DIR/etc/init.d/"
 chmod +x "$DATA_DIR/etc/init.d/openclaw"
 
-# profile.d (v1.0.16+: 全局环境变量)
-mkdir -p "$DATA_DIR/etc/profile.d"
-cp "$PKG_DIR/root/etc/profile.d/openclaw.sh" "$DATA_DIR/etc/profile.d/"
-chmod +x "$DATA_DIR/etc/profile.d/openclaw.sh"
-
 # bin
 mkdir -p "$DATA_DIR/usr/bin"
-cp "$PKG_DIR/root/usr/bin/openclaw-env" "$DATA_DIR/usr/bin/"
-chmod +x "$DATA_DIR/usr/bin/openclaw-env"
+cp "$PKG_DIR/root/usr/bin/openclaw-env" "$PKG_DIR/root/usr/bin/openclaw" "$PKG_DIR/root/usr/bin/openclaw-shell" "$DATA_DIR/usr/bin/"
+chmod +x "$DATA_DIR/usr/bin/openclaw-env" "$DATA_DIR/usr/bin/openclaw" "$DATA_DIR/usr/bin/openclaw-shell"
 
 # shared shell helpers
 mkdir -p "$DATA_DIR/usr/libexec"
@@ -85,11 +80,6 @@ cp "$PKG_DIR/root/usr/share/openclaw/"*.js "$DATA_DIR/usr/share/openclaw/"
 
 # Web PTY UI
 cp -r "$PKG_DIR/root/usr/share/openclaw/ui" "$DATA_DIR/usr/share/openclaw/"
-
-# profile.d 环境变量脚本 (v1.0.16+)
-mkdir -p "$DATA_DIR/etc/profile.d"
-cp "$PKG_DIR/root/etc/profile.d/openclaw.sh" "$DATA_DIR/etc/profile.d/"
-chmod +x "$DATA_DIR/etc/profile.d/openclaw.sh"
 
 # 计算安装大小
 INSTALLED_SIZE=$(du -sk "$DATA_DIR" | awk '{print $1}')

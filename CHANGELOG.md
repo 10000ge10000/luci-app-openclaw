@@ -3,6 +3,37 @@
 本项目所有重大变更都将记录在此文件中。
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
+## [2.0.6] - 2026-06-08
+
+### 适配版本
+
+- 默认 Node.js 更新为 `22.19.0`。
+- OpenClaw 维护者验证稳定版更新为 `2026.6.1`。
+
+### 修复命令行环境
+
+- 新增独立 `/usr/bin/openclaw` 包装器，只对子进程设置 OpenClaw HOME 和 PATH，不污染父级 zsh。
+- 新增 `openclaw-shell`，进入一次性隔离 zsh，退出后恢复原环境。
+- README 增加 `openclaw`、`openclaw-shell`、`openclaw-env check/upgrade/node` 使用示例。
+- 停止通过 `/etc/profile.d/openclaw.sh` 注入 OpenClaw 环境。
+
+### 修复升级策略
+
+- `openclaw-env upgrade` 始终安装 npm 正式 `latest` 标签。
+- 安装入口仅接受 `stable` 和 `latest`，拒绝 beta、rc、next 等测试版本。
+- `latest` 安装失败时不回退到脚本固定版本。
+
+### 修复微信插件
+
+- 使用 OpenClaw 官方 `plugins install/uninstall` 命令管理微信插件。
+- 支持新版 `.openclaw/npm/projects/*/node_modules/@tencent-weixin/openclaw-weixin` 安装路径。
+- 修复 npm 管理插件所有权，避免被新版 OpenClaw 判定为 blocked plugin candidate。
+- 微信版本检测改用 `npm view`，扫码登录不再重置整个插件目录所有权。
+- 修复 OpenClaw 2026.6.1 中 Web 控制台因 `control-ui-*.js` 安全头而拒绝 iframe 嵌入。
+- 微信状态页支持 managed npm project 路径，刷新按钮增加加载状态、缓存绕过和失败提示。
+- 增加微信登录二维码弹窗可用高度，避免二维码内容显示不完整。
+- 修复微信账号退出：按插件账号存储格式清理凭据、同步缓存和账号索引，并返回真实执行结果。
+
 
 ## [2.0.5] - 2026-05-15
 

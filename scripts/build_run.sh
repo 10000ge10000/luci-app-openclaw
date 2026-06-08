@@ -44,15 +44,10 @@ install_files() {
 	cp "$PKG_DIR/root/etc/init.d/openclaw" "$dest/etc/init.d/"
 	chmod +x "$dest/etc/init.d/openclaw"
 
-	# profile.d (v1.0.16+: 全局环境变量)
-	mkdir -p "$dest/etc/profile.d"
-	cp "$PKG_DIR/root/etc/profile.d/openclaw.sh" "$dest/etc/profile.d/"
-	chmod +x "$dest/etc/profile.d/openclaw.sh"
-
 	# bin
 	mkdir -p "$dest/usr/bin"
-	cp "$PKG_DIR/root/usr/bin/openclaw-env" "$dest/usr/bin/"
-	chmod +x "$dest/usr/bin/openclaw-env"
+	cp "$PKG_DIR/root/usr/bin/openclaw-env" "$PKG_DIR/root/usr/bin/openclaw" "$PKG_DIR/root/usr/bin/openclaw-shell" "$dest/usr/bin/"
+	chmod +x "$dest/usr/bin/openclaw-env" "$dest/usr/bin/openclaw" "$dest/usr/bin/openclaw-shell"
 
 	# shared shell helpers
 	mkdir -p "$dest/usr/libexec"

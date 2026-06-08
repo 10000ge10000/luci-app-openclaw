@@ -7,20 +7,20 @@
 #   openclaw-env upgrade   — 升级 OpenClaw 到最新版
 #   openclaw-env node      — 仅下载/更新 Node.js
 # 环境变量:
-#   OC_VERSION  — 指定 OpenClaw 版本 (如 2026.3.1)，不设置则安装最新版
+#   OC_VERSION  — stable 使用维护验证版，latest 使用 npm 正式 latest；不支持测试版本
 # ============================================================================
 set -e
 
 # ── Node.js 版本策略 (双版本兼容) ──
-# V2: 当前推荐版本，用于 OpenClaw v2026.3.22+ (要求 >= 22.14.0，使用 22.16.0 确保兼容)
+# V2: 当前推荐版本，用于 OpenClaw v2026.6.1+ (使用 22.19.0 确保兼容)
 # V1: 旧版兼容，用于 OpenClaw v2026.3.8 及更早版本
-NODE_VERSION_V2="22.16.0"
+NODE_VERSION_V2="22.19.0"
 NODE_VERSION_V1="22.15.1"
 # 默认使用 V2 版本 (可通过 NODE_VERSION 环境变量覆盖)
 NODE_VERSION="${NODE_VERSION:-${NODE_VERSION_V2}}"
 # 经过验证的 OpenClaw 稳定版本 (更新此值需同步测试)
-OC_TESTED_VERSION="2026.5.12"
-# OpenClaw 2026.5.x package.json engines.node 的最低要求。
+OC_TESTED_VERSION="2026.6.1"
+# OpenClaw 2026.6.1 package.json engines.node 的最低要求。
 # 如果未来上游提高要求，安装成功后还会从 package.json 再做一次强校验。
 OC_NODE_MIN_VERSION="${OC_NODE_MIN_VERSION:-22.14.0}"
 # 用户可通过 OC_VERSION 环境变量覆盖安装版本
@@ -416,8 +416,9 @@ install_openclaw() {
 		oc_pkg="openclaw@latest"
 		log_info "安装 npm latest 稳定标签版本"
 	else
-		oc_pkg="openclaw@${OC_VERSION}"
-		log_info "指定版本: v${OC_VERSION}"
+		log_error "不支持的版本选择: ${OC_VERSION}"
+		log_error "仅支持 stable 或 latest；不会安装 beta、rc、next 等测试版本。"
+		exit 1
 	fi
 
 	local libc_type
@@ -536,8 +537,10 @@ do_setup() {
 	echo ""
 	echo "  架构:       $(uname -m)"
 	echo "  Node 版本:  v${node_ver}"
-	if [ -n "$OC_VERSION" ]; then
-		echo "  OpenClaw:   v${OC_VERSION} (稳定版)"
+	if [ "$OC_VERSION" = "latest" ]; then
+		echo "  OpenClaw:   npm latest (正式版)"
+	elif [ -n "$OC_VERSION" ]; then
+		echo "  OpenClaw:   v${OC_TESTED_VERSION} (维护者验证版)"
 	else
 		echo "  OpenClaw:   v${OC_TESTED_VERSION} (默认稳定版)"
 	fi
@@ -644,9 +647,8 @@ do_upgrade() {
 
 	echo "=== 正在升级 OpenClaw ==="
 	echo ""
-	local target_pkg="openclaw@${OC_TESTED_VERSION}"
-	[ "$OC_VERSION" = "latest" ] && target_pkg="openclaw@latest"
-	[ -n "$OC_VERSION" ] && [ "$OC_VERSION" != "latest" ] && [ "$OC_VERSION" != "stable" ] && target_pkg="openclaw@${OC_VERSION}"
+	# upgrade 始终跟随 npm 正式 latest 标签，不回退到维护者验证版。
+	local target_pkg="openclaw@latest"
 	echo "目标版本: ${target_pkg#openclaw@}"
 	"$NPM_BIN" install -g "$target_pkg" --prefix="$OC_GLOBAL" $install_flags 2>&1
 
