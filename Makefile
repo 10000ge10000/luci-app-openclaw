@@ -13,7 +13,7 @@ PKG_MAINTAINER:=10000ge10000 <10000ge10000@users.noreply.github.com>
 PKG_LICENSE:=GPL-3.0
 
 LUCI_TITLE:=OpenClaw AI 网关 LuCI 管理插件
-LUCI_DEPENDS:=+luci-compat +luci-base +curl +openssl-util +script-utils +tar +libstdcpp6
+LUCI_DEPENDS:=+luci-compat +luci-base +curl +openssl-util +script-utils +tar +libstdcpp
 LUCI_PKGARCH:=all
 
 # 优先使用 luci.mk (feeds 模式), 不可用时回退 package.mk
