@@ -123,13 +123,12 @@ jobs:
         run: |
           NODE_VER="${{ steps.build_versions.outputs.node_version }}"
           mkdir -p dist
-          echo "=== Building Node.js v${NODE_VER} ARM64 musl (apk lts mode) ==="
+          echo "=== Building Node.js v${NODE_VER} ARM64 musl (official musl asset) ==="
           docker run --rm --platform linux/arm64 \
             -v "$PWD/dist:/output" \
             -v "$PWD/scripts/build-node-musl.sh:/build-node-musl.sh:ro" \
             -e "NODE_VER=${NODE_VER}" \
-            -e "BUILD_MODE=apk" \
-            -e "PKG_TYPE=lts" \
+            -e "BUILD_MODE=unofficial" \
             alpine:3.21 sh /build-node-musl.sh
 
       - name: List outputs

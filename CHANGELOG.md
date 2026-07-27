@@ -9,6 +9,7 @@
 ### 适配 OpenClaw 2026.6.33
 
 - 默认 OpenClaw 固定到 `2026.6.33`（npm `extended-stable`），Node.js ARM64/musl 固定到 `22.23.1`。
+- ARM64 构建改用 Node.js 官方 `unofficial-builds` musl 资产并校验 SHA256，避免 Alpine 仓库版本漂移。
 - 新增 `extended-stable` 安装选项；`latest` 明确标注未经插件测试，避免误装破坏性上游版本。
 - 启动和状态页检测已安装 OpenClaw 与适配版本的漂移，并给出可读提示。
 - 微信插件安装顺序统一为官方 `plugins install --force --pin`、`plugins enable`、`plugins registry --refresh`、`plugins inspect`。

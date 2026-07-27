@@ -21,8 +21,9 @@ fi
 grep -Fq 'verify_prefix /opt/openclaw/node' "$BUILD_SCRIPT" || fail "build script should verify default install path"
 grep -Fq 'verify_prefix /tmp/custom-openclaw-root/openclaw/node' "$BUILD_SCRIPT" || fail "build script should verify custom install path"
 grep -Fq 'NODE_VER="22.23.1"' "$WORKFLOW" || fail "workflow should build current musl-compatible Node.js"
-grep -Fq 'BUILD_MODE=apk' "$WORKFLOW" || fail "workflow should use apk mode for ARM64 musl package"
-grep -Fq 'PKG_TYPE=lts' "$WORKFLOW" || fail "workflow should use Alpine LTS Node.js package"
+grep -Fq 'BUILD_MODE=unofficial' "$WORKFLOW" || fail "workflow should use the exact official ARM64 musl asset"
+grep -Fq 'unofficial-builds.nodejs.org' "$BUILD_SCRIPT" || fail "builder should use the official ARM64 musl source"
+grep -Fq 'EXPECTED_SHA' "$BUILD_SCRIPT" || fail "builder should verify the downloaded Node.js checksum"
 grep -Fq 'Generate SHA256SUMS' "$WORKFLOW" || fail "Node Release must publish a SHA256SUMS asset"
 grep -Fq 'dist/SHA256SUMS' "$WORKFLOW" || fail "Node Release must upload the SHA256SUMS asset"
 

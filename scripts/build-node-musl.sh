@@ -5,12 +5,15 @@
 # 
 # 环境变量: 
 #   NODE_VER (目标版本号)
-#   BUILD_MODE (apk|cross) - apk: 使用 Alpine apk, cross: 从官方 glibc 版本交叉编译
+#   BUILD_MODE (apk|unofficial|cross) - apk: 使用 Alpine apk,
+#     unofficial: 下载 Node.js 官方 unofficial-builds 的 ARM64 musl 资产,
+#     cross: 从官方 glibc 版本交叉编译
 #   /output (输出目录)
 #
 # 打包策略:
 #   1. apk 模式: 使用 Alpine apk 安装 nodejs，版本受限于 Alpine 仓库
-#   2. cross 模式: 从 Node.js 官方下载 glibc 版本，转换为 musl
+#   2. unofficial 模式: 下载并校验 Node.js 官方 ARM64 musl 资产
+#   3. cross 模式: 从 Node.js 官方下载 glibc 版本，转换为 musl
 #   使用 patchelf 修改 node 二进制的 ELF interpreter 和 rpath，
 #   使其直接使用打包的 musl 链接器和共享库，无需 LD_LIBRARY_PATH。
 #   这样 process.execPath 返回正确的 node 路径，子进程 fork 也能正常工作。
@@ -91,6 +94,66 @@ build_apk() {
 	fi
 
 	# 返回包名供后续使用
+	echo "PKG_NAME=${PKG_NAME}" >> /tmp/build_env
+	echo "PKG_DIR=${PKG_DIR}" >> /tmp/build_env
+}
+
+# ── unofficial 模式: 下载 Node.js 官方 unofficial-builds ARM64 musl 资产 ──
+build_unofficial() {
+	echo ""
+	echo "=== Building from Node.js unofficial-builds ARM64 musl ==="
+	apk add --no-cache xz curl ca-certificates patchelf libstdc++ libgcc
+
+	case "${NODE_VER}" in
+		[0-9]*.[0-9]*.[0-9]*) ;;
+		*) echo "ERROR: invalid Node.js version: ${NODE_VER}" >&2; exit 1 ;;
+	esac
+
+	TMP_DIR=$(mktemp -d /tmp/openclaw-node.XXXXXX)
+	TARBALL="node-v${NODE_VER}-linux-arm64-musl.tar.xz"
+	BASE_URL="https://unofficial-builds.nodejs.org/download/release/v${NODE_VER}"
+	trap 'rm -rf "${TMP_DIR}"' EXIT
+
+	echo "=== Downloading ${TARBALL} ==="
+	curl -fSL --retry 3 -o "${TMP_DIR}/${TARBALL}" "${BASE_URL}/${TARBALL}"
+	curl -fSL --retry 3 -o "${TMP_DIR}/SHASUMS256.txt" "${BASE_URL}/SHASUMS256.txt"
+	EXPECTED_SHA=$(awk -v file="${TARBALL}" '$2 == file || $2 == "*" file { print $1; exit }' "${TMP_DIR}/SHASUMS256.txt")
+	[ -n "${EXPECTED_SHA}" ] || { echo "ERROR: SHA256 entry not found for ${TARBALL}" >&2; exit 1; }
+	ACTUAL_SHA=$(sha256sum "${TMP_DIR}/${TARBALL}" | awk '{print $1}')
+	[ "${ACTUAL_SHA}" = "${EXPECTED_SHA}" ] || { echo "ERROR: SHA256 mismatch for ${TARBALL}" >&2; exit 1; }
+
+	tar -xJf "${TMP_DIR}/${TARBALL}" -C "${TMP_DIR}"
+	SRC_DIR="${TMP_DIR}/node-v${NODE_VER}-linux-arm64-musl"
+	[ -x "${SRC_DIR}/bin/node" ] || { echo "ERROR: Node.js binary missing from ${TARBALL}" >&2; exit 1; }
+
+	PKG_NAME="node-v${NODE_VER}-linux-arm64-musl"
+	PKG_DIR="/tmp/${PKG_NAME}"
+	rm -rf "${PKG_DIR}"
+	mkdir -p "${PKG_DIR}/bin" "${PKG_DIR}/lib" "${PKG_DIR}/share/icu"
+	cp "${SRC_DIR}/bin/node" "${PKG_DIR}/bin/node"
+	chmod +x "${PKG_DIR}/bin/node"
+	if [ -d "${SRC_DIR}/lib/node_modules/npm" ]; then
+		mkdir -p "${PKG_DIR}/lib/node_modules"
+		cp -r "${SRC_DIR}/lib/node_modules/npm" "${PKG_DIR}/lib/node_modules/"
+	fi
+	ICU_DAT=$(find "${SRC_DIR}" -name "icudt*.dat" 2>/dev/null | head -1)
+	if [ -n "${ICU_DAT}" ] && [ -f "${ICU_DAT}" ]; then
+		cp "${ICU_DAT}" "${PKG_DIR}/share/icu/"
+	fi
+
+	# unofficial-builds 的 ARM64 musl 二进制仍依赖 libstdc++/libgcc；把依赖
+	# 连同动态链接器放进包，避免不同 OpenWrt 固件的库版本漂移。
+	LIB_DIR="${PKG_DIR}/lib"
+	ldd "${PKG_DIR}/bin/node" 2>/dev/null | while read -r line; do
+		lib_path=$(echo "$line" | grep -oE '/[^ ]+\.so[^ ]*' | head -1)
+		if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
+			cp -L "$lib_path" "$LIB_DIR/" 2>/dev/null || true
+		fi
+	done
+	if [ -f /lib/ld-musl-aarch64.so.1 ]; then
+		cp -L /lib/ld-musl-aarch64.so.1 "${LIB_DIR}/"
+	fi
+
 	echo "PKG_NAME=${PKG_NAME}" >> /tmp/build_env
 	echo "PKG_DIR=${PKG_DIR}" >> /tmp/build_env
 }
@@ -259,8 +322,11 @@ rm -f /tmp/build_env
 
 case "$BUILD_MODE" in
 	apk)
-		build_apk
-		;;
+			build_apk
+			;;
+		unofficial)
+			build_unofficial
+			;;
 	cross)
 		build_cross
 		;;
