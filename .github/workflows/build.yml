@@ -86,7 +86,7 @@ jobs:
           const required = req.match(/>=\s*(\d+\.\d+\.\d+)/);
           const actual = target.match(/^(\d+)\.(\d+)\.(\d+)/);
           if (!required || !actual) throw new Error(`无法解析 engines.node=${req} 或 Node=${target}`);
-          const min = required.slice(1).map(Number);
+          const min = required[1].split('.').map(Number);
           const got = actual.slice(1).map(Number);
           for (let i = 0; i < 3; i++) {
             if (got[i] !== min[i]) {
