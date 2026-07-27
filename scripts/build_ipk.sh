@@ -91,8 +91,8 @@ mkdir -p "$DATA_DIR/etc/profile.d"
 cp "$PKG_DIR/root/etc/profile.d/openclaw.sh" "$DATA_DIR/etc/profile.d/"
 chmod +x "$DATA_DIR/etc/profile.d/openclaw.sh"
 
-# 计算安装大小
-INSTALLED_SIZE=$(du -sk "$DATA_DIR" | awk '{print $1}')
+# opkg 的 Installed-Size 按字节记录；du -sk 返回 KiB，必须换算避免显示小 1024 倍。
+INSTALLED_SIZE=$(du -sk "$DATA_DIR" | awk '{print $1 * 1024}')
 
 # 强制 data.tar.gz 内文件归属为 root:root，避免 GitHub runner / 本地构建用户
 # 的 UID/GID 泄漏到用户机器（例如安装后出现 1001:1001）。
@@ -172,9 +172,22 @@ cat > "$CTRL_DIR/postinst" << 'EOF'
 	# 清理 LuCI 缓存
 	rm -f /tmp/luci-indexcache /tmp/luci-modulecache/* /tmp/luci-indexcache.*.json 2>/dev/null
 
-	# 双保险：确保系统侧文件保持 root:root，避免非 SDK 打包时构建机 UID/GID
-	# 泄漏到目标机器。不要触碰 /opt/openclaw 运行数据。
-	for p in \
+		# 双保险：确保系统侧文件保持 root:root，避免非 SDK 打包时构建机 UID/GID
+		# 泄漏到目标机器。不要触碰 /opt/openclaw 运行数据。BusyBox chown
+		# 默认会解引用符号链接，因此显式使用 -h，并拒绝链接顶层路径。
+		safe_chown_tree() {
+			local root="$1"
+			[ -e "$root" ] || return 0
+			[ -L "$root" ] && return 1
+			if [ -d "$root" ]; then
+				find "$root" -xdev ! -type l -print0 2>/dev/null | \
+					xargs -0 -r chown -h root:root 2>/dev/null || return 1
+			else
+				chown -h root:root "$root" 2>/dev/null || return 1
+			fi
+		}
+
+		for p in \
 		/etc/init.d/openclaw \
 		/etc/profile.d/openclaw.sh \
 		/usr/bin/openclaw-env \
@@ -184,12 +197,15 @@ cat > "$CTRL_DIR/postinst" << 'EOF'
 		/usr/lib/lua/luci/view/openclaw \
 		/usr/lib/lua/openclaw \
 		/usr/share/openclaw \
-		/usr/share/rpcd/acl.d/luci-app-openclaw.json
-	do
-		[ -e "$p" ] && chown -R root:root "$p" 2>/dev/null || true
-	done
+			/usr/share/rpcd/acl.d/luci-app-openclaw.json
+		do
+			if ! safe_chown_tree "$p"; then
+				echo "错误: 无法安全修正安装文件权限: $p" >&2
+				exit 1
+			fi
+		done
 
-	# 升级/重装后修复已存在的 OpenClaw 运行数据权限。OpenClaw 2026.6.11
+	# 升级/重装后修复已存在的 OpenClaw 运行数据权限。OpenClaw 2026.6.33
 	# 会以 openclaw 用户安装和清理 managed npm generations，因此 npm/projects
 	# 内的插件源码也必须保持 openclaw 可写。
 	OPENCLAW_INSTALL_BASE="$(uci -q get openclaw.main.install_path 2>/dev/null || echo /opt)"
@@ -205,8 +221,13 @@ cat > "$CTRL_DIR/postinst" << 'EOF'
 	fi
 	
 	# 重启 Web PTY (使其加载新文件和新 token)
-	PTY_PID=$(pgrep -f 'web-pty.js' 2>/dev/null | head -1)
-	[ -n "$PTY_PID" ] && kill "$PTY_PID" 2>/dev/null || true
+		PTY_PID=$(pgrep -f 'web-pty.js' 2>/dev/null | head -1)
+		PTY_CMD=""
+		[ -n "$PTY_PID" ] && [ -r "/proc/$PTY_PID/cmdline" ] && \
+			PTY_CMD=$(tr '\000' ' ' < "/proc/$PTY_PID/cmdline" 2>/dev/null || true)
+		if [ -n "$PTY_PID" ] && printf '%s' "$PTY_CMD" | grep -q 'web-pty\.js'; then
+			kill "$PTY_PID" 2>/dev/null || true
+		fi
 
 	# 如果用户原本启用了 OpenClaw，opkg reinstall/upgrade 后恢复服务。
 	if [ "$(uci -q get openclaw.main.enabled 2>/dev/null || echo 0)" = "1" ] && [ -x /etc/init.d/openclaw ]; then
@@ -246,7 +267,7 @@ cat > "$CTRL_DIR/conffiles" << 'EOF'
 /etc/config/openclaw
 EOF
 
-(cd "$CTRL_DIR" && tar czf "$STAGING/control.tar.gz" .)
+(cd "$CTRL_DIR" && tar --owner=0 --group=0 --numeric-owner -czf "$STAGING/control.tar.gz" .)
 
 # ── 组装 .ipk (ar 格式) ──
 mkdir -p "$OUT_DIR"
@@ -265,11 +286,6 @@ echo ""
 echo "=== 构建完成 ==="
 echo "输出文件: $IPK_FILE"
 echo "文件大小: ${IPK_SIZE} bytes"
-echo "安装大小: ${INSTALLED_SIZE} KB"
+echo "安装大小: ${INSTALLED_SIZE} bytes"
 echo ""
 echo "安装方法: opkg install ${PKG_NAME}_${PKG_VERSION}-${PKG_RELEASE}_all.ipk"
-
-# ── 同步构建 .run 包 ──
-echo ""
-echo "=== 同步构建 .run 包 ==="
-"$SCRIPT_DIR/build_run.sh" "$OUT_DIR"

@@ -23,19 +23,19 @@ if [ -d "/root/.openclaw" ]; then
 	if [ -d "/root/.openclaw/skills" ] && [ ! -d "${OC_DATA}/.openclaw/skills" ]; then
 		mkdir -p "${OC_DATA}/.openclaw"
 		mv "/root/.openclaw/skills" "${OC_DATA}/.openclaw/" 2>/dev/null
-		chown -R openclaw:openclaw "${OC_DATA}/.openclaw/skills" 2>/dev/null
+		find "${OC_DATA}/.openclaw/skills" -xdev ! -type l -print0 2>/dev/null | xargs -0 chown -h openclaw:openclaw 2>/dev/null
 	fi
 	# 迁移 sessions 目录 (如果存在且目标不存在)
 	if [ -d "/root/.openclaw/sessions" ] && [ ! -d "${OC_DATA}/.openclaw/sessions" ]; then
 		mkdir -p "${OC_DATA}/.openclaw"
 		mv "/root/.openclaw/sessions" "${OC_DATA}/.openclaw/" 2>/dev/null
-		chown -R openclaw:openclaw "${OC_DATA}/.openclaw/sessions" 2>/dev/null
+		find "${OC_DATA}/.openclaw/sessions" -xdev ! -type l -print0 2>/dev/null | xargs -0 chown -h openclaw:openclaw 2>/dev/null
 	fi
 	# 迁移 openclaw.json (仅当目标不存在时)
 	if [ -f "/root/.openclaw/openclaw.json" ] && [ ! -f "${OC_DATA}/.openclaw/openclaw.json" ]; then
 		mkdir -p "${OC_DATA}/.openclaw"
 		mv "/root/.openclaw/openclaw.json" "${OC_DATA}/.openclaw/" 2>/dev/null
-		chown openclaw:openclaw "${OC_DATA}/.openclaw/openclaw.json" 2>/dev/null
+		chown -h openclaw:openclaw "${OC_DATA}/.openclaw/openclaw.json" 2>/dev/null
 	fi
 	# 清理空的旧目录
 	rmdir "/root/.openclaw" 2>/dev/null || true
@@ -80,7 +80,12 @@ fi
 mkdir -p "${OC_INSTALL_PATH}/data/.openclaw"
 mkdir -p "${OC_INSTALL_PATH}/node"
 mkdir -p "${OC_INSTALL_PATH}/global"
-chown -R openclaw:openclaw "${OC_INSTALL_PATH}" 2>/dev/null || true
+# 运行时和全局 npm 包由 root 管理，只有数据目录归 Gateway 用户；
+# 不能把整个安装根递归 chown 给 openclaw，否则 Node 二进制可被本地提权覆盖。
+for _root_tree in "${OC_INSTALL_PATH}/node" "${OC_INSTALL_PATH}/global"; do
+	find "$_root_tree" -xdev ! -type l -print0 2>/dev/null | xargs -0 chown -h root:root 2>/dev/null || true
+done
+find "${OC_INSTALL_PATH}/data" -xdev ! -type l -print0 2>/dev/null | xargs -0 chown -h openclaw:openclaw 2>/dev/null || true
 
 # 生成随机 Token (如果尚未设置)
 CURRENT_TOKEN=$(uci -q get openclaw.main.token)

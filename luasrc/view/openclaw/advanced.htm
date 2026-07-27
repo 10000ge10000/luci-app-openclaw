@@ -5,7 +5,8 @@
 
 <%
 local uci = require "luci.model.uci".cursor()
-local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
+local pty_port = tonumber(uci:get("openclaw", "main", "pty_port")) or 18793
+if pty_port < 1024 or pty_port > 65535 then pty_port = 18793 end
 %>
 
 <style type="text/css">
@@ -52,6 +53,13 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 	var ptyToken = '';
 
 	function checkAndLoadTerminal() {
+		// PTY 明确只监听路由器回环地址，远程 LuCI 浏览器不能直接访问它。
+		// 不把监听地址改回 LAN；需要远程使用时请通过 SSH 做本地端口转发。
+		var host = window.location.hostname;
+		if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+			loading.textContent = '配置终端仅监听路由器回环地址；远程访问请使用 SSH 端口转发 18793。';
+			return;
+		}
 		// 先获取 PTY token
 		(new XHR()).get(tokenUrl, null, function(tx) {
 			try {
@@ -65,8 +73,7 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 					if (d.pty_running) {
 						showIframe();
 					} else {
-						loading.innerHTML = '❌ 配置终端未运行<br/>' +
-							'<span style="font-size:12px;color:#999;">请先在「基本设置」中启用并启动服务。</span>';
+							loading.textContent = '❌ 配置终端未运行（请先在「基本设置」中启用并启动服务。）';
 					}
 				} catch(e) {
 					loading.textContent = '检查终端状态失败';
@@ -76,10 +83,14 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 	}
 
 	function showIframe() {
-		var proto = window.location.protocol;
-		var host = window.location.hostname;
-		var url = proto + '//' + host + ':' + ptyPort + '/';
-		if (ptyToken) url += '?pty_token=' + encodeURIComponent(ptyToken);
+			// HTTPS LuCI 使用 web-pty.js 的可选 HTTPS 端口 (HTTP 端口 + 1)，
+			// 避免混合内容；HTTP LuCI 仍连接普通 PTY 端口。
+			var proto = window.location.protocol === 'https:' ? 'https:' : 'http:';
+			var host = window.location.hostname;
+			// 不把 PTY token 放进 iframe URL，避免进入历史记录、Referer 和代理日志。
+				var effectivePtyPort = proto === 'https:' ? String(Number(ptyPort) + 1) : ptyPort;
+				var url = proto + '//' + host + ':' + effectivePtyPort + '/';
+				var ptyOrigin = proto + '//' + host + ':' + effectivePtyPort;
 
 		loading.style.display = 'none';
 
@@ -90,6 +101,9 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 		iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
 		// 防止 LuCI 父页面键盘事件干扰 iframe 内的终端输入
 		iframe.addEventListener('load', function() {
+			try {
+					iframe.contentWindow.postMessage({ type: 'openclaw-pty-token', token: ptyToken, parentOrigin: window.location.origin }, ptyOrigin);
+			} catch(e) {}
 			try { iframe.contentWindow.focus(); } catch(e) {}
 		});
 		container.appendChild(iframe);

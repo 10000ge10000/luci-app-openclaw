@@ -77,7 +77,8 @@
 			<tr><td>内存占用</td><td id="oc-st-mem">-</td></tr>
 			<tr><td>运行时间</td><td id="oc-st-uptime">-</td></tr>
 			<tr><td>Node.js</td><td id="oc-st-node">-</td></tr>
-			<tr><td>OpenClaw</td><td id="oc-st-oc-ver">-</td></tr>
+				<tr><td>OpenClaw</td><td id="oc-st-oc-ver">-</td></tr>
+				<tr><td>版本提示</td><td id="oc-st-version-warning">-</td></tr>
 			<tr><td>插件版本</td><td id="oc-st-plugin">-</td></tr>
 			<tr><td>安装路径</td><td id="oc-st-path">-</td></tr>
 			<tr><td>剩余空间</td><td id="oc-st-disk">-</td></tr>
@@ -88,96 +89,40 @@
 <script type="text/javascript">
 //<![CDATA[
 (function() {
-	var statusUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "status_api")%>';
-
-	function updateStatus() {
-		(new XHR()).get(statusUrl, null, function(x) {
-			try {
-				var d = JSON.parse(x.responseText);
-
-				var stEl = document.getElementById('oc-st-status');
-				if (d.enabled !== '1') {
-					stEl.innerHTML = '<span class="oc-badge oc-badge-disabled">已禁用</span>';
-				} else if (d.gateway_running) {
-					stEl.innerHTML = '<span class="oc-badge oc-badge-running">运行中</span>';
-				} else if (d.gateway_starting) {
-					stEl.innerHTML = '<span class="oc-badge oc-badge-starting">⏳ 正在启动...</span>';
-				} else if (d.gateway_failed) {
-					stEl.innerHTML = '<span class="oc-badge oc-badge-failed">启动失败</span>';
-				} else {
-					stEl.innerHTML = '<span class="oc-badge oc-badge-stopped">已停止</span>';
-				}
-
-				var gwEl = document.getElementById('oc-st-gateway');
-				if (d.gateway_running) {
-					gwEl.innerHTML = '<span class="oc-dot oc-dot-green"></span>监听中 :' + d.port;
-				} else if (d.gateway_starting) {
-					gwEl.innerHTML = '<span class="oc-dot oc-dot-gray"></span>初始化中，通常 20~40 秒；首次安装或负载较高时会更久...';
-				} else if (d.gateway_failed) {
-					gwEl.innerHTML = '<span class="oc-dot oc-dot-red"></span>启动失败，退出码 ' + (d.gateway_exit_code || '-');
-				} else {
-					gwEl.innerHTML = '<span class="oc-dot oc-dot-red"></span>未监听';
-				}
-
-				var ptyEl = document.getElementById('oc-st-pty');
-				if (d.pty_running) {
-					ptyEl.innerHTML = '<span class="oc-dot oc-dot-green"></span>监听中 :' + d.pty_port;
-				} else {
-					ptyEl.innerHTML = '<span class="oc-dot oc-dot-gray"></span>未监听';
-				}
-
-				document.getElementById('oc-st-pid').textContent = d.pid || '-';
-
-				var channelsEl = document.getElementById('oc-st-channels');
-				if (d.channels) {
-					channelsEl.innerHTML = '<span style="color:#1a7f37;font-weight:500;">' + d.channels + '</span>';
-				} else {
-					channelsEl.textContent = '未配置';
-				}
-
-				var modelEl = document.getElementById('oc-st-model');
-				if (d.active_model) {
-					modelEl.innerHTML = '<code style="padding:2px 8px;background:#f0f3f6;border-radius:4px;font-size:12px;">' + d.active_model + '</code>';
-				} else {
-					modelEl.textContent = '未配置';
-				}
-
-				var memEl = document.getElementById('oc-st-mem');
-				if (d.memory_kb > 0) {
-					var mb = (d.memory_kb / 1024).toFixed(1);
-					memEl.textContent = mb + ' MB';
-				} else {
-					memEl.textContent = '-';
-				}
-
-				document.getElementById('oc-st-uptime').textContent = d.uptime || '-';
-				document.getElementById('oc-st-node').textContent = d.node_version || '未安装';
-				document.getElementById('oc-st-oc-ver').textContent = d.oc_version ? ('v' + d.oc_version) : '未安装';
-				document.getElementById('oc-st-plugin').textContent = d.plugin_version ? ('v' + d.plugin_version) : '-';
-
-				// 安装路径和剩余空间
-				var pathEl = document.getElementById('oc-st-path');
-				if (d.install_path) {
-					pathEl.innerHTML = '<code style="padding:2px 8px;background:#f0f3f6;border-radius:4px;font-size:12px;">' + d.install_path + '</code>';
-				} else {
-					pathEl.textContent = '-';
-				}
-
-				// 剩余空间
-				var diskEl = document.getElementById('oc-st-disk');
-				if (d.disk_free) {
-					diskEl.innerHTML = '<span style="color:#1a7f37;font-weight:500;">' + d.disk_free + '</span> 可用';
-				} else {
-					diskEl.textContent = '-';
-				}
-                        } catch(e) {
-				document.getElementById('oc-st-status').innerHTML = '<span class="oc-badge oc-badge-unknown">查询失败</span>';
-			}
-		});
-	}
-
-	updateStatus();
-	setInterval(updateStatus, 5000);
+		var statusUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "status_api")%>';
+		function text(id, value) { var el=document.getElementById(id); if(el) el.textContent=String(value == null || value === '' ? '-' : value); }
+		function dot(id, cls, value) {
+			var el=document.getElementById(id); if(!el) return; el.textContent='';
+			var span=document.createElement('span'); span.className='oc-dot '+cls; el.appendChild(span); el.appendChild(document.createTextNode(String(value)));
+		}
+		function badge(value, cls) { var el=document.getElementById('oc-st-status'); if(!el) return; el.textContent=''; var span=document.createElement('span'); span.className='oc-badge '+cls; span.textContent=value; el.appendChild(span); }
+		function codeValue(id, value) { var el=document.getElementById(id); if(!el) return; el.textContent=''; if(value){ var code=document.createElement('code'); code.textContent=String(value); el.appendChild(code); } else el.textContent='-'; }
+		function updateStatus() {
+			if(document.visibilityState !== 'visible') return;
+			(new XHR()).get(statusUrl, null, function(x) {
+				try {
+					var d = JSON.parse(x.responseText);
+					if (d.enabled !== '1') badge('已禁用','oc-badge-disabled');
+					else if (d.gateway_running) badge('运行中','oc-badge-running');
+					else if (d.gateway_starting) badge('⏳ 正在启动...','oc-badge-starting');
+					else if (d.gateway_failed) badge('启动失败','oc-badge-failed');
+					else badge('已停止','oc-badge-stopped');
+					if (d.gateway_running) dot('oc-st-gateway','oc-dot-green','监听中 :'+d.port);
+					else if (d.gateway_starting) dot('oc-st-gateway','oc-dot-gray','初始化中，通常 20~40 秒；首次安装或负载较高时会更久...');
+					else if (d.gateway_failed) dot('oc-st-gateway','oc-dot-red','启动失败，退出码 '+(d.gateway_exit_code || '-'));
+					else dot('oc-st-gateway','oc-dot-red','未监听');
+					if (d.pty_running) dot('oc-st-pty','oc-dot-green','监听中 :'+d.pty_port); else dot('oc-st-pty','oc-dot-gray','未监听');
+					text('oc-st-pid',d.pid); text('oc-st-channels',d.channels || '未配置'); codeValue('oc-st-model',d.active_model);
+					text('oc-st-mem',d.memory_kb > 0 ? (d.memory_kb/1024).toFixed(1)+' MB' : '-'); text('oc-st-uptime',d.uptime);
+					text('oc-st-node',d.node_version || '未安装'); text('oc-st-oc-ver',d.oc_version ? 'v'+d.oc_version : '未安装'); text('oc-st-plugin',d.plugin_version ? 'v'+d.plugin_version : '-');
+					codeValue('oc-st-path',d.install_path); text('oc-st-disk',d.disk_free ? d.disk_free+' 可用' : '-');
+					text('oc-st-version-warning',d.version_warning || (d.version_compatible ? '已匹配适配版本' : '-'));
+				} catch(e) { badge('查询失败','oc-badge-unknown'); }
+			});
+		}
+		updateStatus();
+		var timer=setInterval(function(){ if(document.visibilityState === 'visible') updateStatus(); }, 5000);
+		document.addEventListener('visibilitychange', function(){ if(document.visibilityState === 'visible') updateStatus(); });
 })();
 //]]>
 </script>

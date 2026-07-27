@@ -2,6 +2,7 @@
 
 [![Bilibili](https://img.shields.io/badge/B%E7%AB%99-59438380-00a1d6?logo=bilibili)](https://space.bilibili.com/59438380)
 [![Blog](https://img.shields.io/badge/Blog-910501.xyz-orange)](https://blog.910501.xyz/)
+[![YouTube](https://img.shields.io/badge/YouTube-10000%20AI%20Share-ff0000?logo=youtube&logoColor=white)](https://www.youtube.com/channel/UCqgvZnCN9-9pZcL4SWxmnDw)
 [![Build & Release](https://github.com/10000ge10000/luci-app-openclaw/actions/workflows/build.yml/badge.svg)](https://github.com/10000ge10000/luci-app-openclaw/actions/workflows/build.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
@@ -27,9 +28,14 @@
 
 | 组件 | 默认版本 | 说明 |
 |------|----------|------|
-| OpenClaw | `2026.6.11` | npm `latest` 稳定标签 |
-| Node.js | `22.23.0` | Alpine musl LTS 包；OpenClaw 2026.6.x 要求 `>=22.19.0`，安装后会按 `engines.node` 做强校验 |
+| OpenClaw | `2026.6.33` | npm `extended-stable`；本插件的验证基线 |
+| Node.js | `22.23.1` | ARM64/musl 自有构建；OpenClaw 2026.6.33 要求 `>=22.19.0`，安装后会按 `engines.node` 做强校验 |
 | 微信插件 | `@tencent-weixin/openclaw-weixin@2.4.6` | CLI 使用 `@tencent-weixin/openclaw-weixin-cli@2.1.4` |
+
+> 兼容矩阵：luci-app-openclaw 2.1.x 已针对 OpenClaw 2026.6.33 + Node.js 22.23.1 验证。安装器中的
+> `extended-stable` 是低风险安装入口；`latest` 显示为“未经插件测试，可能不兼容”，仅适合明确知道兼容性的用户。
+
+> 安全默认：新装与恢复出厂后的 Gateway 仅监听 `loopback`。如确需局域网访问，请在 LuCI 中显式改为 `lan`，并同时收紧各渠道的 `allowFrom`。
 
 ## 📦 安装
 
@@ -114,7 +120,7 @@ openclaw-env setup
 - `python3` 是否已安装；缺失时会自动执行 `opkg update && opkg install python3-light`
 - npm cache、tmp、OpenClaw 数据目录是否可由 `openclaw` 用户写入
 - 路由器到 `https://ilinkai.weixin.qq.com` 的 TLS/超时状态
-- npm 插件是否已写入 `plugins.installs.openclaw-weixin`、`plugins.allow` 和 `channels.openclaw-weixin.enabled`
+- npm 插件是否已写入官方 SQLite `installed_plugin_index`，并启用 `plugins.allow` 与 `channels.openclaw-weixin.enabled`；不会重新写入废弃的 `plugins.installs`
 - 旧渠道名 `weixin` 会迁移为 `openclaw-weixin`
 
 如自动安装失败，可手动安装：

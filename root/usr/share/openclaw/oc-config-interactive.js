@@ -44,7 +44,7 @@ function runCommand(cmd, args = [], options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       stdio: ['inherit', 'pipe', 'pipe'],
-      shell: true,
+      shell: false,
       env: { ...process.env, ...options.env },
     });
 
@@ -77,22 +77,38 @@ function runCommand(cmd, args = [], options = {}) {
 function fixStatePermissions() {
   try {
     execFileSync(PERMISSIONS_HELPER, ['fix-state', OC_STATE_DIR], { stdio: 'ignore', timeout: 10000 });
-  } catch {
+  } catch {}
+}
+
+function assertNoSymlinkParents(file) {
+  let dir = path.dirname(file);
+  while (dir && dir !== path.dirname(dir)) {
     try {
-      execSync(`find "${OC_STATE_DIR}" -user root ! -path "*/extensions*" ! -path "*/archived-extensions*" ! -path "*/npm/projects*" -exec chown openclaw:openclaw {} + 2>/dev/null || true`, { stdio: 'ignore' });
-    } catch {}
+      if (fs.lstatSync(dir).isSymbolicLink()) throw new Error('配置路径父目录不能是符号链接');
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+    dir = path.dirname(dir);
   }
 }
 
 function readConfig() {
+  assertNoSymlinkParents(CONFIG_FILE);
+  if (!fs.existsSync(CONFIG_FILE)) return {};
   try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    if (fs.lstatSync(CONFIG_FILE).isSymbolicLink()) {
+      throw new Error('配置文件不能是符号链接');
     }
   } catch (e) {
-    console.error(`${C.red}读取配置失败:${C.reset} ${e.message}`);
+    if (e.code !== 'ENOENT') throw e;
   }
-  return {};
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+  } catch (e) {
+    const corrupt = CONFIG_FILE + '.corrupt.' + Date.now();
+    try { fs.copyFileSync(CONFIG_FILE, corrupt); fs.chmodSync(corrupt, 0o600); } catch {}
+    throw new Error('配置文件损坏，已保存副本 ' + corrupt + ': ' + e.message);
+  }
 }
 
 /**
@@ -100,14 +116,30 @@ function readConfig() {
  */
 function writeConfig(config) {
   const dir = path.dirname(CONFIG_FILE);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true }); try { execSync(`chown openclaw:openclaw "${dir}"`, { stdio: "ignore" }); } catch {}
+  assertNoSymlinkParents(CONFIG_FILE);
+  if (fs.existsSync(CONFIG_FILE) && fs.lstatSync(CONFIG_FILE).isSymbolicLink()) {
+    throw new Error('配置文件不能是符号链接，已中止写入');
   }
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+    try { execFileSync('chown', ['-h', 'openclaw:openclaw', dir], { stdio: 'ignore' }); } catch {}
+  }
+  assertNoSymlinkParents(CONFIG_FILE);
+  if (fs.existsSync(CONFIG_FILE) && fs.lstatSync(CONFIG_FILE).isSymbolicLink()) {
+    throw new Error('配置文件不能是符号链接，已中止写入');
+  }
+  const tmp = CONFIG_FILE + '.tmp.' + process.pid + '.' + Math.random().toString(16).slice(2);
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
+  try { execFileSync('chown', ['-h', 'openclaw:openclaw', tmp], { stdio: 'ignore' }); } catch {}
+  fs.renameSync(tmp, CONFIG_FILE);
+  try { fs.chmodSync(CONFIG_FILE, 0o600); } catch {}
   try {
-    execSync(`chown openclaw:openclaw "${CONFIG_FILE}"`, { stdio: 'ignore' });
+    execFileSync('chown', ['-h', 'openclaw:openclaw', CONFIG_FILE], { stdio: 'ignore' });
     fixStatePermissions();
-  } catch {}
+  } catch (e) {
+    console.error(C.yellow + '配置权限修复失败:' + C.reset + ' ' + e.message);
+  }
 }
 
 /**
@@ -140,6 +172,72 @@ function jsonSet(keyPath, value) {
   }
   obj[keys[keys.length - 1]] = value;
   writeConfig(config);
+}
+
+function writePrivateJson(file, value) {
+  const dir = path.dirname(file);
+  assertNoSymlinkParents(file);
+  if (fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink()) {
+    throw new Error('敏感配置文件不能是符号链接，已中止写入');
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  assertNoSymlinkParents(file);
+  if (fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink()) {
+    throw new Error('敏感配置文件不能是符号链接，已中止写入');
+  }
+  const tmp = file + '.tmp.' + process.pid + '.' + Math.random().toString(16).slice(2);
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
+  try { execFileSync('chown', ['-h', 'openclaw:openclaw', tmp], { stdio: 'ignore' }); } catch {}
+  fs.renameSync(tmp, file);
+  fs.chmodSync(file, 0o600);
+  try { execFileSync('chown', ['-h', 'openclaw:openclaw', file], { stdio: 'ignore' }); } catch {}
+}
+
+function jsonSetMany(entries) {
+  const config = readConfig();
+  for (const [keyPath, value] of entries) {
+    const keys = keyPath.split('.');
+    let obj = config;
+    for (let i = 0; i < keys.length - 1; i++) {
+      if (!obj[keys[i]] || typeof obj[keys[i]] !== 'object') obj[keys[i]] = {};
+      obj = obj[keys[i]];
+    }
+    obj[keys[keys.length - 1]] = value;
+  }
+  writeConfig(config);
+}
+
+function findGatewayPid() {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
+  try {
+    for (const name of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(name)) continue;
+      let cmd = '';
+      try { cmd = fs.readFileSync(`/proc/${name}/cmdline`, 'utf8').replace(/\0/g, ' '); } catch { continue; }
+      if (!/openclaw/.test(cmd) || !/gateway/.test(cmd)) continue;
+      if (uid !== 0) {
+        let status = '';
+        try { status = fs.readFileSync(`/proc/${name}/status`, 'utf8'); } catch { continue; }
+        const owner = status.match(/^Uid:\s+(\d+)/m);
+        if (!owner || Number(owner[1]) !== uid) continue;
+      }
+      return Number(name);
+    }
+  } catch {}
+  return 0;
+}
+
+function signalGateway(signal) {
+  const pid = findGatewayPid();
+  if (!pid) return false;
+  try { process.kill(pid, signal); return true; } catch { return false; }
+}
+
+function showUserGatewayStatus() {
+  const pid = findGatewayPid();
+  if (pid) console.log(`${C.green}Gateway 运行中 (PID ${pid})${C.reset}`);
+  else console.log(`${C.yellow}Gateway 未找到；请在 LuCI 服务页检查启动状态${C.reset}`);
 }
 
 /**
@@ -210,31 +308,47 @@ function registerAndSetModel(modelId) {
  * 写入 API Key 到 auth-profiles.json (对应 auth_set_apikey)
  */
 function authSetApikey(provider, apiKey, profileId) {
-  const authDir = `${OC_STATE_DIR}/agents/main/agent`;
-  const authFile = `${authDir}/auth-profiles.json`;
+  const authDir = OC_STATE_DIR + '/agents/main/agent';
+  const authFile = authDir + '/auth-profiles.json';
+  assertNoSymlinkParents(authFile);
+  if (fs.existsSync(authFile) && fs.lstatSync(authFile).isSymbolicLink()) {
+    throw new Error('认证配置不能是符号链接，已中止写入');
+  }
   try {
-    fs.mkdirSync(authDir, { recursive: true }); try { execSync(`chown openclaw:openclaw "${authDir}"`, { stdio: "ignore" }); } catch {}
+    fs.mkdirSync(authDir, { recursive: true });
+    try { execFileSync('chown', ['-h', 'openclaw:openclaw', authDir], { stdio: 'ignore' }); } catch {}
   } catch {}
+  assertNoSymlinkParents(authFile);
+  if (fs.existsSync(authFile) && fs.lstatSync(authFile).isSymbolicLink()) {
+    throw new Error('认证配置不能是符号链接，已中止写入');
+  }
 
   let authData = { version: 1, profiles: {}, usageStats: {} };
-  try {
-    if (fs.existsSync(authFile)) {
+  if (fs.existsSync(authFile)) {
+    try {
       authData = JSON.parse(fs.readFileSync(authFile, 'utf8'));
+    } catch (e) {
+      const corrupt = authFile + '.corrupt.' + Date.now();
+      try { fs.copyFileSync(authFile, corrupt); fs.chmodSync(corrupt, 0o600); } catch {}
+      throw new Error('认证配置损坏，已保存副本 ' + corrupt + ': ' + e.message);
     }
-  } catch {}
+  }
 
   if (!authData.profiles) authData.profiles = {};
-  authData.profiles[profileId || `${provider}:manual`] = {
+  authData.profiles[profileId || (provider + ':manual')] = {
     type: 'api_key',
     provider: provider,
     key: apiKey,
   };
 
-  fs.writeFileSync(authFile, JSON.stringify(authData, null, 2));
-  try {
-    execSync(`chown openclaw:openclaw "${authFile}"`, { stdio: 'ignore' });
-    fixStatePermissions();
-  } catch {}
+  const tmp = authFile + '.tmp.' + process.pid + '.' + Math.random().toString(16).slice(2);
+  fs.writeFileSync(tmp, JSON.stringify(authData, null, 2) + '\n', { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
+  try { execFileSync('chown', ['-h', 'openclaw:openclaw', tmp], { stdio: 'ignore' }); } catch {}
+  fs.renameSync(tmp, authFile);
+  try { fs.chmodSync(authFile, 0o600); } catch {}
+  try { execFileSync('chown', ['-h', 'openclaw:openclaw', authFile], { stdio: 'ignore' }); } catch {}
+  fixStatePermissions();
 }
 
 /**
@@ -337,7 +451,12 @@ async function restartGateway() {
   resetRenderCount();
   console.log(`\n${C.yellow}正在重启 Gateway...${C.reset}`);
 
-  try {
+  if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+    if (!signalGateway('SIGUSR1')) {
+      console.log(`${C.yellow}当前终端以 openclaw 用户运行，无法调用 init.d；请在 LuCI 服务页重启 Gateway${C.reset}`);
+      return;
+    }
+  } else try {
     await runCommand('/bin/sh', ['-c', [
       "if [ \"$(uci -q get openclaw.main.enabled 2>/dev/null || echo 0)\" != \"1\" ]; then",
       "  uci -q set openclaw.main.enabled='1';",
@@ -506,7 +625,7 @@ async function showChannelsMenu() {
 
 async function showAdvancedMenu() {
   const gwPort = jsonGet('gateway.port') || '18789';
-  const gwBind = jsonGet('gateway.bind') || 'lan';
+  const gwBind = jsonGet('gateway.bind') || 'loopback';
   const gwMode = jsonGet('gateway.mode') || 'local';
   const logLevel = jsonGet('gateway.logLevel') || '未设置';
   const acpDispatch = jsonGet('acp.dispatch.enabled') || 'false';
@@ -1117,13 +1236,17 @@ async function configureOllama() {
     if (!host) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
     ollamaUrl = host.startsWith('http') ? host : `http://${host}`;
     ollamaUrl = ollamaUrl.replace(/\/v1$/, '').replace(/\/$/, '');
+    if (!/^https?:\/\/[^\s\r\n]+$/i.test(ollamaUrl)) {
+      console.log(C.red + 'Ollama 地址格式无效' + C.reset);
+      return false;
+    }
   }
 
   // 尝试检测 Ollama 连通性
   console.log(`\n${C.cyan}检测 Ollama 连通性...${C.reset}`);
   let modelList = [];
   try {
-    const stdout = execSync(`curl -sf --connect-timeout 3 --max-time 5 ${ollamaUrl}/api/tags`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const stdout = execFileSync('curl', ['-sf', '--connect-timeout', '3', '--max-time', '5', ollamaUrl + '/api/tags'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     const data = JSON.parse(stdout);
     modelList = data.models || [];
     console.log(`${C.green}✅ Ollama 已连接${C.reset}`);
@@ -1574,9 +1697,13 @@ async function handleHealthCheck() {
 
   // 检查端口
   console.log(`${C.cyan}检查服务状态...${C.reset}`);
-  try {
-    await runCommand('/etc/init.d/openclaw', ['status_service']);
-  } catch (e) {}
+  if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+    showUserGatewayStatus();
+  } else {
+    try {
+      await runCommand('/etc/init.d/openclaw', ['status_service']);
+    } catch (e) {}
+  }
 
   console.log(`\n${C.cyan}提示: 查看详细日志请运行 logread -e openclaw${C.reset}`);
   await input({ prompt: '按回车继续', defaultValue: '' });
@@ -1590,7 +1717,7 @@ async function handleShowConfig() {
   resetRenderCount();
 
   const gwPort = jsonGet('gateway.port') || '18789';
-  const gwBind = jsonGet('gateway.bind') || 'lan';
+  const gwBind = jsonGet('gateway.bind') || 'loopback';
   const gwMode = jsonGet('gateway.mode') || 'local';
   const currentModel = getCurrentModel();
 
@@ -1661,8 +1788,15 @@ async function handleAdvancedConfig() {
           defaultValue: String(jsonGet('gateway.port') || '18789'),
         });
         if (newPort) {
-          jsonSet('gateway.port', parseInt(newPort));
-          try { execSync(`uci set openclaw.main.port="${newPort}" && uci commit openclaw`, { stdio: 'ignore' }); } catch {}
+          if (!/^\d{1,5}$/.test(String(newPort)) || Number(newPort) < 1 || Number(newPort) > 65535) {
+            console.log(C.red + '端口必须是 1-65535 的数字' + C.reset);
+            break;
+          }
+          jsonSet('gateway.port', Number(newPort));
+          try {
+            execFileSync('uci', ['set', 'openclaw.main.port=' + String(newPort)]);
+            execFileSync('uci', ['commit', 'openclaw']);
+          } catch {}
           console.log(`\n${C.green}✅ 端口已设置为 ${newPort}${C.reset}\n`);
           await askRestart();
         }
@@ -1680,7 +1814,10 @@ async function handleAdvancedConfig() {
         });
         if (bindChoice) {
           jsonSet('gateway.bind', bindChoice.value);
-          try { execSync(`uci set openclaw.main.bind="${bindChoice.value}" && uci commit openclaw`, { stdio: 'ignore' }); } catch {}
+          try {
+            execFileSync('uci', ['set', 'openclaw.main.bind=' + bindChoice.value]);
+            execFileSync('uci', ['commit', 'openclaw']);
+          } catch {}
           console.log(`\n${C.green}✅ 绑定地址已设置为 ${bindChoice.value}${C.reset}\n`);
           await askRestart();
         }
@@ -1767,7 +1904,12 @@ async function handleAdvancedConfig() {
         });
         if (importPath && fs.existsSync(importPath)) {
           try {
-            fs.copyFileSync(importPath, CONFIG_FILE);
+            const importedStat = fs.lstatSync(importPath);
+            if (!importedStat.isFile() || importedStat.isSymbolicLink()) {
+              throw new Error('备份文件必须是普通文件，不能是符号链接');
+            }
+            const imported = JSON.parse(fs.readFileSync(importPath, 'utf8'));
+            writeConfig(imported);
             console.log(`\n${C.green}✅ 配置已导入${C.reset}\n`);
             await askRestart();
           } catch (e) {
@@ -1795,17 +1937,17 @@ async function handleReset() {
 
     switch (choice.value) {
       case 'gateway': {
-        console.log(`\n${C.yellow}将重置: 网关端口→18789, 绑定→lan, 模式→local${C.reset}`);
+        console.log(`\n${C.yellow}将重置: 网关端口→18789, 绑定→loopback, 模式→local${C.reset}`);
         console.log(`${C.yellow}保留: 认证令牌、模型配置、消息渠道${C.reset}\n`);
         const ok = await confirm({ prompt: '确认恢复网关默认设置?', defaultYes: false });
         if (ok) {
-          jsonSet('gateway.port', 18789);
-          jsonSet('gateway.bind', 'lan');
-          jsonSet('gateway.mode', 'local');
-          jsonSet('gateway.controlUi.allowInsecureAuth', true);
-          jsonSet('gateway.controlUi.dangerouslyDisableDeviceAuth', true);
-          jsonSet('gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback', true);
-          jsonSet('gateway.tailscale.mode', 'off');
+          jsonSetMany([
+            ['gateway.port', 18789], ['gateway.bind', 'loopback'], ['gateway.mode', 'local'],
+            ['gateway.controlUi.allowInsecureAuth', false],
+            ['gateway.controlUi.dangerouslyDisableDeviceAuth', false],
+            ['gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback', false],
+            ['gateway.tailscale.mode', 'off'],
+          ]);
           console.log(`\n${C.green}✅ 网关设置已恢复默认${C.reset}\n`);
           await askRestart();
         }
@@ -1822,9 +1964,7 @@ async function handleReset() {
           writeConfig(cfg);
           // 清除 auth-profiles.json
           const authFile = `${OC_STATE_DIR}/agents/main/agent/auth-profiles.json`;
-          try {
-            fs.writeFileSync(authFile, JSON.stringify({ version: 1, profiles: {}, usageStats: {} }, null, 2));
-          } catch {}
+          try { writePrivateJson(authFile, { version: 1, profiles: {}, usageStats: {} }); } catch {}
           console.log(`\n${C.green}✅ 模型配置已清除${C.reset}`);
           console.log(`${C.yellow}请通过菜单 [1] 重新配置 AI 模型${C.reset}\n`);
           await askRestart();
@@ -1857,39 +1997,54 @@ async function handleReset() {
 
         // 执行恢复
         console.log(`\n${C.cyan}[1/5] 停止 Gateway...${C.reset}`);
-        try { await runCommand('/etc/init.d/openclaw', ['stop']); } catch {}
+        if (!(typeof process.getuid === 'function' && process.getuid() !== 0)) {
+          try { await runCommand('/etc/init.d/openclaw', ['stop']); } catch {}
+        } else {
+          signalGateway('SIGTERM');
+        }
 
         console.log(`${C.cyan}[2/5] 备份当前配置...${C.reset}`);
         const backupDir = `${OC_STATE_DIR}/backups`;
         const backupTs = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
         try {
-          if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true }); try { execSync(`chown openclaw:openclaw "${backupDir}"`, { stdio: "ignore" }); } catch {}
+          if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+          try { execFileSync('chown', ['-h', 'openclaw:openclaw', backupDir], { stdio: 'ignore' }); } catch {}
           fs.copyFileSync(CONFIG_FILE, `${backupDir}/openclaw_${backupTs}.json`);
           console.log(`${C.green}   备份已保存: backups/openclaw_${backupTs}.json${C.reset}`);
         } catch {}
 
-        console.log(`${C.cyan}[3/5] 重置配置...${C.reset}`);
-        writeConfig({});
-
-        console.log(`${C.cyan}[4/5] 重新初始化...${C.reset}`);
         // 生成新 token
         const crypto = require('crypto');
         const newToken = crypto.randomBytes(24).toString('hex');
 
-        console.log(`${C.cyan}[5/5] 应用 OpenWrt 适配配置...${C.reset}`);
-        jsonSet('gateway.port', 18789);
-        jsonSet('gateway.bind', 'lan');
-        jsonSet('gateway.mode', 'local');
-        jsonSet('gateway.auth.mode', 'token');
-        jsonSet('gateway.auth.token', newToken);
-        jsonSet('gateway.controlUi.allowInsecureAuth', true);
-        jsonSet('gateway.controlUi.dangerouslyDisableDeviceAuth', true);
-        jsonSet('gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback', true);
-        jsonSet('gateway.tailscale.mode', 'off');
-        jsonSet('acp.dispatch.enabled', false);
-        jsonSet('tools.profile', 'coding');
+        console.log(`${C.cyan}[3/5] 重置配置...${C.reset}`);
+        const resetConfig = {
+          gateway: {
+            port: 18789,
+            bind: 'loopback',
+            mode: 'local',
+            auth: { mode: 'token', token: newToken },
+            controlUi: {
+              allowInsecureAuth: false,
+              dangerouslyDisableDeviceAuth: false,
+              dangerouslyAllowHostHeaderOriginFallback: false,
+            },
+            tailscale: { mode: 'off' },
+          },
+          acp: { dispatch: { enabled: false } },
+          tools: { profile: 'coding' },
+        };
 
-        try { execSync(`uci set openclaw.main.token="${newToken}" && uci commit openclaw`, { stdio: 'ignore' }); } catch {}
+        console.log(`${C.cyan}[4/5] 重新初始化...${C.reset}`);
+        console.log(`${C.cyan}[5/5] 应用 OpenWrt 适配配置...${C.reset}`);
+        writeConfig(resetConfig);
+
+        try {
+          if (!(typeof process.getuid === 'function' && process.getuid() !== 0)) {
+            execFileSync('uci', ['set', 'openclaw.main.token=' + newToken], { stdio: 'ignore' });
+            execFileSync('uci', ['commit', 'openclaw'], { stdio: 'ignore' });
+          }
+        } catch {}
 
         console.log(`\n${C.green}✅ 出厂设置已恢复！${C.reset}\n`);
         console.log(`${C.cyan}新认证令牌: ${newToken}${C.reset}\n`);
@@ -1912,7 +2067,10 @@ async function handleBackup() {
 
     resetRenderCount();
     const backupDir = `${OC_STATE_DIR}/backups`;
-    try { if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true }); try { execSync(`chown openclaw:openclaw "${backupDir}"`, { stdio: "ignore" }); } catch {} } catch {}
+    try {
+      if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+      try { execFileSync('chown', ['-h', 'openclaw:openclaw', backupDir], { stdio: 'ignore' }); } catch {}
+    } catch {}
 
     switch (choice.value) {
       case 'create-config': {
@@ -1990,7 +2148,13 @@ async function handleBackup() {
         const ok = await confirm({ prompt: '确认恢复此备份?', defaultYes: false });
         if (ok) {
           try {
-            fs.copyFileSync(`${backupDir}/${fileChoice.value}`, CONFIG_FILE);
+            const backupFile = `${backupDir}/${fileChoice.value}`;
+            const backupStat = fs.lstatSync(backupFile);
+            if (!backupStat.isFile() || backupStat.isSymbolicLink()) {
+              throw new Error('备份文件必须是普通文件，不能是符号链接');
+            }
+            const restored = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+            writeConfig(restored);
             console.log(`\n${C.green}✅ 配置已恢复${C.reset}\n`);
             await askRestart();
           } catch (e) {
@@ -2016,13 +2180,14 @@ async function main() {
   }
 
   if (command === 'status') {
-    await runCommand('/etc/init.d/openclaw', ['status_service']);
+    if (typeof process.getuid === 'function' && process.getuid() !== 0) showUserGatewayStatus();
+    else await runCommand('/etc/init.d/openclaw', ['status_service']);
     return;
   }
 
   if (command === 'restart') {
     const ok = await confirm({ prompt: '确认重启 OpenClaw 服务?' });
-    if (ok) await runCommand('/etc/init.d/openclaw', ['restart']);
+    if (ok) await restartGateway();
     return;
   }
 

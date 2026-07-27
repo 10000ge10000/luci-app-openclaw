@@ -6,8 +6,13 @@ fail() {
 	exit 1
 }
 
-grep -q "OC_TESTED_VERSION=\"2026.6.11\"" root/usr/bin/openclaw-env || fail "tested OpenClaw version not pinned"
-grep -q "NODE_VERSION_V2=\"22.23.0\"" root/usr/bin/openclaw-env || fail "default Node.js version not pinned"
+tested_version=$(sed -n 's/^OC_TESTED_VERSION="\([^"]*\)"$/\1/p' root/usr/bin/openclaw-env | head -1)
+node_version=$(sed -n 's/^NODE_VERSION_V2="\([^"]*\)"$/\1/p' root/usr/bin/openclaw-env | head -1)
+[ "$tested_version" = "2026.6.33" ] || fail "tested OpenClaw version not pinned"
+[ "$node_version" = "22.23.1" ] || fail "default Node.js version not pinned"
+[ -n "$tested_version" ] && grep -Fq "$tested_version" README.md || fail "README must contain tested OpenClaw version"
+grep -Fq "NODE_VER=\"$node_version\"" .github/workflows/build-node-musl.yml || fail "Node build workflow drifted from openclaw-env"
+grep -Fq "OC_TESTED_VERSION" .github/workflows/build.yml || fail "build workflow must derive OpenClaw version from source"
 grep -q "OC_NODE_MIN_VERSION=\"\${OC_NODE_MIN_VERSION:-22.19.0}\"" root/usr/bin/openclaw-env || fail "minimum Node.js version not pinned"
 grep -q "oc_assert_node_min_version" root/usr/bin/openclaw-env || fail "Node.js minimum version check missing"
 grep -q 'oc_node_version_ge "$from_pkg" "$required"' root/usr/bin/openclaw-env || fail "package Node.js requirement must not lower static minimum"
@@ -124,7 +129,7 @@ grep -q 'NODE_COMPILE_CACHE="$node_compile_cache"' root/etc/init.d/openclaw || f
 grep -q "通常 20~40 秒" root/etc/init.d/openclaw luasrc/view/openclaw/status.htm luasrc/view/openclaw/console.htm || fail "startup hint must match measured OpenWrt timing"
 grep -q "restart_gateway >/dev/null 2>&1 &" luasrc/controller/openclaw.lua || fail "LuCI restart action should use lightweight gateway restart"
 grep -q "oc_fix_npm_projects_permissions" root/usr/libexec/openclaw-permissions.sh || fail "npm projects permission helper missing"
-grep -q 'chown -R openclaw:openclaw "$npm_projects"' root/usr/libexec/openclaw-permissions.sh || fail "npm projects generation must be writable by openclaw"
+grep -q 'oc_perm_chown_tree "$npm_projects" openclaw:openclaw' root/usr/libexec/openclaw-permissions.sh || fail "npm projects generation must be writable by openclaw"
 if grep -q 'chown -R root:root.*npm_projects' root/usr/libexec/openclaw-permissions.sh; then
 	fail "managed npm plugin generations must not be made root-owned"
 fi
@@ -133,6 +138,9 @@ if grep -q 'chown -R openclaw:openclaw "$OC_DATA"' root/etc/init.d/openclaw root
 fi
 if grep -q 'chown -R openclaw:openclaw "$OC_STATE_DIR"' root/usr/share/openclaw/oc-config.sh; then
 	fail "must not recursively chown the whole OC_STATE_DIR to openclaw"
+fi
+if grep -q 'find "${OC_INSTALL_PATH}".*chown.*openclaw' root/etc/uci-defaults/99-openclaw; then
+	fail "uci defaults must not make Node/global trees writable by openclaw"
 fi
 if grep -q 'find "$OC_STATE_DIR" -user root ! -path "*/extensions*"' root/usr/share/openclaw/oc-config.sh root/usr/share/openclaw/oc-config-interactive.js; then
 	fail "state permission reset must also exclude npm/projects and archived-extensions"
@@ -175,9 +183,33 @@ grep -q "root/usr/libexec" scripts/build_run.sh || fail "run script must package
 grep -q "for dep in luci-compat luci-base curl openssl-util script-utils tar libstdcpp6" scripts/build_run.sh || fail ".run installer must install runtime dependencies"
 grep -q -- "--owner=0 --group=0 --numeric-owner" scripts/build_run.sh || fail ".run payload must normalize file ownership to root"
 grep -q -- "--owner=0 --group=0 --numeric-owner" scripts/build_ipk.sh || fail ".ipk payload must normalize file ownership to root"
-grep -q "chown -R root:root" scripts/build_run.sh || fail ".run installer must repair root-owned system files after extraction"
-grep -q "chown -R root:root" scripts/build_ipk.sh || fail ".ipk postinst must repair root-owned system files after extraction"
+grep -q "safe_chown_tree" scripts/build_run.sh || fail ".run installer must repair root-owned system files after extraction"
+grep -q "safe_chown_tree" scripts/build_ipk.sh || fail ".ipk postinst must repair root-owned system files after extraction"
+if grep -q "chown -R root:root" scripts/build_run.sh scripts/build_ipk.sh; then
+	fail "package installers must not recursively follow symlinks while repairing ownership"
+fi
 grep -q "先解压到临时目录并确认完整，再替换 NODE_BASE" root/usr/bin/openclaw-env || fail "Node install must not delete existing runtime before extraction succeeds"
 grep -q "OC_SETUP_FRESH_ROOT" root/usr/bin/openclaw-env || fail "setup cleanup must preserve existing runtime roots"
+
+# v2.1.0 security and regression red lines
+grep -q "HOST = process.env.OC_CONFIG_HOST || '127.0.0.1'" root/usr/share/openclaw/web-pty.js || fail "PTY must default to loopback"
+grep -q "MAX_FRAME_SIZE" root/usr/share/openclaw/web-pty.js || fail "PTY frame limit missing"
+grep -q "WS auth unavailable; refusing connection" root/usr/share/openclaw/web-pty.js || fail "PTY token check must fail closed"
+grep -q "procd_set_param user openclaw" root/etc/init.d/openclaw || fail "PTY procd instance must run as openclaw"
+grep -q "oc_perm_chown_tree" root/usr/libexec/openclaw-permissions.sh || fail "permission helper must avoid recursive symlink traversal"
+if grep -q "Access-Control-Allow-Origin.*\*" root/usr/share/openclaw/web-pty.js; then fail "PTY must not allow wildcard CORS"; fi
+if grep -q "tar --wildcards" root/usr/share/openclaw/oc-config.sh luasrc/controller/openclaw.lua; then fail "backup path must not require GNU tar wildcards"; fi
+if grep -Eq "d\.plugins\.installs[[:space:]]*=" root/etc/init.d/openclaw luasrc/controller/openclaw.lua; then fail "configuration must not recreate deprecated plugins.installs"; fi
+grep -q "version_warning" luasrc/controller/openclaw.lua luasrc/view/openclaw/status.htm || fail "version drift warning missing"
+grep -q "extended-stable" root/usr/bin/openclaw-env luasrc/model/cbi/openclaw/basic.lua || fail "extended-stable option missing"
+grep -q "post(\"action_uninstall\")" luasrc/controller/openclaw.lua || fail "uninstall route must require POST"
+grep -q "post(\"action_backup\")" luasrc/controller/openclaw.lua || fail "backup route must require POST"
+grep -q "SHA256SUMS" .github/workflows/build.yml luasrc/controller/openclaw.lua || fail "release checksum contract missing"
+grep -q "option bind 'loopback'" root/etc/config/openclaw || fail "fresh install gateway bind must default to loopback"
+grep -q "chown -h" root/usr/libexec/openclaw-permissions.sh root/etc/init.d/openclaw || fail "permission repairs must not follow symlinks"
+grep -q "return 1" root/etc/init.d/openclaw || fail "failed plugin self-heal must block gateway startup"
+grep -q "当前 PTY 以 openclaw 用户运行" root/usr/share/openclaw/oc-config.sh || fail "interactive PTY must not attempt root-only opkg"
+if grep -q "innerHTML" luasrc/view/openclaw/status.htm; then fail "status view must not render API values via innerHTML"; fi
+node --check root/usr/share/openclaw/oc-config-interactive.js || fail "interactive config JavaScript syntax invalid"
 
 echo "ok"

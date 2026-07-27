@@ -421,7 +421,8 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 	var wechatLoginUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "wechat_login")%>';
 		var wechatLoginStatusUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "wechat_login_status")%>';
 	var wechatLogoutUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "wechat_logout")%>';	var installPollTimer = null;
-	var loginPollTimer = null;
+		var loginPollTimer = null;
+		var loginPollAttempts = 0;
 	var pluginInstalled = false;
 
 	// 刷新微信状态
@@ -434,12 +435,8 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 				if (d.oc_version) {
 					verEl.textContent = 'v' + d.oc_version;
 					verEl.className = 'oc-status-value ok';
-					if (d.oc_version >= '2026.3.22') {
-						verEl.textContent += ' ✓ 兼容';
-					} else {
-						verEl.textContent += ' ⚠️ 需升级至 2026.3.22+';
-						verEl.className = 'oc-status-value warn';
-					}
+						if (d.version_compatible) verEl.textContent += ' ✓ 兼容';
+						else { verEl.textContent += ' ⚠️ 与插件适配版本不一致'; verEl.className = 'oc-status-value warn'; }
 				} else {
 					verEl.textContent = '未安装';
 					verEl.className = 'oc-status-value error';
@@ -482,22 +479,22 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 					loginEl.textContent = '✅ 已登录 (' + d.accounts.length + ' 个账号)';
 					loginEl.className = 'oc-status-value ok';
 					
-					var accHtml = '<ul style="list-style:none; padding:0; margin:0; border-top:1px dashed #eee; padding-top:10px;">';
-					for (var i = 0; i < d.accounts.length; i++) {
-						accHtml += '<li style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; padding:6px; background:#fafafa; border-radius:4px;">' +
-							'<span style="font-size:13px; color:#555;">👤 ' + escapeHtml(d.accounts[i].name) + '</span>' +
-							'<button class="oc-copy-btn" style="color:#cf222e; border-color:#cf222e;" onclick="ocLogoutWechatAccount(\'' + escapeHtml(d.accounts[i].name) + '\')">退出账号</button>' +
-							'</li>';
-					}
-					accHtml += '</ul><div style="text-align:right; margin-top:8px;"><button class="btn cbi-button" type="button" onclick="ocShowLoginQRCode()">➕ 添加新账号</button></div>';
-					
-					document.getElementById('oc-wechat-accounts-list').innerHTML = accHtml;
-					document.getElementById('oc-wechat-accounts-list').style.display = 'block';
+					var accountsEl = document.getElementById('oc-wechat-accounts-list'); accountsEl.textContent = '';
+						var list = document.createElement('ul'); list.style.cssText = 'list-style:none;padding:0;margin:0;border-top:1px dashed #eee;padding-top:10px;';
+						for (var i = 0; i < d.accounts.length; i++) {
+							var li=document.createElement('li'); li.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding:6px;background:#fafafa;border-radius:4px;';
+							var label=document.createElement('span'); label.style.cssText='font-size:13px;color:#555;'; label.textContent='👤 '+String(d.accounts[i].name || d.accounts[i].id || '微信账号');
+							var logout=document.createElement('button'); logout.className='oc-copy-btn'; logout.style.cssText='color:#cf222e;border-color:#cf222e;'; logout.textContent='退出账号';
+							logout.addEventListener('click', (function(account){ return function(){ window.ocLogoutWechatAccount(account, this); }; })(String(d.accounts[i].id || d.accounts[i].name || '')));
+							li.appendChild(label); li.appendChild(logout); list.appendChild(li);
+						}
+						accountsEl.appendChild(list);
+						var add=document.createElement('button'); add.className='btn cbi-button'; add.type='button'; add.textContent='➕ 添加新账号'; add.style.cssText='margin-top:8px;'; add.addEventListener('click', window.ocShowLoginQRCode); accountsEl.appendChild(add);
+						accountsEl.style.display = 'block';
 				} else if (d.plugin_installed) {
 					loginEl.textContent = '⚠️ 未登录';
 					loginEl.className = 'oc-status-value warn';
-					document.getElementById('oc-wechat-accounts-list').innerHTML = '<div style="text-align:right; margin-top:8px;"><button class="btn cbi-button" type="button" onclick="ocShowLoginQRCode()">登录账号</button></div>';
-					document.getElementById('oc-wechat-accounts-list').style.display = 'block';
+						var accountsEl2=document.getElementById('oc-wechat-accounts-list'); accountsEl2.textContent=''; var loginBtn=document.createElement('button'); loginBtn.className='btn cbi-button'; loginBtn.type='button'; loginBtn.textContent='登录账号'; loginBtn.addEventListener('click', window.ocShowLoginQRCode); accountsEl2.appendChild(loginBtn); accountsEl2.style.display='block';
 				} else {
 					loginEl.textContent = '—';
 					loginEl.className = 'oc-status-value';
@@ -596,11 +593,13 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 
 		ocRefreshWechatStatus();
 
-		// 安装成功后自动弹出登录二维码
-		setTimeout(function() {
-			ocCloseInstallModal();
-			ocShowLoginQRCode();
-		}, 1000);
+			// 安装与扫码分离；仅调用方明确要求时自动进入登录流程。
+			if (autoShowQRCode) {
+				setTimeout(function() {
+					ocCloseInstallModal();
+					ocShowLoginQRCode();
+				}, 1000);
+			}
 	}
 
 	// 显示安装失败
@@ -626,7 +625,8 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 	};
 
 	// 显示登录二维码
-	window.ocShowLoginQRCode = function() {
+		window.ocShowLoginQRCode = function() {
+			loginPollAttempts = 0;
 		document.getElementById('oc-login-modal').classList.add('show');
 		document.getElementById('oc-login-progress').style.display = 'block';
 		document.getElementById('oc-login-qrcode').style.display = 'none';
@@ -647,14 +647,14 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 		});
 	};
 
-	window.ocLogoutWechatAccount = function(accountId) {
-		if (confirm('确认退出账号 ' + accountId + ' 吗？退出后需要重新扫码。')) {
-			var btn = event.target || event.srcElement;
+		window.ocLogoutWechatAccount = function(accountId, btn) {
+			if (confirm('确认退出账号 ' + accountId + ' 吗？退出后需要重新扫码。')) {
+				btn = btn || document.activeElement;
 			var oldText = btn.textContent;
 			btn.textContent = '退出中...';
 			btn.disabled = true;
 
-			(new XHR()).post(wechatLogoutUrl + '?account=' + encodeURIComponent(accountId), { token: csrfToken }, function(x) {
+				(new XHR()).post(wechatLogoutUrl, { token: csrfToken, account: accountId }, function(x) {
 				btn.textContent = oldText;
 				btn.disabled = false;
 				ocRefreshWechatStatus();
@@ -666,21 +666,23 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 	function escapeHtml(text) {
 		var div = document.createElement('div');
 		div.textContent = text;
-		return div.innerHTML;
+			return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 	}
 
 
-	function extractWechatLoginUrl(text) {
+		function isWechatLoginUrl(url) {
+			return /^https:\/\/(?:liteapp\.weixin\.qq\.com|weixin\.qq\.com)\/q\//.test(String(url || ''));
+		}
+
+		function extractWechatLoginUrl(text) {
 		if (!text) return '';
 		var matches = text.match(/https?:\/\/[^\s\]})"'<>]+/g) || [];
 		var fallback = '';
 		for (var i = 0; i < matches.length; i++) {
 			var url = matches[i];
-			if (/liteapp\.weixin\.qq\.com\/q\//.test(url) || /weixin\.qq\.com\/q\//.test(url)) {
-				fallback = url;
-			} else if (!/ilinkai\.weixin\.qq\.com/.test(url)) {
-				fallback = url;
-			}
+				if (isWechatLoginUrl(url)) {
+					fallback = url;
+				}
 		}
 		return fallback;
 	}
@@ -724,9 +726,28 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 		document.body.removeChild(input);
 	}
 
+		function renderLoginQrCode(container, url, expired) {
+			url = String(url || '');
+				if (!isWechatLoginUrl(url)) {
+				container.textContent = '登录链接无效，请重新扫码';
+				return;
+			}
+			container.textContent = '';
+			var box = document.createElement('div'); box.className = 'oc-qrcode-box';
+			var hint = document.createElement('p'); hint.style.cssText = expired ? 'color:#cf222e;font-size:13px;margin:8px 0;text-align:center;' : 'font-size:14px;color:#333;margin-bottom:8px;text-align:center;';
+			hint.textContent = expired ? '⌛ 二维码已刷新，请点击最新链接扫码登录' : '📱 请点击下方链接打开二维码，再用微信扫码';
+			var link = document.createElement('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.className = 'oc-qrcode-link-btn'; link.style.fontSize = '16px'; link.textContent = '🔗 点击打开链接，然后用微信扫码';
+			var copyLine = document.createElement('p'); copyLine.className = 'oc-qrcode-copy-link'; copyLine.appendChild(document.createTextNode('或复制链接: '));
+			var code = document.createElement('code'); code.textContent = url; copyLine.appendChild(code);
+			var copy = document.createElement('button'); copy.className = 'oc-copy-btn'; copy.type = 'button'; copy.textContent = '复制'; copy.addEventListener('click', function() { window.ocCopyToClipboard(url, copy); }); copyLine.appendChild(copy);
+			box.appendChild(hint); box.appendChild(link); box.appendChild(copyLine); container.appendChild(box);
+		}
+
 	// 轮询登录状态
-	function pollLoginStatus() {
-		if (loginPollTimer) clearTimeout(loginPollTimer);
+		function pollLoginStatus() {
+			if (loginPollTimer) clearTimeout(loginPollTimer);
+			loginPollAttempts++;
+			if (loginPollAttempts > 180) { showLoginError('登录轮询超时，请重新扫码'); return; }
 
 		(new XHR()).get(wechatLoginStatusUrl, null, function(x) {
 			try {
@@ -734,9 +755,8 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 				var qrcodeEl = document.getElementById('oc-login-qrcode');
 
 				// 是否出现二维码过期文本提示
-				var isExpired = d.qrcode && d.qrcode.indexOf('已被扫描') > -1 || d.qrcode.indexOf('二维码已过期') > -1;
-				var statusMessage = isExpired ? '<p style="color:#cf222e;font-size:13px;margin:8px 0;text-align:center;">⌛ 二维码已刷新，请点击最新链接扫码登录</p>' 
-											  : '<p style="font-size:14px;color:#333;margin-bottom:8px;text-align:center;">📱 请点击下方链接打开二维码，再用微信扫码</p>';
+						var qrcodeText = String(d.qrcode || '');
+					var isExpired = qrcodeText.indexOf('已被扫描') > -1 || qrcodeText.indexOf('二维码已过期') > -1;
 
 				if (d.state === 'success' || d.logged_in) {
 					showLoginSuccess();
@@ -745,13 +765,7 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 				} else if (d.state === 'qrcode' && d.qrcode_url) {
 					document.getElementById('oc-login-progress').style.display = 'none';
 					qrcodeEl.style.display = 'block';
-					var safeUrl = escapeHtml(d.qrcode_url);
-					qrcodeEl.innerHTML = '<div class="oc-qrcode-box">' +
-						statusMessage +
-						'<a href="' + safeUrl + '" target="_blank" rel="noopener noreferrer" class="oc-qrcode-link-btn" style="font-size:16px;">🔗 点击打开链接，然后用微信扫码</a>' +
-						'<p class="oc-qrcode-copy-link">或复制链接: <code>' + safeUrl + '</code>' +
-						'<button class="oc-copy-btn" onclick="ocCopyToClipboard(\'' + safeUrl.replace(/'/g, "\\'") + '\', this)">复制</button></p>' +
-						'</div>';
+						renderLoginQrCode(qrcodeEl, d.qrcode_url, isExpired);
 					loginPollTimer = setTimeout(pollLoginStatus, 2000);
 				} else if (d.running) {
 					if (d.qrcode && d.qrcode.length > 50) {
@@ -759,22 +773,19 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 						if (extractedUrl) {
 							document.getElementById('oc-login-progress').style.display = 'none';
 							qrcodeEl.style.display = 'block';
-							var safeUrl2 = escapeHtml(extractedUrl);
-							qrcodeEl.innerHTML = '<div class="oc-qrcode-box">' +
-								statusMessage +
-								'<a href="' + safeUrl2 + '" target="_blank" rel="noopener noreferrer" class="oc-qrcode-link-btn" style="font-size:16px;">🔗 点击打开链接，然后用微信扫码</a>' +
-								'<p class="oc-qrcode-copy-link">或复制链接: <code>' + safeUrl2 + '</code>' +
-								'<button class="oc-copy-btn" onclick="ocCopyToClipboard(\'' + safeUrl2.replace(/'/g, "\\'") + '\', this)">复制</button></p>' +
-								'</div>';
+							renderLoginQrCode(qrcodeEl, extractedUrl, isExpired);
 						} else {
 							qrcodeEl.style.display = 'block';
 							qrcodeEl.innerHTML = '<div class="oc-qrcode-box"><p>正在加载登录链接...</p></div>';
 						}
 					}
-					loginPollTimer = setTimeout(pollLoginStatus, 2000);
-				}
-			} catch(e) {
-				loginPollTimer = setTimeout(pollLoginStatus, 2000);
+						loginPollTimer = setTimeout(pollLoginStatus, 2000);
+					} else if (d.state === 'idle') {
+						showLoginError('登录进程未启动，请重新扫码', d.message || '');
+					}
+				} catch(e) {
+					if (loginPollAttempts < 180) loginPollTimer = setTimeout(pollLoginStatus, 2000);
+					else showLoginError('登录状态读取失败，请重新扫码', e.message);
 			}
 		});
 	}
@@ -829,13 +840,16 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 				resultEl.style.display = 'block';
 
 				if (d.has_upgrade) {
+					var latest = String(d.latest_version || '');
+					if (!/^[0-9A-Za-z._-]+$/.test(latest)) throw new Error('插件版本格式无效');
 					resultEl.innerHTML = '<div class="oc-result-info">' +
-						'🔄 发现新版本: ' + d.latest_version + '<br>' +
-						'当前版本: ' + d.current_version + '<br><br>' +
-						'<button class="btn cbi-button cbi-button-apply" onclick="ocUpgradeWechatPlugin(\'' + d.latest_version + '\')">立即升级</button>' +
+						'🔄 发现新版本: ' + escapeHtml(latest) + '<br>' +
+						'当前版本: ' + escapeHtml(String(d.current_version || '')) + '<br><br>' +
+						'<button class="btn cbi-button cbi-button-apply" id="oc-wechat-upgrade-now">立即升级</button>' +
 						'</div>';
+					document.getElementById('oc-wechat-upgrade-now').addEventListener('click', function() { window.ocUpgradeWechatPlugin(latest); });
 				} else if (d.current_version) {
-					resultEl.innerHTML = '<div class="oc-result-success">✅ 当前已是最新版本: ' + d.current_version + '</div>';
+					resultEl.innerHTML = '<div class="oc-result-success">✅ 当前已是最新版本: ' + escapeHtml(String(d.current_version)) + '</div>';
 				} else {
 					resultEl.innerHTML = '<div class="oc-result-error">❌ 插件未安装，请先安装</div>';
 				}
@@ -843,7 +857,7 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 				document.getElementById('oc-upgrade-progress').style.display = 'none';
 				var resultEl = document.getElementById('oc-upgrade-result');
 				resultEl.style.display = 'block';
-				resultEl.innerHTML = '<div class="oc-result-error">❌ 检测失败: ' + e.message + '</div>';
+				resultEl.innerHTML = '<div class="oc-result-error">❌ 检测失败: ' + escapeHtml(e.message || '') + '</div>';
 			}
 		});
 	};
@@ -854,7 +868,12 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 
 		var upgradeUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "wechat_upgrade_plugin")%>';
 
-		(new XHR()).post(upgradeUrl, { token: csrfToken }, function(x) {
+		version = String(version || '');
+		if (!/^[0-9A-Za-z._-]+$/.test(version)) {
+			document.getElementById('oc-upgrade-result').textContent = '升级版本格式无效';
+			return;
+		}
+		(new XHR()).post(upgradeUrl, { token: csrfToken, version: version }, function(x) {
 			try {
 				var d = JSON.parse(x.responseText);
 				if (d.status === 'ok') {
@@ -862,10 +881,10 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 					document.getElementById('oc-upgrade-result').innerHTML = '<div class="oc-progress-box"><pre id="oc-upgrade-log">正在升级...</pre><div id="oc-upgrade-qrcode-link" style="display:none; margin: 10px 0; text-align: center;"></div></div>';
 					pollUpgradeLog();
 				} else {
-					document.getElementById('oc-upgrade-result').innerHTML = '<div class="oc-result-error">❌ ' + (d.message || '升级失败') + '</div>';
+					document.getElementById('oc-upgrade-result').innerHTML = '<div class="oc-result-error">❌ ' + escapeHtml(d.message || '升级失败') + '</div>';
 				}
 			} catch(e) {
-				document.getElementById('oc-upgrade-result').innerHTML = '<div class="oc-result-error">❌ 升级失败: ' + e.message + '</div>';
+				document.getElementById('oc-upgrade-result').innerHTML = '<div class="oc-result-error">❌ 升级失败: ' + escapeHtml(e.message || '') + '</div>';
 			}
 		});
 	};
@@ -917,12 +936,13 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 	};
 
 	// 卸载微信插件
-	window.ocUninstallWechatPlugin = function() {
+	window.ocUninstallWechatPlugin = function(button) {
 		if (!confirm('确定要卸载微信插件吗？这将删除微信相关的所有配置。')) {
 			return;
 		}
 
-		var btn = event.target;
+		var btn = button || document.activeElement;
+		if (!btn || btn.tagName !== 'BUTTON') btn = document.querySelector('.oc-action-bar button[onclick*="ocUninstallWechatPlugin"]');
 		btn.disabled = true;
 		btn.textContent = '⏳ 卸载中...';
 

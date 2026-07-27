@@ -298,7 +298,8 @@ async function select(options = {}) {
     defaultIndex = 0,
     showSearch = true,
     allowCancel = true,
-    exitKeys = ['escape', 'q'],
+    // q 必须在搜索模式下作为普通字符，避免搜索 qwen 时立即退出。
+    exitKeys = ['escape'],
     onSelect = null, // 选择回调 (可用于预览)
   } = options;
 
@@ -334,32 +335,44 @@ async function select(options = {}) {
         if (filteredItems.length > 0 && !filteredItems[selected].disabled) {
           result = filteredItems[selected];
           done = true;
-        }
+        } else { process.stdout.write('\x07'); }
       } else if (key.name === 'up') {
         // 上移
-        if (selected > 0) {
-          selected--;
+        let next = selected - 1;
+        while (next >= 0 && filteredItems[next].disabled) next--;
+        if (next >= 0) {
+          selected = next;
           filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
         }
       } else if (key.name === 'down') {
         // 下移
-        if (selected < filteredItems.length - 1) {
-          selected++;
+        let next = selected + 1;
+        while (next < filteredItems.length && filteredItems[next].disabled) next++;
+        if (next < filteredItems.length) {
+          selected = next;
           filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
         }
       } else if (key.name === 'pageup') {
         // 上翻页
         selected = Math.max(0, selected - 10);
+        while (selected < filteredItems.length && filteredItems[selected].disabled) selected++;
+        if (selected >= filteredItems.length) selected = 0;
         filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
       } else if (key.name === 'pagedown') {
         // 下翻页
         selected = Math.min(filteredItems.length - 1, selected + 10);
+        while (selected >= 0 && filteredItems[selected].disabled) selected--;
+        if (selected < 0) selected = filteredItems.length - 1;
         filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
       } else if (key.name === 'home') {
         selected = 0;
+        while (selected < filteredItems.length && filteredItems[selected].disabled) selected++;
+        if (selected >= filteredItems.length) selected = 0;
         filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
       } else if (key.name === 'end') {
         selected = filteredItems.length - 1;
+        while (selected >= 0 && filteredItems[selected].disabled) selected--;
+        if (selected < 0) selected = filteredItems.length - 1;
         filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
       } else if (exitKeys.includes(key.name) && allowCancel) {
         // 取消/退出

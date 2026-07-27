@@ -16,7 +16,9 @@ const os = require('os');
 
 // ── 配置 (OpenWrt 适配) ──
 const PORT = parseInt(process.env.OC_CONFIG_PORT || '18793', 10);
-const HOST = process.env.OC_CONFIG_HOST || '0.0.0.0'; // token 认证保护，可安全绑定所有接口
+// PTY 只在回环接口提供；需要远程管理时应通过已认证的 LuCI/SSH 通道，
+// 不能把可执行 shell 端口直接暴露在 LAN/WAN。
+const HOST = process.env.OC_CONFIG_HOST || '127.0.0.1';
 // 从 UCI 读取安装路径，默认为 /opt/openclaw
 const { execSync } = require('child_process');
 function normalizeInstallPath(raw) {
@@ -42,6 +44,7 @@ const SCRIPT_PATH = process.env.OC_CONFIG_SCRIPT || '/usr/share/openclaw/oc-conf
 const SSL_CERT = '/etc/uhttpd.crt';
 const SSL_KEY = '/etc/uhttpd.key';
 const MAX_SESSIONS = parseInt(process.env.OC_MAX_SESSIONS || '5', 10);
+const MAX_FRAME_SIZE = 1024 * 1024;
 
 // ── 认证令牌 (从 UCI 或环境变量读取) ──
 
@@ -58,8 +61,6 @@ function loadAuthToken() {
     return t || '';
   } catch { return ''; }
 }
-let AUTH_TOKEN = process.env.OC_PTY_TOKEN || loadAuthToken();
-
 // ── 会话计数 ──
 let activeSessions = 0;
 
@@ -76,9 +77,9 @@ function getMimeType(ext) {
 }
 
 const IFRAME_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'X-Frame-Options': 'ALLOWALL',
-  'Content-Security-Policy': "default-src * 'unsafe-inline' 'unsafe-eval' data: blob: ws: wss:; frame-ancestors *",
+  // LuCI 和 PTY 使用不同端口，X-Frame-Options: SAMEORIGIN 会误阻止本机
+  // LuCI 嵌入；用 CSP 精确放行 loopback 任意端口，绝不放行 LAN/WAN。
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; frame-ancestors 'self' http://127.0.0.1:* http://localhost:* http://[::1]:* https://127.0.0.1:* https://localhost:* https://[::1]:*",
 };
 
 // ── WebSocket 帧处理 (RFC 6455) ──
@@ -93,8 +94,11 @@ function decodeWSFrame(buf) {
     payloadLen = buf.readUInt16BE(2); offset = 4;
   } else if (payloadLen === 127) {
     if (buf.length < 10) return null;
-    payloadLen = Number(buf.readBigUInt64BE(2)); offset = 10;
+    const declared = buf.readBigUInt64BE(2);
+    if (declared > BigInt(MAX_FRAME_SIZE)) return { error: 'frame-too-large' };
+    payloadLen = Number(declared); offset = 10;
   }
+  if (payloadLen > MAX_FRAME_SIZE) return { error: 'frame-too-large' };
   let mask = null;
   if (masked) {
     if (buf.length < offset + 4) return null;
@@ -158,9 +162,19 @@ class PtySession {
   _setupWSReader() {
     this.socket.on('data', (chunk) => {
       this.buffer = Buffer.concat([this.buffer, chunk]);
+      if (this.buffer.length > MAX_FRAME_SIZE + 14) {
+        console.log('[oc-config] WS frame buffer exceeds limit');
+        this._cleanup();
+        return;
+      }
       while (this.buffer.length > 0) {
         const frame = decodeWSFrame(this.buffer);
         if (!frame) break;
+        if (frame.error) {
+          console.log('[oc-config] WS frame rejected: ' + frame.error);
+          this._cleanup();
+          return;
+        }
         this.buffer = this.buffer.slice(frame.totalLen);
         if (frame.opcode === 0x01) this._handleMessage(frame.data.toString());
         else if (frame.opcode === 0x02 && this.proc && this.proc.stdin.writable) this.proc.stdin.write(frame.data);
@@ -174,22 +188,31 @@ class PtySession {
   }
 
   _handleMessage(text) {
+    if (Buffer.byteLength(text, 'utf8') > MAX_FRAME_SIZE) {
+      this._cleanup();
+      return;
+    }
     try {
       const msg = JSON.parse(text);
-      if (msg.type === 'stdin' && this.proc && this.proc.stdin.writable) {
+      if (msg.type === 'stdin' && typeof msg.data === 'string' && this.proc && this.proc.stdin.writable) {
         // 去除 bracketed paste 转义序列，避免污染 shell read 输入
         const cleaned = msg.data.replace(/\x1b\[\?2004[hl]/g, '').replace(/\x1b\[20[01]~/g, '');
         this.proc.stdin.write(cleaned);
       }
       else if (msg.type === 'resize') {
-        this.cols = msg.cols || 80; this.rows = msg.rows || 24;
+        const cols = Number(msg.cols); const rows = Number(msg.rows);
+        this.cols = Number.isInteger(cols) && cols >= 20 && cols <= 400 ? cols : 80;
+        this.rows = Number.isInteger(rows) && rows >= 5 && rows <= 200 ? rows : 24;
         if (this.proc && this.proc.pid) { try { process.kill(-this.proc.pid, 'SIGWINCH'); } catch(e){} }
       }
       else if (msg.type === 'ping') {
         // 应用层心跳: 客户端定期发送 ping，服务端回复 pong 保持连接活跃
         this.socket.write(encodeWSFrame(JSON.stringify({ type: 'pong' }), 0x01));
       }
-    } catch(e) { if (this.proc && this.proc.stdin.writable) this.proc.stdin.write(text); }
+    } catch(e) {
+      // 畸形 JSON 或未知帧不得原样注入 shell；只记录并丢弃。
+      console.log('[oc-config] Ignoring malformed WS message');
+    }
   }
 
   _spawnPty() {
@@ -215,7 +238,11 @@ class PtySession {
     // 构建脚本参数
     const scriptArgs = this.initCmd ? [SCRIPT_PATH, this.initCmd] : [SCRIPT_PATH];
     if (hasScript) {
-      this.proc = spawn('script', ['-qc', `stty rows ${this.rows} cols ${this.cols} 2>/dev/null; printf '\\e[?2004l'; sh "${scriptArgs.join('" "')}"`, '/dev/null'],
+      // initCmd 已在握手阶段严格白名单；仍使用 argv 转义，避免回归为 shell 注入。
+      const shellArgs = scriptArgs.map((arg) => "'" + String(arg).replace(/'/g, "'\"'\"'") + "'").join(' ');
+      const command = 'stty rows ' + this.rows + ' cols ' + this.cols +
+        " 2>/dev/null; printf '\\e[?2004l'; sh " + shellArgs;
+      this.proc = spawn('script', ['-qc', command, '/dev/null'],
         { stdio: ['pipe', 'pipe', 'pipe'], env, detached: true });
     } else {
       console.log('[oc-config] "script" command not found, falling back to sh (install util-linux-script for full PTY support)');
@@ -227,8 +254,8 @@ class PtySession {
     this.proc.stderr.on('data', (d) => { if (this.alive) { this._spawnFailCount = 0; this.socket.write(encodeWSFrame(d, 0x01)); } });
     this.proc.on('close', (code) => {
       if (!this.alive) return;
-      // PTY 以 root 运行，子脚本可能创建了 root-owned 的目录
-      // 修复权限，防止以 openclaw 用户运行的 Gateway 遇到 EACCES
+      // PTY 以 openclaw 用户运行；若脚本留下了 root-owned 状态文件，
+      // 仅通过受限 helper 修复权限，避免让整个 shell 获得 root。
       try { fixStatePermissions(); } catch(e) {}
       this._spawnFailCount++;
       if (this._spawnFailCount > this._MAX_SPAWN_RETRIES) {
@@ -269,17 +296,18 @@ function handleRequest(req, res) {
   let fp = url.pathname;
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': '*' });
+    res.writeHead(204, { 'Allow': 'GET, OPTIONS' });
     return res.end();
   }
   if (fp === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.writeHead(200, { 'Content-Type': 'application/json', ...IFRAME_HEADERS });
     return res.end(JSON.stringify({ status: 'ok', port: PORT, uptime: process.uptime() }));
   }
   if (fp === '/' || fp === '') fp = '/index.html';
 
   const fullPath = path.join(UI_DIR, fp);
-  if (!fullPath.startsWith(UI_DIR)) { res.writeHead(403); return res.end('Forbidden'); }
+  const relativePath = path.relative(UI_DIR, fullPath);
+  if (relativePath.startsWith('..' + path.sep) || path.isAbsolute(relativePath)) { res.writeHead(403); return res.end('Forbidden'); }
 
   fs.readFile(fullPath, (err, data) => {
     if (err) {
@@ -299,16 +327,48 @@ function handleRequest(req, res) {
 
 // ── WebSocket Upgrade ──
 function handleUpgrade(req, socket, head) {
-  console.log(`[oc-config] WS upgrade: ${req.url} remote=${socket.remoteAddress}:${socket.remotePort}`);
+  let requestPath = '/';
+  try { requestPath = new URL(req.url, 'http://localhost').pathname; } catch {}
+  console.log('[oc-config] WS upgrade: ' + requestPath + ' remote=' + socket.remoteAddress + ':' + socket.remotePort);
   if (req.url !== '/ws' && !req.url.startsWith('/ws?')) { socket.destroy(); return; }
+
+  const origin = req.headers.origin;
+  if (!origin) {
+    console.log('[oc-config] WS origin missing; refusing connection');
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  {
+    try {
+      const originUrl = new URL(origin);
+      if (!['localhost', '127.0.0.1', '::1'].includes(originUrl.hostname)) {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+    } catch {
+      socket.destroy();
+      return;
+    }
+  }
 
   // 认证: 验证查询参数中的 token
   // 每次连接时实时读取 UCI token (安装/升级可能重新生成 token)
-  const currentToken = loadAuthToken() || AUTH_TOKEN;
+  // 以 UCI 当前值为准；不回退到启动时的环境变量，避免清空/轮换 token 后旧进程
+  // 继续接受旧令牌。
+  const currentToken = loadAuthToken();
   const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  if (currentToken) {
+  if (!currentToken) {
+    console.log('[oc-config] WS auth unavailable; refusing connection');
+    socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  {
     const clientToken = urlObj.searchParams.get('token') || '';
-    if (clientToken !== currentToken) {
+    if (clientToken.length !== currentToken.length ||
+        !crypto.timingSafeEqual(Buffer.from(clientToken), Buffer.from(currentToken))) {
       console.log(`[oc-config] WS auth failed from ${socket.remoteAddress}`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
@@ -318,6 +378,11 @@ function handleUpgrade(req, socket, head) {
 
   // 读取初始化命令参数 (如 cmd=wechat)
   const initCmd = urlObj.searchParams.get('cmd') || '';
+  if (initCmd !== '' && initCmd !== 'wechat') {
+    socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+    socket.destroy();
+    return;
+  }
 
   // 并发会话限制
   if (activeSessions >= MAX_SESSIONS) {

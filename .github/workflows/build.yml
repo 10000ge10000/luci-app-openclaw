@@ -49,12 +49,53 @@ jobs:
         run: |
           # 从 openclaw-env 中提取版本号 (唯一的版本真相源)
           # NODE_VERSION_V2 是当前推荐的 Node.js 版本
-          NODE_VER=$(grep -oP 'NODE_VERSION_V2="\K[0-9.]+' root/usr/bin/openclaw-env)
-          OC_VER=$(grep -oP 'OC_TESTED_VERSION="\K[0-9.]+' root/usr/bin/openclaw-env)
+          NODE_VER=$(grep -oP 'NODE_VERSION_V2="\K[^"]+' root/usr/bin/openclaw-env | head -1)
+          OC_VER=$(grep -oP 'OC_TESTED_VERSION="\K[^"]+' root/usr/bin/openclaw-env | head -1)
+          test -n "$NODE_VER" || { echo '无法提取 Node.js 版本' >&2; exit 1; }
+          test -n "$OC_VER" || { echo '无法提取 OpenClaw 版本' >&2; exit 1; }
           echo "node_version=${NODE_VER}" >> "$GITHUB_OUTPUT"
           echo "oc_version=${OC_VER}" >> "$GITHUB_OUTPUT"
           echo "Node.js: v${NODE_VER}"
           echo "OpenClaw: v${OC_VER}"
+
+      - name: Run contract tests
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lua5.1
+          for t in tests/*.sh; do
+            echo "=== $t ==="
+            sh "$t"
+          done
+          lua5.1 tests/test_openclaw_paths.lua
+          if grep -rn '????' luasrc/; then
+            echo '发现疑似乱码文案' >&2
+            exit 1
+          fi
+
+      - name: Verify OpenClaw Node engine
+        run: |
+          set -eu
+          OPENCLAW_VERSION=$(grep -oP 'OC_TESTED_VERSION="\K[^"]+' root/usr/bin/openclaw-env | head -1)
+          NODE_TARGET=$(grep -oP 'NODE_VERSION_V2="\K[^"]+' root/usr/bin/openclaw-env | head -1)
+          ENGINES=$(npm view "openclaw@${OPENCLAW_VERSION}" engines --json)
+          OPENCLAW_VERSION="$OPENCLAW_VERSION" OPENCLAW_ENGINES="$ENGINES" NODE_TARGET="$NODE_TARGET" node <<'NODE'
+          const engines = JSON.parse(process.env.OPENCLAW_ENGINES || '{}');
+          const req = String(engines.node || '');
+          const target = process.env.NODE_TARGET || '';
+          const required = req.match(/>=\s*(\d+\.\d+\.\d+)/);
+          const actual = target.match(/^(\d+)\.(\d+)\.(\d+)/);
+          if (!required || !actual) throw new Error(`无法解析 engines.node=${req} 或 Node=${target}`);
+          const min = required.slice(1).map(Number);
+          const got = actual.slice(1).map(Number);
+          for (let i = 0; i < 3; i++) {
+            if (got[i] !== min[i]) {
+              if (got[i] > min[i]) break;
+              throw new Error(`Node ${target} 低于 OpenClaw engines.node ${req}`);
+            }
+          }
+          console.log(`OpenClaw ${process.env.OPENCLAW_VERSION} requires ${req}; Node ${target} satisfies it`);
+          NODE
 
       - name: Inject version
         run: |
@@ -97,7 +138,8 @@ jobs:
           ls -lh dist/
           echo ""
           echo "=== SHA256 checksums ==="
-          sha256sum dist/*.run dist/*.ipk dist/*.tar.xz 2>/dev/null || true
+          (cd dist && sha256sum *.run *.ipk *.tar.xz > SHA256SUMS)
+          cat dist/SHA256SUMS
 
       - name: Extract changelog
         id: changelog
@@ -121,6 +163,7 @@ jobs:
             dist/*.run
             dist/*.ipk
             dist/*.tar.xz
+            dist/SHA256SUMS
           retention-days: 30
           compression-level: 0
 
@@ -134,6 +177,7 @@ jobs:
             dist/*.run
             dist/*.ipk
             dist/*.tar.xz
+            dist/SHA256SUMS
           draft: false
           prerelease: false
           body: |

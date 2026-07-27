@@ -11,6 +11,7 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
 # ── 交互式菜单引擎路径 ──
 OC_MENU_ENGINE="/usr/share/openclaw/oc-menu-engine.js"
 OC_INTERACTIVE="/usr/share/openclaw/oc-config-interactive.js"
+PERMISSIONS_HELPER="/usr/libexec/openclaw-permissions.sh"
 
 # ── 端口检查兼容函数 (ss 或 netstat) ──
 # check_port_listening <port> — 检查端口是否在监听，返回 0/1
@@ -30,6 +31,51 @@ get_pid_by_port() {
 	else
 		netstat -tlnp 2>/dev/null | grep ":${p} " | sed -n 's|.* \([0-9]*\)/.*|\1|p' | head -1
 	fi
+}
+
+# Gateway 子进程由 procd 以 openclaw 用户运行。PTY 也以该用户运行时，不能
+# 调用 init.d/uci；只允许向同一 UID 且命令行明确属于 Gateway 的进程发信号。
+gateway_pid_for_user() {
+	local my_uid proc pid cmd owner
+	my_uid=$(id -u 2>/dev/null || echo 1)
+	for proc in /proc/[0-9]*; do
+		[ -r "$proc/cmdline" ] || continue
+		pid=${proc##*/}
+		cmd=$(tr '\000' ' ' < "$proc/cmdline" 2>/dev/null || true)
+		case "$cmd" in
+			*openclaw*gateway*) ;;
+			*) continue ;;
+		esac
+		if [ "$my_uid" -ne 0 ]; then
+			owner=$(sed -n 's/^Uid:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$proc/status" 2>/dev/null | head -1)
+			[ "$owner" = "$my_uid" ] || continue
+		fi
+		printf '%s\n' "$pid"
+		return 0
+	done
+	return 1
+}
+
+openclaw_pid_matches() {
+	local pid="$1" cmd
+	case "$pid" in *[!0-9]*|"") return 1 ;; esac
+	[ -r "/proc/$pid/cmdline" ] || return 1
+	cmd=$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+	case "$cmd" in
+		*openclaw*gateway*|*web-pty.js*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+request_gateway_signal() {
+	local signal="${1:-USR1}" pid
+	pid=$(gateway_pid_for_user 2>/dev/null || true)
+	[ -n "$pid" ] || return 1
+	kill -"$signal" "$pid" 2>/dev/null
+}
+
+is_root_user() {
+	[ "$(id -u 2>/dev/null || echo 1)" = "0" ]
 }
 
 # ── 路径 (OpenWrt 适配，支持自定义安装路径) ──
@@ -53,6 +99,7 @@ OC_DATA="${OC_DATA:-${OC_INSTALL_PATH}/data}"
 NODE_BIN="${NODE_BASE}/bin/node"
 OC_STATE_DIR="${OC_DATA}/.openclaw"
 CONFIG_FILE="${OC_STATE_DIR}/openclaw.json"
+OC_TESTED_VERSION="${OC_TESTED_VERSION:-$(sed -n 's/^OC_TESTED_VERSION=\"\([^\"]*\)\".*/\1/p' /usr/bin/openclaw-env 2>/dev/null | head -1)}"
 
 export HOME="$OC_DATA"
 export OPENCLAW_HOME="$OC_DATA"
@@ -60,6 +107,24 @@ export OPENCLAW_STATE_DIR="$OC_STATE_DIR"
 export OPENCLAW_CONFIG_PATH="$CONFIG_FILE"
 export NODE_ICU_DATA="${NODE_BASE}/share/icu"
 export PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# 配置路径必须是普通文件路径；拒绝符号链接父目录，避免 root/PTY 写入
+# 被重定向到任意文件。不存在的父目录会继续向上检查已存在部分。
+path_has_symlink() {
+	local target="$1" cur
+	[ -L "$target" ] && return 0
+	cur=$(dirname "$target")
+	while [ -n "$cur" ] && [ "$cur" != "/" ]; do
+		[ -L "$cur" ] && return 0
+		cur=$(dirname "$cur")
+	done
+	return 1
+}
+
+if path_has_symlink "$CONFIG_FILE"; then
+	echo "ERROR: 配置路径包含符号链接，拒绝继续" >&2
+	exit 1
+fi
 
 fix_openclaw_state_permissions() {
 	[ -x /usr/libexec/openclaw-permissions.sh ] && /usr/libexec/openclaw-permissions.sh fix-state "$OC_STATE_DIR"
@@ -87,14 +152,21 @@ if [ -n "$OC_PKG_DIR" ]; then
 	fi
 fi
 
-oc_cmd() {
-	if [ -n "$OC_ENTRY" ] && [ -x "$NODE_BIN" ]; then
-		"$NODE_BIN" "$OC_ENTRY" "$@" 2>&1
-		local rc=$?
-		# 修复权限: oc_cmd 以 root 运行但配置文件应属于 openclaw 用户
+	oc_cmd() {
+		if [ -n "$OC_ENTRY" ] && [ -x "$NODE_BIN" ]; then
+			local output rc
+			output=$("$NODE_BIN" "$OC_ENTRY" "$@" 2>&1)
+			rc=$?
+			if [ "$rc" -ne 0 ] && printf '%s' "$output" | grep -Eiq 'Too many arguments|Unknown command|Try:.*openclaw'; then
+				printf '%s\n' "$output"
+				echo "提示: 当前 OpenClaw CLI 与插件适配版本可能不一致，请先升级到已验证的 ${OC_TESTED_VERSION:-2026.6.33}。" >&2
+			else
+				printf '%s\n' "$output"
+			fi
+			# 修复权限: oc_cmd 以 root 运行但配置文件应属于 openclaw 用户
 		fix_openclaw_state_permissions 2>/dev/null || true
-		chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-		chown openclaw:openclaw "${CONFIG_FILE}.bak" 2>/dev/null || true
+		chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+		chown -h openclaw:openclaw "${CONFIG_FILE}.bak" 2>/dev/null || true
 		return $rc
 	else
 		echo "ERROR: OpenClaw 未安装或 Node.js 不可用"
@@ -105,10 +177,10 @@ oc_cmd() {
 # ── JSON 读写 (使用 Node.js) ──
 json_get() {
 	if [ ! -f "$CONFIG_FILE" ]; then echo ""; return; fi
-	_JS_KEY="$1" "$NODE_BIN" -e "
-		const fs=require('fs');
-		try{
-			const d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));
+	_JS_KEY="$1" _JS_FILE="$CONFIG_FILE" "$NODE_BIN" -e "
+			const fs=require('fs');
+			try{
+				const d=JSON.parse(fs.readFileSync(process.env._JS_FILE,'utf8'));
 			const ks=process.env._JS_KEY.split('.');let v=d;
 			for(const k of ks){v=v[k];if(v===undefined){console.log('');process.exit(0);}}
 			if(typeof v==='object')console.log(JSON.stringify(v));else console.log(v);
@@ -119,6 +191,10 @@ json_get() {
 json_set() {
 	local key="$1" value="$2"
 	local _js_err=""
+	if path_has_symlink "$CONFIG_FILE"; then
+		echo "ERROR: 配置文件不能是符号链接，已中止写入" >&2
+		return 1
+	fi
 	
 	# 步骤1: 确保配置文件存在
 	if [ ! -f "$CONFIG_FILE" ]; then
@@ -147,13 +223,13 @@ json_set() {
 			return 1
 		fi
 		
-		chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+		chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 	fi
 	
 	# 步骤2: 检查配置文件是否可写
 	if [ ! -w "$CONFIG_FILE" ]; then
 		echo "ERROR: 配置文件 $CONFIG_FILE 不可写" >&2
-		echo "HINT: 请运行: chmod 644 $CONFIG_FILE" >&2
+			echo "HINT: 请运行: chmod 600 $CONFIG_FILE" >&2
 		return 1
 	fi
 	
@@ -165,38 +241,47 @@ json_set() {
 	fi
 	
 	# 步骤4: 使用临时文件传递值，避免环境变量转义问题
-	local tmp_val_file="/tmp/.oc_json_val_$$"
+		if path_has_symlink "${OC_DATA}/.tmp"; then
+			echo "ERROR: 临时目录包含符号链接，已中止写入" >&2
+			return 1
+		fi
+		local tmp_val_file="${OC_DATA}/.tmp/.oc_json_val_$$"
+		mkdir -p "${OC_DATA}/.tmp" 2>/dev/null || true
 	if ! printf '%s' "$value" > "$tmp_val_file" 2>/dev/null; then
 		echo "ERROR: 无法创建临时文件 $tmp_val_file" >&2
 		return 1
 	fi
 	
-	# 步骤5: 执行 JSON 写入
-	_JS_KEY="$key" _JS_DEBUG="${OC_CONFIG_DEBUG:-0}" "$NODE_BIN" -e "
-		const fs=require('fs');let d={};
-		const debug=process.env._JS_DEBUG==='1';
-		try{
-			const content=fs.readFileSync('${CONFIG_FILE}','utf8');
-			d=JSON.parse(content);
-		}catch(e){
-			if(debug)console.error('JSON parse warning:',e.message);
-		}
-		const ks=process.env._JS_KEY.split('.');let o=d;
-		for(let i=0;i<ks.length-1;i++){
-			if(!o[ks[i]]||typeof o[ks[i]]!=='object')o[ks[i]]={};
-			o=o[ks[i]];
-		}
-		// 读取值并作为字符串保存
-		let v=fs.readFileSync('${tmp_val_file}','utf8');
-		o[ks[ks.length-1]]=v;
-		try{
-			fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+	# 步骤5: 执行 JSON 写入。文件路径通过环境变量传递，避免单引号注入；
+	# 值按 JSON/布尔/数字解析，且采用同目录临时文件 + rename 原子替换。
+	_JS_KEY="$key" _JS_FILE="$CONFIG_FILE" _JS_VALUE_FILE="$tmp_val_file" _JS_DEBUG="${OC_CONFIG_DEBUG:-0}" "$NODE_BIN" -e "
+			const fs=require('fs');
+				const file=process.env._JS_FILE;
+				const valueFile=process.env._JS_VALUE_FILE;
+				const debug=process.env._JS_DEBUG==='1';
+				const path=require('path');
+				if(fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink()) { console.error('ERROR: config is symlink'); process.exit(2); }
+				for(let cur=path.dirname(file);cur&&cur!==path.dirname(cur);cur=path.dirname(cur)) {
+					if(fs.existsSync(cur) && fs.lstatSync(cur).isSymbolicLink()) { console.error('ERROR: config parent is symlink'); process.exit(2); }
+				}
+				let d;
+			try { d=JSON.parse(fs.readFileSync(file,'utf8')); } catch(e) {
+				console.error('ERROR: 配置文件解析失败，未写入:',e.message); process.exit(2);
+			}
+			const ks=process.env._JS_KEY.split('.'); let o=d;
+			for(let i=0;i<ks.length-1;i++){
+				if(!o[ks[i]]||typeof o[ks[i]]!=='object')o[ks[i]]={}; o=o[ks[i]];
+			}
+			const raw=fs.readFileSync(valueFile,'utf8').replace(/\\n$/, '');
+			let v=raw;
+			if(raw==='true'||raw==='false') v=(raw==='true');
+			else if(/^-?(0|[1-9]\\d*)(\\.\\d+)?$/.test(raw)) v=Number(raw);
+			else { try { v=JSON.parse(raw); } catch {} }
+			o[ks[ks.length-1]]=v;
+			const tmp=file+'.tmp.'+process.pid;
+			fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\\n',{mode:0o600}); fs.chmodSync(tmp,0o600); fs.renameSync(tmp,file);
 			if(debug)console.log('JSON saved successfully');
-		}catch(e){
-			console.error('ERROR: Failed to write config:',e.message);
-			process.exit(1);
-		}
-	" 2>&1
+		" 2>&1
 	local _js_rc=$?
 	
 	# 清理临时文件
@@ -209,7 +294,7 @@ json_set() {
 	fi
 	
 	# 步骤7: 修复文件所有权
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+	chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 	
 	return 0
 }
@@ -220,7 +305,7 @@ enable_auth_plugins() {
 	"$NODE_BIN" -e "
 		const fs=require('fs');
 		try{
-			const d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));
+			const d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));
 			if(!d.plugins)d.plugins={};if(!d.plugins.entries)d.plugins.entries={};
 			const e=d.plugins.entries;
 			// 启用有效的认证插件
@@ -232,13 +317,13 @@ enable_auth_plugins() {
 			delete e['google-gemini-cli-auth'];
 			delete e['minimax-portal-auth'];
 			delete e['google-antigravity-auth'];
-			delete e['openclaw-weixin'];  // 微信插件有独立安装流程，不应在 entries 中
+				// 保留官方 openclaw-weixin enable 记录；其 SQLite 注册表由插件生命周期维护。
 			// 清理过时的 installs 配置
 			if(d.plugins && d.plugins.installs){
 				delete d.plugins.installs['google-gemini-cli-auth'];
 				delete d.plugins.installs['minimax-portal-auth'];
 			}
-			fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+			(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 		}catch(e){}
 	" 2>/dev/null
 }
@@ -260,7 +345,7 @@ fix_plugin_config() {
 	"$NODE_BIN" -e "
 		const fs=require('fs');
 		try{
-			const d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));
+			const d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));
 			if(!d.plugins)d.plugins={};
 			
 			// 修复 plugins.allow 数组中的插件名称
@@ -278,7 +363,7 @@ fix_plugin_config() {
 						d.plugins.allow.splice(idx,1);
 						console.log('REMOVED_DUPLICATE');
 					}
-					fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+					(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 				}
 			}
 			
@@ -288,7 +373,7 @@ fix_plugin_config() {
 					d.plugins.entries['@tencent-connect/openclaw-qqbot']=d.plugins.entries['openclaw-qqbot'];
 				}
 				delete d.plugins.entries['openclaw-qqbot'];
-				fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+				(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 				console.log('FIXED_ENTRIES');
 			}
 		}catch(e){}
@@ -302,7 +387,7 @@ fix_plugin_config() {
 	done
 	
 	# 确保配置文件权限正确
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+	chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 	
 	return $fixed
 }
@@ -315,7 +400,7 @@ ensure_qqbot_plugin_allowed() {
 	"$NODE_BIN" -e "
 		const fs=require('fs');
 		try{
-			const d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));
+			const d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));
 			if(!d.plugins)d.plugins={};
 			if(!Array.isArray(d.plugins.allow))d.plugins.allow=[];
 			
@@ -328,13 +413,13 @@ ensure_qqbot_plugin_allowed() {
 			// 添加正确的名称（如果不存在）
 			if(!d.plugins.allow.includes(correctName)){
 				d.plugins.allow.push(correctName);
-				fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+				(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 				console.log('ADDED');
 			}
 		}catch(e){}
 	" 2>/dev/null
 	
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+	chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 }
 
 # ── 模型认证: 将 API Key 写入 auth-profiles.json (而非 openclaw.json) ──
@@ -347,20 +432,25 @@ auth_set_apikey() {
 	local auth_dir="${OC_STATE_DIR}/agents/main/agent"
 	local auth_file="${auth_dir}/auth-profiles.json"
 	mkdir -p "$auth_dir"
-	chown -R openclaw:openclaw "${OC_STATE_DIR}/agents" 2>/dev/null || true
-	_AP_PROVIDER="$provider" _AP_KEY="$api_key" _AP_PROFILE="$profile_id" "$NODE_BIN" -e "
-		const fs=require('fs'),f=process.env._AP_FILE||'${auth_file}';
-		let d={version:1,profiles:{},usageStats:{}};
-		try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){}
+	fix_openclaw_state_permissions 2>/dev/null || true
+	_AP_PROVIDER="$provider" _AP_KEY="$api_key" _AP_PROFILE="$profile_id" _AP_FILE="$auth_file" "$NODE_BIN" -e "
+			const fs=require('fs'),path=require('path'),f=process.env._AP_FILE;
+			let d={version:1,profiles:{},usageStats:{}};
+			if(fs.existsSync(f)){try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){
+				const backup=f+'.corrupt.'+Date.now(); try{fs.copyFileSync(f,backup);fs.chmodSync(backup,0o600);}catch{}; console.error('auth profile parse failed'); process.exit(2);
+			}}
 		if(!d.profiles)d.profiles={};
 		d.profiles[process.env._AP_PROFILE]={
 			type:'api_key',
 			provider:process.env._AP_PROVIDER,
 			key:process.env._AP_KEY
 		};
-		fs.writeFileSync(f,JSON.stringify(d,null,2));
-	" 2>/dev/null
-	chown openclaw:openclaw "$auth_file" 2>/dev/null || true
+			fs.mkdirSync(path.dirname(f),{recursive:true});
+			const tmp=f+'.tmp.'+process.pid;
+			fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\\n',{mode:0o600}); fs.chmodSync(tmp,0o600); fs.renameSync(tmp,f);
+		" 2>/dev/null
+	[ -f "$auth_file" ] && chmod 600 "$auth_file" 2>/dev/null || true
+	chown -h openclaw:openclaw "$auth_file" 2>/dev/null || true
 }
 
 # ── GitHub Copilot Token 写入 auth-profiles.json (type:token) ──
@@ -371,20 +461,25 @@ auth_set_copilot_token() {
 	local auth_dir="${OC_STATE_DIR}/agents/main/agent"
 	local auth_file="${auth_dir}/auth-profiles.json"
 	mkdir -p "$auth_dir"
-	chown -R openclaw:openclaw "${OC_STATE_DIR}/agents" 2>/dev/null || true
-	_AP_TOKEN="$github_token" "$NODE_BIN" -e "
-		const fs=require('fs'),f='${auth_file}';
-		let d={version:1,profiles:{},usageStats:{}};
-		try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){}
+	fix_openclaw_state_permissions 2>/dev/null || true
+	_AP_TOKEN="$github_token" _AP_FILE="$auth_file" "$NODE_BIN" -e "
+			const fs=require('fs'),path=require('path'),f=process.env._AP_FILE;
+			let d={version:1,profiles:{},usageStats:{}};
+			if(fs.existsSync(f)){try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){
+				const backup=f+'.corrupt.'+Date.now(); try{fs.copyFileSync(f,backup);fs.chmodSync(backup,0o600);}catch{}; console.error('auth profile parse failed'); process.exit(2);
+			}}
 		if(!d.profiles)d.profiles={};
 		d.profiles['github-copilot:github']={
 			type:'token',
 			provider:'github-copilot',
 			token:process.env._AP_TOKEN
 		};
-		fs.writeFileSync(f,JSON.stringify(d,null,2));
-	" 2>/dev/null
-	chown openclaw:openclaw "$auth_file" 2>/dev/null || true
+			fs.mkdirSync(path.dirname(f),{recursive:true});
+			const tmp=f+'.tmp.'+process.pid;
+			fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\\n',{mode:0o600}); fs.chmodSync(tmp,0o600); fs.renameSync(tmp,f);
+		" 2>/dev/null
+	[ -f "$auth_file" ] && chmod 600 "$auth_file" 2>/dev/null || true
+	chown -h openclaw:openclaw "$auth_file" 2>/dev/null || true
 }
 
 # ── 注册模型到 agents.defaults.models 并设为默认 ──
@@ -397,7 +492,7 @@ register_and_set_model() {
 	_RSM_MID="$model_id" "$NODE_BIN" -e "
 		const fs=require('fs');
 		let d={};
-		try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
+		try{d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));}catch(e){console.error('config parse failed; refusing overwrite');process.exit(2);}
 		if(!d.agents)d.agents={};
 		if(!d.agents.defaults)d.agents.defaults={};
 		if(!d.agents.defaults.models)d.agents.defaults.models={};
@@ -405,9 +500,9 @@ register_and_set_model() {
 		const mid=process.env._RSM_MID;
 		d.agents.defaults.models[mid]={};
 		d.agents.defaults.model.primary=mid;
-		fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+		(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 	" 2>/dev/null
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+	chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 }
 
 # ── 注册自定义提供商 (需要 baseUrl 的 OpenAI 兼容提供商) ──
@@ -420,7 +515,7 @@ register_custom_provider() {
 	_RCP_PROV="$provider_name" _RCP_URL="$base_url" _RCP_KEY="$api_key" _RCP_MID="$model_id" _RCP_MNAME="$model_display" _RCP_CTX="$ctx_window" _RCP_MAXTOK="$max_tok" "$NODE_BIN" -e "
 		const fs=require('fs');
 		let d={};
-		try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
+		try{d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));}catch(e){console.error('config parse failed; refusing overwrite');process.exit(2);}
 		if(!d.models)d.models={};
 		if(!d.models.providers)d.models.providers={};
 		d.models.mode='merge';
@@ -439,9 +534,9 @@ register_custom_provider() {
 				maxTokens:parseInt(process.env._RCP_MAXTOK)||32000
 			}]
 		};
-		fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+		(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 	" 2>/dev/null
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+	chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 }
 
 # ── 注册 Coding Plan 提供商 (多模型批量注册) ──
@@ -452,7 +547,7 @@ register_codingplan_provider() {
 	_RCP_KEY="$api_key" "$NODE_BIN" -e "
 		const fs=require('fs');
 		let d={};
-		try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
+		try{d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));}catch(e){console.error('config parse failed; refusing overwrite');process.exit(2);}
 		if(!d.models)d.models={};
 		if(!d.models.providers)d.models.providers={};
 		d.models.mode='merge';
@@ -477,9 +572,9 @@ register_codingplan_provider() {
 		['qwen3.5-plus','qwen3-coder-plus','qwen3-coder-next','qwen3-max-2026-01-23','MiniMax-M2.5','glm-5','glm-4.7','kimi-k2.5'].forEach(m=>{
 			d.agents.defaults.models['bailian/'+m]={};
 		});
-		fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+		(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 	" 2>/dev/null
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+	chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 }
 
 # ── 注册腾讯云 Coding Plan 提供商 (多模型批量注册) ──
@@ -491,7 +586,7 @@ register_lkeap_codingplan_provider() {
 	_RCP_KEY="$api_key" "$NODE_BIN" -e "
 		const fs=require('fs');
 		let d={};
-		try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
+		try{d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));}catch(e){console.error('config parse failed; refusing overwrite');process.exit(2);}
 		if(!d.models)d.models={};
 		if(!d.models.providers)d.models.providers={};
 		d.models.mode='merge';
@@ -516,9 +611,9 @@ register_lkeap_codingplan_provider() {
 		['tc-code-latest','hunyuan-2.0-instruct','hunyuan-2.0-thinking','hunyuan-t1','hunyuan-turbos','minimax-m2.5','kimi-k2.5','glm-5'].forEach(m=>{
 			d.agents.defaults.models['lkeap/'+m]={};
 		});
-		fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+		(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 	" 2>/dev/null
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+	chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 }
 
 # ── 辅助函数 ──
@@ -552,10 +647,23 @@ confirm_yes() {
 }
 
 restart_gateway() {
-	echo ""
-	echo -e "  ${YELLOW}正在重启 Gateway...${NC}"
+		echo ""
+		echo -e "  ${YELLOW}正在重启 Gateway...${NC}"
 
-	# 修复数据目录权限 (root 用户操作可能改变了文件属主)
+		# Web PTY 以 openclaw 用户运行，不能越权调用 init.d 或修改 UCI。
+		# Gateway 支持 SIGUSR1 热重载时优先使用该窄接口；找不到同 UID 进程则
+		# 返回可读提示，不伪报“已重启”。
+		if ! is_root_user; then
+			if request_gateway_signal USR1; then
+				echo -e "  ${GREEN}✅ 已向当前用户的 Gateway 发送重载信号${NC}"
+			else
+				echo -e "  ${YELLOW}未找到可重载的 Gateway；请在 LuCI 服务页重启 Gateway${NC}"
+				return 1
+			fi
+			return 0
+		fi
+
+		# 修复数据目录权限 (root 用户操作可能改变了文件属主)
 	fix_openclaw_state_permissions 2>/dev/null || true
 
 	# 首次安装后 UCI 默认保持 disabled。用户在配置向导中确认“立即重启”
@@ -609,7 +717,7 @@ show_current_config() {
 	local bind=$(json_get gateway.bind)
 	local mode=$(json_get gateway.mode)
 	echo -e "${GREEN}│${NC}  网关端口 ............ ${CYAN}${port:-18789}${NC}"
-	echo -e "${GREEN}│${NC}  绑定模式 ............ ${CYAN}${bind:-lan}${NC}"
+echo -e "${GREEN}│${NC}  绑定模式 ............ ${CYAN}${bind:-loopback}${NC}"
 	echo -e "${GREEN}│${NC}  运行模式 ............ ${CYAN}${mode:-local}${NC}"
 
 	local model=$(json_get agents.defaults.model.primary)
@@ -796,7 +904,7 @@ configure_model() {
 				echo -e "  ${GREEN}✅ Anthropic 已配置，活跃模型: anthropic/${model_name}${NC}"
 			fi
 			;;
-		c)
+			4)
 			echo ""
 			echo -e "  ${BOLD}Google Gemini 配置${NC}"
 			echo -e "  ${YELLOW}获取 API Key: https://aistudio.google.com/apikey${NC}"
@@ -827,7 +935,7 @@ configure_model() {
 				echo -e "  ${GREEN}✅ Google Gemini 已配置，活跃模型: google/${model_name}${NC}"
 			fi
 			;;
-		d)
+			5)
 			echo ""
 			echo -e "  ${BOLD}OpenRouter 配置${NC}"
 			echo -e "  ${YELLOW}获取 API Key: https://openrouter.ai/keys${NC}"
@@ -1212,7 +1320,7 @@ configure_model() {
 					_RCP_PROV="ollama" _RCP_URL="$ollama_url" _RCP_KEY="ollama-local" _RCP_MID="$model_name" _RCP_MNAME="$model_name" "$NODE_BIN" -e "
 						const fs=require('fs');
 						let d={};
-						try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
+						try{d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));}catch(e){console.error('config parse failed; refusing overwrite');process.exit(2);}
 						if(!d.models)d.models={};
 						if(!d.models.providers)d.models.providers={};
 						d.models.mode='merge';
@@ -1230,9 +1338,9 @@ configure_model() {
 								maxTokens:32000
 							}]
 						};
-						fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+						(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 					" 2>/dev/null
-					chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+					chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 					register_and_set_model "ollama/${model_name}"
 					echo -e "  ${GREEN}✅ Ollama 已配置，活跃模型: ollama/${model_name}${NC}"
 					echo -e "  ${CYAN}   Ollama 地址: ${ollama_url}${NC}"
@@ -1343,7 +1451,7 @@ configure_model() {
 					echo -e "  ${YELLOW}Coding Plan 套餐 API Key (sk-...)${NC}"
 					;;
 				c)
-					zai_base_url="https://api.z.ai/api/paas/v4"
+						zai_base_url="https://api.z.ai/api/paas/v4"
 					echo -e "  ${YELLOW}全球版 API Key${NC}"
 					;;
 				d)
@@ -1412,7 +1520,7 @@ configure_model() {
 				_ACP_URL="${base_url%/}" _ACP_KEY="$api_key" _ACP_MID="$model_name" "$NODE_BIN" -e "
 					const fs=require('fs');
 					let d={};
-					try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
+					try{d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));}catch(e){console.error('config parse failed; refusing overwrite');process.exit(2);}
 					if(!d.models)d.models={};
 					if(!d.models.providers)d.models.providers={};
 					d.models.mode='merge';
@@ -1430,9 +1538,9 @@ configure_model() {
 							maxTokens:16000
 						}]
 					};
-					fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+					(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 				" 2>/dev/null
-				chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+				chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 				auth_set_apikey anthropic-compatible "$api_key" "anthropic-compatible:manual"
 				register_and_set_model "anthropic-compatible/${model_name}"
 				echo -e "  ${GREEN}✅ 自定义 Anthropic API 已配置，活跃模型: anthropic-compatible/${model_name}${NC}"
@@ -1452,14 +1560,14 @@ configure_model() {
 				_YW_PROV="yiwanai" "$NODE_BIN" -e "
 					const fs=require('fs');
 					let d={};
-					try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
+					try{d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));}catch(e){console.error('config parse failed; refusing overwrite');process.exit(2);}
 					const p=d.models&&d.models.providers&&d.models.providers[process.env._YW_PROV];
 					if(p&&p.models&&p.models[0]){
 						p.models[0].reasoning=true;
-						fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+						(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 					}
 				" 2>/dev/null
-				chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+				chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 				register_and_set_model "yiwanai/gpt-5.5"
 				echo -e "  ${GREEN}✅ 一万AI分享粉丝专享 API 已配置，活跃模型: yiwanai/gpt-5.5${NC}"
 			fi
@@ -1571,8 +1679,8 @@ configure_qq() {
 				plugin_blocked=1
 				echo -e "  ${YELLOW}⚠️  qqbot 插件已安装但未能正常加载${NC}"
 				echo -e "  ${CYAN}正在修复插件目录权限...${NC}"
-				chown -R root:root "$qqbot_ext_dir" 2>/dev/null
-				chmod -R 755 "$qqbot_ext_dir" 2>/dev/null
+				find "$qqbot_ext_dir" -xdev ! -type l -print0 2>/dev/null | xargs -0 chown root:root 2>/dev/null
+				find "$qqbot_ext_dir" -xdev ! -type l -print0 2>/dev/null | xargs -0 chmod u=rwX,go=rX 2>/dev/null
 				echo -e "  ${GREEN}✅ 权限已修复，重启 Gateway 后生效${NC}"
 				plugin_installed=1
 			fi
@@ -1580,8 +1688,8 @@ configure_qq() {
 			# 目录存在、有 plugin.json 但未出现在插件列表 — 修复权限
 			echo -e "  ${YELLOW}⚠️  qqbot 插件目录存在但未能加载${NC}"
 			echo -e "  ${CYAN}正在修复插件目录权限...${NC}"
-			chown -R root:root "$qqbot_ext_dir" 2>/dev/null
-			chmod -R 755 "$qqbot_ext_dir" 2>/dev/null
+			find "$qqbot_ext_dir" -xdev ! -type l -print0 2>/dev/null | xargs -0 chown root:root 2>/dev/null
+			find "$qqbot_ext_dir" -xdev ! -type l -print0 2>/dev/null | xargs -0 chmod u=rwX,go=rX 2>/dev/null
 			echo -e "  ${GREEN}✅ 权限已修复${NC}"
 			plugin_installed=1
 		fi
@@ -1602,8 +1710,8 @@ configure_qq() {
 			# 关键: 安装后立即修复插件目录权限为 root (OpenClaw 安全策略要求)
 			# 同时修复权限模式为 755，确保 Gateway 可读取插件
 			if [ -d "$qqbot_ext_dir" ]; then
-				chown -R root:root "$qqbot_ext_dir" 2>/dev/null
-				chmod -R 755 "$qqbot_ext_dir" 2>/dev/null
+				find "$qqbot_ext_dir" -xdev ! -type l -print0 2>/dev/null | xargs -0 chown root:root 2>/dev/null
+				find "$qqbot_ext_dir" -xdev ! -type l -print0 2>/dev/null | xargs -0 chmod u=rwX,go=rX 2>/dev/null
 			fi
 
 			if [ $install_rc -eq 0 ]; then
@@ -1688,7 +1796,7 @@ configure_qq() {
 			json_set channels.qqbot.enabled true
 			json_set channels.qqbot.appId "$qq_appid"
 			json_set channels.qqbot.clientSecret "$qq_secret"
-			chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+			chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 		fi
 
 		# 保存后验证
@@ -1767,8 +1875,8 @@ configure_telegram() {
 
 		# ── 使用 json_set 直接写入 (避免 oc_cmd CLI 参数解析问题) ──
 		json_set channels.telegram.botToken "$tg_token"
-		chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-		chown openclaw:openclaw "${CONFIG_FILE}.bak" 2>/dev/null || true
+		chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+		chown -h openclaw:openclaw "${CONFIG_FILE}.bak" 2>/dev/null || true
 
 		# ── 保存后验证: 读回检查 Token 是否完整 ──
 		local saved_token=$(json_get channels.telegram.botToken)
@@ -1808,7 +1916,7 @@ configure_discord() {
 	dc_token=$(sanitize_input "$dc_token" | tr -d '[:space:]')
 	if [ -n "$dc_token" ]; then
 		json_set channels.discord.botToken "$dc_token"
-		chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+		chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 		echo -e "  ${GREEN}✅ Discord Bot Token 已保存${NC}"
 		ask_restart
 	fi
@@ -1829,6 +1937,10 @@ configure_feishu() {
 	# 检查并安装 Python 3 (飞书插件依赖)
 	if ! command -v python3 >/dev/null 2>&1; then
 		echo -e "  ${YELLOW}⚠️  飞书插件需要 Python 3 支持${NC}"
+		if ! is_root_user; then
+			echo -e "  ${YELLOW}当前 PTY 以 openclaw 用户运行，不能执行 opkg。请在 LuCI/SSH 管理终端安装 python3-light 后重试。${NC}"
+			return 1
+		fi
 		echo -e "  ${CYAN}正在尝试安装 python3-light...${NC}"
 		opkg update >/dev/null 2>&1
 		# 使用 python3-light 减少安装体积 (约 2MB vs 完整版 30MB+)
@@ -1914,7 +2026,7 @@ configure_slack() {
 	sk_token=$(sanitize_input "$sk_token" | tr -d '[:space:]')
 	if [ -n "$sk_token" ]; then
 		json_set channels.slack.botToken "$sk_token"
-		chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+		chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 		echo -e "  ${GREEN}✅ Slack Bot Token 已保存${NC}"
 		ask_restart
 	fi
@@ -1969,8 +2081,9 @@ telegram_pairing() {
 
 		if [ -n "$codes" ]; then
 			# 逐个处理配对码 (避免管道子 shell 变量丢失问题)
-			local _codes_tmp="/tmp/oc_pair_codes_$$"
-			echo "$codes" > "$_codes_tmp"
+				local _codes_tmp
+				_codes_tmp=$(mktemp /tmp/oc-pair-codes.XXXXXX) || { echo "无法创建临时配对文件" >&2; return; }
+				echo "$codes" > "$_codes_tmp"
 			while IFS= read -r code; do
 				[ -z "$code" ] && continue
 				echo -e "  ${CYAN}发现配对请求: ${code}${NC}"
@@ -2112,8 +2225,8 @@ health_check() {
 
 	# ── 自动修复: 移除旧版错误写入的顶层 models.xxx 无效键 ──
 	if [ -f "$CONFIG_FILE" ]; then
-		local has_bad_models=$("$NODE_BIN" -e "
-			const d=JSON.parse(require('fs').readFileSync('${CONFIG_FILE}','utf8'));
+			local has_bad_models=$(OPENCLAW_CONFIG_PATH="$CONFIG_FILE" "$NODE_BIN" -e "
+				const d=JSON.parse(require('fs').readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));
 			const m=d.models;
 			if(m&&typeof m==='object'){
 				const bad=Object.keys(m).filter(k=>['openai','anthropic','google','openrouter','deepseek','github-copilot','dashscope','xai','groq','siliconflow','custom'].includes(k));
@@ -2125,7 +2238,7 @@ health_check() {
 			echo -e "  ${CYAN}正在自动修复...${NC}"
 			"$NODE_BIN" -e "
 				const fs=require('fs');
-				const d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));
+				const d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));
 				const bad=['openai','anthropic','google','openrouter','deepseek','github-copilot','dashscope','xai','groq','siliconflow','custom'];
 				if(d.models&&typeof d.models==='object'){
 					bad.forEach(k=>delete d.models[k]);
@@ -2133,9 +2246,9 @@ health_check() {
 					else if(Object.keys(d.models).filter(k=>k!=='mode'&&k!=='providers').length===0){}
 					if(!d.models.providers&&Object.keys(d.models).every(k=>bad.includes(k)||k==='mode'))delete d.models;
 				}
-				fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+				(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 			" 2>/dev/null
-			chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+			chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 			echo -e "  ${GREEN}✅ 已移除无效的 models 配置键${NC}"
 			echo ""
 		fi
@@ -2209,11 +2322,11 @@ reset_to_defaults() {
 				echo ""
 				echo -e "  ${CYAN}正在重置网关设置...${NC}"
 				json_set gateway.port 18789 2>&1
-				json_set gateway.bind lan 2>&1
+				json_set gateway.bind loopback 2>&1
 				json_set gateway.mode local 2>&1
-				json_set gateway.controlUi.allowInsecureAuth true 2>&1
-				json_set gateway.controlUi.dangerouslyDisableDeviceAuth true 2>&1
-				json_set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true 2>&1
+					json_set gateway.controlUi.allowInsecureAuth false 2>&1
+					json_set gateway.controlUi.dangerouslyDisableDeviceAuth false 2>&1
+					json_set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback false 2>&1
 				json_set gateway.tailscale.mode off 2>&1
 				echo -e "  ${GREEN}✅ 网关设置已恢复默认${NC}"
 				ask_restart
@@ -2235,7 +2348,7 @@ reset_to_defaults() {
 				local auth_file="${OC_STATE_DIR}/agents/main/agent/auth-profiles.json"
 				if [ -f "$auth_file" ]; then
 					echo '{"version":1,"profiles":{},"usageStats":{}}' > "$auth_file"
-					chown openclaw:openclaw "$auth_file" 2>/dev/null || true
+					chown -h openclaw:openclaw "$auth_file" 2>/dev/null || true
 				fi
 				echo -e "  ${GREEN}✅ 模型配置已清除${NC}"
 				echo -e "  ${YELLOW}请通过菜单 [2] 重新配置 AI 模型${NC}"
@@ -2260,7 +2373,7 @@ reset_to_defaults() {
 					"$NODE_BIN" -e "
 						const fs=require('fs');
 						try{
-							const d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));
+							const d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));
 							let modified=false;
 							
 							// 清除 plugins.entries 中与消息渠道相关的插件
@@ -2289,12 +2402,12 @@ reset_to_defaults() {
 							}
 							
 							if(modified){
-								fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+								(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 								console.log('CLEANED');
 							}
 						}catch(e){}
 					" 2>/dev/null
-					chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+					chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 				fi
 				
 				# 清除飞书扩展目录中的敏感数据 (保留插件本体)
@@ -2321,7 +2434,7 @@ reset_to_defaults() {
 				echo -e "  ${CYAN}已取消${NC}"
 			fi
 			;;
-		c)
+			4)
 			echo ""
 			echo -e "  ${RED}╔══════════════════════════════════════════════════════╗${NC}"
 			echo -e "  ${RED}║  ⚠️  完全恢复出厂设置                               ║${NC}"
@@ -2331,31 +2444,39 @@ reset_to_defaults() {
 			echo -e "  ${RED}此操作不可撤销！${NC}"
 			prompt_with_default "输入 RESET 确认恢复出厂设置" "" confirm
 			if [ "$confirm" = "RESET" ]; then
-				echo ""
-				echo -e "  ${CYAN}[1/5] 停止 Gateway...${NC}"
-				# 只停止 gateway 实例, 不能停 pty (否则会断开当前终端连接)
-				local gw_pid=""
-				gw_pid=$(ubus call service list '{"name":"openclaw"}' 2>/dev/null | jsonfilter -e '$.openclaw.instances.gateway.pid' 2>/dev/null) || true
-				if [ -n "$gw_pid" ] && kill -0 "$gw_pid" 2>/dev/null; then
-					kill "$gw_pid" 2>/dev/null || true
-					sleep 2
-				else
-					# 按端口查找 gateway 进程
-					local gw_port_cur=$(json_get gateway.port)
-					gw_port_cur=${gw_port_cur:-18789}
-					local gw_pid2=$(get_pid_by_port "$gw_port_cur")
-					if [ -n "$gw_pid2" ]; then
-						kill "$gw_pid2" 2>/dev/null || true
-						sleep 2
+					echo ""
+					echo -e "  ${CYAN}[1/5] 停止 Gateway...${NC}"
+					# 只停止 gateway 实例, 不能停 pty (否则会断开当前终端连接)
+					local gw_pid=""
+					if is_root_user; then
+						gw_pid=$(ubus call service list '{"name":"openclaw"}' 2>/dev/null | jsonfilter -e '$.openclaw.instances.gateway.pid' 2>/dev/null) || true
+			if [ -n "$gw_pid" ] && openclaw_pid_matches "$gw_pid" && kill -0 "$gw_pid" 2>/dev/null; then
+							kill "$gw_pid" 2>/dev/null || true
+							sleep 2
+						else
+							# 按端口查找 gateway 进程
+							local gw_port_cur=$(json_get gateway.port)
+							gw_port_cur=${gw_port_cur:-18789}
+							local gw_pid2=$(get_pid_by_port "$gw_port_cur")
+				if [ -n "$gw_pid2" ] && openclaw_pid_matches "$gw_pid2"; then
+								kill "$gw_pid2" 2>/dev/null || true
+								sleep 2
+							fi
+						fi
+					else
+						gw_pid=$(gateway_pid_for_user 2>/dev/null || true)
+						if [ -n "$gw_pid" ] && kill -0 "$gw_pid" 2>/dev/null; then
+							kill "$gw_pid" 2>/dev/null || true
+							sleep 2
+						fi
 					fi
-				fi
 				echo -e "  ${GREEN}   Gateway 已停止${NC}"
 
 				echo -e "  ${CYAN}[2/5] 备份当前配置...${NC}"
 				local backup_dir="${OC_STATE_DIR}/backups"
 				local backup_ts=$(date +%Y%m%d_%H%M%S)
 				mkdir -p "$backup_dir"
-				chown openclaw:openclaw "$backup_dir" 2>/dev/null || true
+				chown -h openclaw:openclaw "$backup_dir" 2>/dev/null || true
 				if [ -f "$CONFIG_FILE" ]; then
 					cp "$CONFIG_FILE" "${backup_dir}/openclaw_${backup_ts}.json"
 					echo -e "  ${GREEN}   备份已保存: backups/openclaw_${backup_ts}.json${NC}"
@@ -2366,7 +2487,7 @@ reset_to_defaults() {
 				rm -f "$CONFIG_FILE" 2>/dev/null || true
 				rm -f "${CONFIG_FILE}.bak" 2>/dev/null || true
 				echo '{}' > "$CONFIG_FILE"
-				chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+				chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 				echo -e "  ${GREEN}   配置已清除${NC}"
 
 				echo -e "  ${CYAN}[4/5] 重新初始化...${NC}"
@@ -2388,13 +2509,13 @@ reset_to_defaults() {
 				local new_token
 				new_token=$(head -c 24 /dev/urandom | hexdump -e '24/1 "%02x"' 2>/dev/null || dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 48)
 				json_set gateway.port 18789
-				json_set gateway.bind lan
+				json_set gateway.bind loopback
 				json_set gateway.mode local
 				json_set gateway.auth.mode token
 				json_set gateway.auth.token "$new_token"
-				json_set gateway.controlUi.allowInsecureAuth true
-				json_set gateway.controlUi.dangerouslyDisableDeviceAuth true
-				json_set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true
+				json_set gateway.controlUi.allowInsecureAuth false
+				json_set gateway.controlUi.dangerouslyDisableDeviceAuth false
+				json_set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback false
 				json_set gateway.tailscale.mode off
 				json_set acp.dispatch.enabled false
 				json_set tools.profile coding
@@ -2410,8 +2531,13 @@ reset_to_defaults() {
 				echo -e "  ${CYAN}新认证令牌: ${new_token}${NC}"
 				echo ""
 
-				# 重启 gateway (通过 procd reload, 这样不会杀 pty)
-				/etc/init.d/openclaw start >/dev/null 2>&1 &
+					# root 由 procd 启动；PTY 用户不能越权启动服务，交由 LuCI 完成。
+					if is_root_user; then
+						/etc/init.d/openclaw start >/dev/null 2>&1 &
+					else
+						echo -e "  ${YELLOW}配置已重置；请在 LuCI 服务页启动 Gateway${NC}"
+						return 0
+					fi
 				echo -e "  ${YELLOW}⏳ Gateway 启动中，请稍候...${NC}"
 				local gw_port=18789
 				local waited=0
@@ -2441,6 +2567,55 @@ reset_to_defaults() {
 # ══════════════════════════════════════════════════════════════
 # 备份/还原配置菜单 (v2026.3.8+ openclaw backup create/verify)
 # ══════════════════════════════════════════════════════════════
+validate_backup_archive() {
+	local archive="$1" list entry
+	[ -f "$archive" ] || return 1
+	list=$(mktemp /tmp/openclaw-backup-list.XXXXXX) || return 1
+	if ! tar -tzf "$archive" > "$list" 2>/dev/null; then
+		rm -f "$list"
+		return 1
+	fi
+	while IFS= read -r entry; do
+		case "$entry" in
+			/*|../*|*/../*|*"/.."|..)
+				rm -f "$list"
+				return 1
+				;;
+		esac
+	done < "$list"
+	# 不允许把绝对路径或指向工作目录外的符号链接带入临时树。
+	if tar -tvzf "$archive" 2>/dev/null | grep -Eq ' -> '; then
+		rm -f "$list"
+		return 1
+	fi
+	rm -f "$list"
+	return 0
+}
+
+restore_backup_archive() {
+	local archive="$1" tmp root_entry root_dir payload_dir
+	validate_backup_archive "$archive" || { echo "备份路径校验失败，已拒绝恢复" >&2; return 1; }
+	tmp="$(mktemp -d /tmp/openclaw-restore.XXXXXX)" || return 1
+	if ! tar -xzf "$archive" -C "$tmp" 2>/dev/null; then
+		rm -rf "$tmp"
+		return 1
+	fi
+	root_entry=$(tar -tzf "$archive" 2>/dev/null | head -1)
+	root_dir="${root_entry%%/*}"
+	payload_dir="$tmp/$root_dir/payload/posix"
+	if [ -z "$root_dir" ] || [ ! -d "$payload_dir" ]; then
+		rm -rf "$tmp"
+		return 1
+	fi
+	# 只把已验证的 payload/posix 内容复制到根目录，绝不直接 tar -C / 解包。
+	if ! cp -a "$payload_dir/." / 2>/dev/null; then
+		rm -rf "$tmp"
+		return 1
+	fi
+	rm -rf "$tmp"
+	return 0
+}
+
 backup_restore_menu() {
 	echo ""
 	echo -e "  ${BOLD}💾 备份/还原配置${NC}"
@@ -2503,8 +2678,8 @@ backup_restore_menu() {
 				oc_cmd backup verify "$latest" 2>&1
 			fi
 			;;
-		c)
-			echo ""
+		4)
+				echo ""
 			if [ -d "$backup_dir" ]; then
 				local count=$(ls "${backup_dir}"/*-openclaw-backup.tar.gz 2>/dev/null | wc -l)
 				if [ "$count" -gt 0 ] 2>/dev/null; then
@@ -2521,7 +2696,7 @@ backup_restore_menu() {
 			echo ""
 			echo -e "  ${DIM}备份目录: ${backup_dir}${NC}"
 			;;
-		d)
+			5)
 			local latest=$(ls -t "${backup_dir}"/*-openclaw-backup.tar.gz 2>/dev/null | head -1)
 			if [ -z "$latest" ]; then
 				echo -e "  ${YELLOW}未找到备份文件，请先创建备份${NC}"
@@ -2532,36 +2707,45 @@ backup_restore_menu() {
 				echo -e "  ${YELLOW}⚠️  这会还原备份中的所有配置和数据文件到原路径！${NC}"
 				prompt_with_default "确认恢复? (y/N)" "N" confirm_restore
 				if [ "$confirm_restore" = "y" ] || [ "$confirm_restore" = "Y" ]; then
-					# 验证备份中 openclaw.json 有效
-					local tmp_json="/tmp/oc-restore-check.json"
-					tar -xzf "$latest" --wildcards '*/openclaw.json' -O > "$tmp_json" 2>/dev/null
-					if [ ! -s "$tmp_json" ] || ! "$NODE_BIN" -e "JSON.parse(require('fs').readFileSync('${tmp_json}','utf8'))" 2>/dev/null; then
-						rm -f "$tmp_json"
-						echo -e "  ${RED}❌ 备份中的配置文件无效，恢复已取消${NC}"
-					else
-						rm -f "$tmp_json"
-						# 备份当前配置
-						cp -f "$CONFIG_FILE" "${CONFIG_FILE}.pre-restore" 2>/dev/null
-						# 获取备份名前缀
-						local backup_name=$(tar -tzf "$latest" 2>/dev/null | head -1 | cut -d/ -f1)
-						if [ -z "$backup_name" ]; then
-							echo -e "  ${RED}❌ 备份文件格式无法识别${NC}"
-						else
-							echo -e "  ${DIM}正在还原文件...${NC}"
-							# 停止服务
-							/etc/init.d/openclaw stop >/dev/null 2>&1
-							sleep 2
-							# 提取 payload 到根目录 (还原到原始绝对路径)
-							tar -xzf "$latest" --strip-components=3 -C / "${backup_name}/payload/posix/" 2>&1
-							# 修复权限
-							fix_openclaw_state_permissions 2>/dev/null || true
-							echo -e "  ${GREEN}✅ 配置和数据已完整恢复！原配置已保存为 openclaw.json.pre-restore${NC}"
-							echo ""
-							prompt_with_default "是否重启服务使配置生效? (Y/n)" "Y" do_restart
-							if [ "$do_restart" != "n" ] && [ "$do_restart" != "N" ]; then
-								restart_gateway
-							fi
+						# 先在临时目录验证归档路径和 JSON，再执行受限恢复。
+						local check_dir tmp_json
+						check_dir="$(mktemp -d /tmp/openclaw-restore-check.XXXXXX)"
+						tmp_json=""
+						if validate_backup_archive "$latest" && tar -xzf "$latest" -C "$check_dir" 2>/dev/null; then
+							tmp_json=$(find "$check_dir" -type f -name openclaw.json -print -quit 2>/dev/null)
 						fi
+						if [ -z "$tmp_json" ] || ! "$NODE_BIN" -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$tmp_json" 2>/dev/null; then
+							rm -rf "$check_dir"
+							echo -e "  ${RED}❌ 备份中的配置文件无效，恢复已取消${NC}"
+						else
+							rm -rf "$check_dir"
+							# 备份当前配置
+							cp -f "$CONFIG_FILE" "${CONFIG_FILE}.pre-restore" 2>/dev/null
+							echo -e "  ${DIM}正在还原文件...${NC}"
+							if is_root_user; then
+								/etc/init.d/openclaw stop >/dev/null 2>&1
+								sleep 2
+							else
+								local restore_pid
+								restore_pid=$(gateway_pid_for_user 2>/dev/null || true)
+								[ -z "$restore_pid" ] || kill "$restore_pid" 2>/dev/null || true
+								sleep 2
+							fi
+							if restore_backup_archive "$latest"; then
+								fix_openclaw_state_permissions 2>/dev/null || true
+								echo -e "  ${GREEN}✅ 配置和数据已完整恢复！原配置已保存为 openclaw.json.pre-restore${NC}"
+								echo ""
+								prompt_with_default "是否重启服务使配置生效? (Y/n)" "Y" do_restart
+								if [ "$do_restart" != "n" ] && [ "$do_restart" != "N" ]; then
+									if is_root_user; then
+										restart_gateway
+									else
+										echo -e "  ${YELLOW}备份已恢复；请在 LuCI 服务页启动 Gateway${NC}"
+									fi
+								fi
+							else
+								echo -e "  ${RED}❌ 备份解包或路径校验失败，未修改根目录${NC}"
+							fi
 					fi
 				else
 					echo -e "  ${DIM}已取消${NC}"
@@ -2600,7 +2784,7 @@ launch_interactive_menu() {
 
 	fix_openclaw_state_permissions 2>/dev/null || true
 	# 返回后刷新配置权限
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+	chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 	return $rc
 }
 
@@ -2617,7 +2801,7 @@ launch_interactive_model_config() {
 	local rc=$?
 
 	fix_openclaw_state_permissions 2>/dev/null || true
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+	chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 	return $rc
 }
 
@@ -2687,7 +2871,7 @@ advanced_menu() {
 	while true; do
 		local gw_port gw_bind gw_mode log_level acp_dispatch
 		gw_port=$(json_get "gateway.port" 2>/dev/null || echo "18789")
-		gw_bind=$(json_get "gateway.bind" 2>/dev/null || echo "lan")
+		gw_bind=$(json_get "gateway.bind" 2>/dev/null || echo "loopback")
 		gw_mode=$(json_get "gateway.mode" 2>/dev/null || echo "local")
 		log_level=$(json_get "gateway.logLevel" 2>/dev/null || echo "")
 		acp_dispatch=$(json_get "acp.dispatch.enabled" 2>/dev/null || echo "false")
@@ -2795,7 +2979,7 @@ advanced_menu() {
 				echo -e "  ${CYAN}配置文件路径: ${CONFIG_FILE}${NC}"
 				echo ""
 				if [ -f "$CONFIG_FILE" ]; then
-					"$NODE_BIN" -e "console.log(JSON.stringify(JSON.parse(require('fs').readFileSync('${CONFIG_FILE}','utf8')),null,2))" 2>/dev/null || cat "$CONFIG_FILE"
+						OPENCLAW_CONFIG_PATH="$CONFIG_FILE" "$NODE_BIN" -e "const f=process.env.OPENCLAW_CONFIG_PATH; console.log(JSON.stringify(JSON.parse(require('fs').readFileSync(f,'utf8')),null,2))" 2>/dev/null || cat "$CONFIG_FILE"
 				else
 					echo "  (配置文件不存在)"
 				fi
@@ -2827,7 +3011,7 @@ advanced_menu() {
 				prompt_with_default "请输入备份文件路径" "" import_path
 				if [ -n "$import_path" ] && [ -f "$import_path" ]; then
 					cp "$import_path" "$CONFIG_FILE"
-					chown openclaw:openclaw "$CONFIG_FILE"
+					chown -h openclaw:openclaw "$CONFIG_FILE"
 					echo -e "  ${GREEN}✅ 配置已导入${NC}"
 					ask_restart
 				else
@@ -2867,8 +3051,11 @@ case "${1:-}" in
 		;;
 	--set)
 		if [ -n "${2:-}" ] && [ -n "${3:-}" ]; then
-			json_set "$2" "$3"
-			chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+				if ! json_set "$2" "$3"; then
+					echo -e "${RED}❌ 配置写入失败，原文件未覆盖${NC}" >&2
+					exit 1
+				fi
+			chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 			echo -e "${GREEN}✅ 已设置 $2${NC}"
 		else
 			echo "用法: oc-config.sh --set <key> <value>"

@@ -128,10 +128,15 @@
 
   // ── WebSocket 连接 ──
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  // 从 URL 参数或 hash 获取 PTY token 用于 WebSocket 认证
-  const urlParams = new URLSearchParams(location.search);
-  const ptyToken = urlParams.get('pty_token') || '';
-  const wsUrl = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=' + encodeURIComponent(ptyToken) : '');
+  // LuCI 页面通过 postMessage 注入一次性会话令牌；不从 URL 读取令牌，
+  // 避免它出现在浏览器历史、Referer、代理和截图中。
+  let ptyToken = '';
+  let wsUrl = '';
+  function safeWsUrl() { return wsUrl ? wsUrl.replace(/([?&]token=)[^&]*/, '$1<redacted>') : ''; }
+  function buildWsUrl() {
+    wsUrl = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=' + encodeURIComponent(ptyToken) : '');
+    return wsUrl;
+  }
   let ws = null;
   let connected = false;
   let retryCount = 0;
@@ -142,20 +147,21 @@
 
   console.log('[oc-config] protocol:', location.protocol);
   console.log('[oc-config] host:', location.host, 'port:', location.port);
-  console.log('[oc-config] WebSocket URL:', wsUrl);
-  loadingDebug.textContent = wsUrl;
+  console.log('[oc-config] WebSocket endpoint:', proto + '//' + location.host + '/ws');
+  loadingDebug.textContent = proto + '//' + location.host + '/ws';
 
   function connect() {
+    buildWsUrl();
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
     if (ws) { try { ws.close(); } catch(e){} ws = null; }
 
     retryCount++;
-    console.log('[oc-config] Connecting to', wsUrl, '(attempt', retryCount + ')');
+    console.log('[oc-config] Connecting to', safeWsUrl(), '(attempt', retryCount + ')');
     loadingMsg.textContent = retryCount > 1
       ? '正在重新连接... (第 ' + retryCount + ' 次)'
       : '正在连接终端...';
-    loadingDebug.textContent = wsUrl;
+    loadingDebug.textContent = safeWsUrl();
 
     // 先做一个 HTTP 预检确认服务器可达
     fetch('/health').then(function(r) {
@@ -289,11 +295,20 @@
     }
   });
 
-  // 等 DOM 和资源就绪后再连接
-  if (document.readyState === 'complete') {
+  window.addEventListener('message', function(ev) {
+    if (ev.source !== window.parent || !ev.data || ev.data.type !== 'openclaw-pty-token' || ev.origin !== ev.data.parentOrigin) return;
+    if (typeof ev.data.token !== 'string' || ev.data.token.length < 16 || ev.data.token.length > 256) return;
+    ptyToken = ev.data.token;
+    buildWsUrl();
     connect();
+  });
+
+  // 等 DOM 和资源就绪后再连接
+  if (ptyToken) {
+    if (document.readyState === 'complete') connect();
+    else window.addEventListener('load', connect);
   } else {
-    window.addEventListener('load', connect);
+    loadingMsg.textContent = '等待 LuCI 安全令牌...';
   }
 })();
 </script>

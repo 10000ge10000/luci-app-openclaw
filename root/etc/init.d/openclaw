@@ -60,11 +60,24 @@ _oc_fix_opt
 
 NODE_BIN="${NODE_BASE}/bin/node"
 CONFIG_FILE="${OC_DATA}/.openclaw/openclaw.json"
+OPENCLAW_RUNTIME_DIR="/var/run/openclaw"
+OPENCLAW_CLI_RUNTIME_DIR="/var/run/openclaw-cli"
+
+prepare_openclaw_runtime_dir() {
+	[ -L "$OPENCLAW_RUNTIME_DIR" ] || [ -L "$OPENCLAW_CLI_RUNTIME_DIR" ] && return 1
+	mkdir -p "$OPENCLAW_RUNTIME_DIR" 2>/dev/null || return 1
+	mkdir -p "$OPENCLAW_CLI_RUNTIME_DIR" 2>/dev/null || return 1
+	chown -h root:openclaw "$OPENCLAW_RUNTIME_DIR" 2>/dev/null || return 1
+	chmod 0710 "$OPENCLAW_RUNTIME_DIR" 2>/dev/null || return 1
+	chown -h openclaw:openclaw "$OPENCLAW_CLI_RUNTIME_DIR" 2>/dev/null || return 1
+	chmod 0700 "$OPENCLAW_CLI_RUNTIME_DIR" 2>/dev/null || return 1
+}
+prepare_openclaw_runtime_dir 2>/dev/null || true
 
 run_openclaw_cli_as_user() {
 	local oc_entry="$1"
 	shift
-	local pid_file="/tmp/openclaw-cli-$$.pid"
+	local pid_file="${OPENCLAW_CLI_RUNTIME_DIR}/cli-$$.pid"
 	local rc
 
 	[ -x "$NODE_BIN" ] || return 127
@@ -82,6 +95,29 @@ run_openclaw_cli_as_user() {
 	rc=$?
 	rm -f "$pid_file"
 	return "$rc"
+}
+
+# BusyBox 设备通常没有 usleep，但支持小数 sleep；统一封装避免重启
+# 轮询退化为每次等待 1 秒。
+oc_sleep_short() {
+	sleep 0.2 2>/dev/null || usleep 200000 2>/dev/null || sleep 1
+}
+
+# 端口 PID 可能属于其他服务，任何 kill 前都必须检查 /proc cmdline。
+oc_is_openclaw_pid() {
+	local pid="$1" cmdline
+	[ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || return 1
+	cmdline=$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+	case "$cmdline" in
+		*openclaw*gateway*|*web-pty.js*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+oc_kill_if_openclaw() {
+	local pid="$1" signal="${2:-TERM}"
+	oc_is_openclaw_pid "$pid" || return 0
+	kill "-$signal" "$pid" 2>/dev/null || true
 }
 
 get_oc_entry() {
@@ -122,39 +158,8 @@ done < "$_tmpf"
 rm -f "$_tmpf"
 }
 
-patch_iframe_headers() {
-# 移除 OpenClaw 网关的 X-Frame-Options 和 frame-ancestors 限制，允许 LuCI iframe 嵌入
-# v2026.4.x: 安全头设置迁移到 server.impl-*.js 文件
-local patched=0
-
-# 1. 搜索 server.impl-*.js (v2026.4.x 新位置)
-for f in $(find "${OC_GLOBAL}/lib/node_modules/openclaw/dist" -name "server.impl-*.js" -type f 2>/dev/null); do
-	if grep -q "X-Frame-Options.*DENY\|frame-ancestors.*none" "$f" 2>/dev/null; then
-		sed -i 's|res\.setHeader("X-Frame-Options", "DENY")|res.setHeader("X-Frame-Options", "ALLOW-FROM *") // patched by luci-app-openclaw|g' "$f"
-		sed -i "s|\"frame-ancestors 'none'\"|\"frame-ancestors *\"|g" "$f"
-		logger -t openclaw "Patched iframe headers in $f"
-		patched=1
-	fi
-done
-
-# 2. 兼容旧版本: 搜索 gateway-cli-*.js (v2026.3.x)
-for search_root in "${OC_GLOBAL}" "${NODE_BASE}/lib"; do
-	[ -d "$search_root" ] || continue
-	for f in $(find "$search_root" -name "gateway-cli-*.js" -type f 2>/dev/null); do
-		if grep -q "X-Frame-Options.*DENY" "$f" 2>/dev/null; then
-			sed -i "s|res.setHeader(\"X-Frame-Options\", \"DENY\");|// res.setHeader(\"X-Frame-Options\", \"DENY\"); // patched by luci-app-openclaw|g" "$f"
-			sed -i "s|\"frame-ancestors 'none'\"|\"frame-ancestors *\"|g" "$f"
-			logger -t openclaw "Patched iframe headers in $f"
-			patched=1
-		fi
-	done
-done
-
-[ $patched -eq 1 ] && logger -t openclaw "iframe headers patched successfully"
-}
-
 patch_webchat_session_conflict() {
-# OpenClaw 2026.6.11 的 Control UI / WebChat 在第二轮消息时可能触发:
+# OpenClaw 2026.6.33 的 Control UI / WebChat 在第二轮消息时可能触发:
 #   reply session initialization conflicted for agent:main:dashboard:...
 # 根因是 WebChat 追加用户消息会先更新 session registry revision，
 # 而 reply 初始化仍按旧 snapshot 做 guarded write；同时 dashboard 会话会被
@@ -168,7 +173,7 @@ dist_dir="${oc_dir}/dist"
 [ -d "$dist_dir" ] || return 0
 
 local patch_output
-patch_output=$(OC_DIST_DIR="$dist_dir" "$NODE_BIN" <<'NODE' 2>/tmp/openclaw-webchat-patch.err
+patch_output=$(OC_DIST_DIR="$dist_dir" "$NODE_BIN" <<'NODE' 2>"${OPENCLAW_RUNTIME_DIR}/webchat-patch.err"
 const fs = require('fs');
 const path = require('path');
 const dist = process.env.OC_DIST_DIR;
@@ -187,9 +192,17 @@ function patchFile(file, transforms) {
 		if (next.includes(needle)) next = next.replace(needle, replacement);
 	}
 	if (next !== source) {
-		fs.writeFileSync(file, next);
-		patched += 1;
-	}
+			const tmp = `${file}.tmp.${process.pid}`;
+			try {
+				fs.writeFileSync(tmp, next, { mode: 0o644 });
+				fs.chmodSync(tmp, fs.statSync(file).mode & 0o7777);
+				fs.renameSync(tmp, file);
+			} catch (e) {
+				try { fs.unlinkSync(tmp); } catch {}
+				return;
+			}
+			patched += 1;
+		}
 }
 
 for (const name of fs.readdirSync(dist)) {
@@ -218,7 +231,7 @@ NODE
 )
 local rc=$?
 local patched_count=""
-[ -f /tmp/openclaw-webchat-patch.err ] && patched_count=$(cat /tmp/openclaw-webchat-patch.err 2>/dev/null)
+[ -f "${OPENCLAW_RUNTIME_DIR}/webchat-patch.err" ] && patched_count=$(cat "${OPENCLAW_RUNTIME_DIR}/webchat-patch.err" 2>/dev/null)
 if [ $rc -eq 0 ]; then
 	local out_count
 	out_count=$(OC_DIST_DIR="$dist_dir" "$NODE_BIN" -e "const fs=require('fs'),path=require('path');let ok=0;for(const n of fs.readdirSync(process.env.OC_DIST_DIR)){const f=path.join(process.env.OC_DIST_DIR,n);if(!n.endsWith('.js'))continue;const s=fs.readFileSync(f,'utf8');if(s.includes('ctx.Provider === \"webchat\"')||s.includes('let sessionEntryInput = params.sessionEntry'))ok++;}process.stdout.write(String(ok));" 2>/dev/null || echo "")
@@ -226,29 +239,49 @@ if [ $rc -eq 0 ]; then
 else
 	logger -t openclaw "WebChat 会话冲突兼容补丁失败: ${patched_count:-unknown error}"
 fi
-rm -f /tmp/openclaw-webchat-patch.err 2>/dev/null || true
-return 0
+rm -f "${OPENCLAW_RUNTIME_DIR}/webchat-patch.err" 2>/dev/null || true
+	return 0
 }
 
 sync_uci_to_json() {
 # 将 UCI 配置同步到 openclaw.json，同时确保 token 双向同步
-local port bind token json_token
+local port bind token json_token json_gateway
 port=$(uci -q get openclaw.main.port || echo "18789")
-bind=$(uci -q get openclaw.main.bind || echo "lan")
+bind=$(uci -q get openclaw.main.bind || echo "loopback")
 token=$(uci -q get openclaw.main.token || echo "")
 
 # 确保配置目录和文件存在 (路径已在脚本开头做 OverlayFS 重映射)
 mkdir -p "$(dirname "$CONFIG_FILE")" 2>/dev/null
 if [ ! -f "$CONFIG_FILE" ]; then
 echo '{}' > "$CONFIG_FILE"
+chmod 0600 "$CONFIG_FILE" 2>/dev/null || true
 fi
 
 # 尝试从 JSON 读取 token (用于双向同步检测)
 if [ -x "$NODE_BIN" ]; then
-	json_token=$("$NODE_BIN" -e "
-try{const d=JSON.parse(require('fs').readFileSync('${CONFIG_FILE}','utf8'));
+	json_token=$(OPENCLAW_CONFIG_PATH="$CONFIG_FILE" "$NODE_BIN" -e "
+try{const d=JSON.parse(require('fs').readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));
 if(d.gateway&&d.gateway.auth&&d.gateway.auth.token)process.stdout.write(d.gateway.auth.token);}catch(e){}
 " 2>/dev/null)
+	json_gateway=$(OPENCLAW_CONFIG_PATH="$CONFIG_FILE" "$NODE_BIN" -e "
+try{const d=JSON.parse(require('fs').readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));const g=d.gateway||{};process.stdout.write(String(g.port||'')+'\\n'+String(g.bind||''));}catch(e){}
+" 2>/dev/null)
+fi
+
+# Gateway 配置由交互式工具以 openclaw 用户原子写入时，JSON 是唯一可写的持久化来源。
+# 只在 JSON 值通过白名单校验时采用它，避免重启时被旧 UCI 值覆盖；UCI 仍作为
+# root 管理操作和旧版本升级的回退来源。
+if [ -n "$json_gateway" ]; then
+	local json_port json_bind
+	json_port=$(printf '%s\n' "$json_gateway" | sed -n '1p')
+	json_bind=$(printf '%s\n' "$json_gateway" | sed -n '2p')
+	case "$json_port" in
+		*[!0-9]*|"") ;;
+		*) [ "$json_port" -ge 1 ] 2>/dev/null && [ "$json_port" -le 65535 ] 2>/dev/null && port="$json_port" ;;
+	esac
+	case "$json_bind" in
+		loopback|lan|auto|0.0.0.0|127.0.0.1|::1) bind="$json_bind" ;;
+	esac
 fi
 
 # v2026.4.10: 双向同步策略 - JSON 中的 token 优先
@@ -282,21 +315,23 @@ fi
 if [ -x "$NODE_BIN" ]; then
 OC_SYNC_PORT="$port" OC_SYNC_BIND="$bind" OC_SYNC_TOKEN="$token" OC_SYNC_FILE="$CONFIG_FILE" \
 "$NODE_BIN" -e "
-const fs=require('fs');
+const fs=require('fs'),path=require('path');
 const f=process.env.OC_SYNC_FILE;
+if(fs.existsSync(f) && fs.lstatSync(f).isSymbolicLink()){console.error('config is symlink');process.exit(2);}
+for(let cur=path.dirname(f);cur&&cur!==path.dirname(cur);cur=path.dirname(cur)){if(fs.lstatSync(cur).isSymbolicLink()){console.error('config parent is symlink');process.exit(2);}}
 let d={};
-try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){}
+try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){console.error('config parse failed; refusing overwrite');process.exit(2);}
 if(!d.gateway)d.gateway={};
 d.gateway.port=parseInt(process.env.OC_SYNC_PORT)||18789;
-d.gateway.bind=process.env.OC_SYNC_BIND||'lan';
+d.gateway.bind=process.env.OC_SYNC_BIND||'loopback';
 d.gateway.mode='local';
 if(!d.gateway.auth)d.gateway.auth={};
 d.gateway.auth.mode='token';
 d.gateway.auth.token=process.env.OC_SYNC_TOKEN||'';
 if(!d.gateway.controlUi)d.gateway.controlUi={};
-d.gateway.controlUi.allowInsecureAuth=true;
-d.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
-d.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true;
+d.gateway.controlUi.allowInsecureAuth=false;
+d.gateway.controlUi.dangerouslyDisableDeviceAuth=false;
+d.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=false;
 // 清理 v2026.3.1+ 已废弃的字段，避免配置验证失败
 delete d.gateway.name;
 delete d.gateway.bonjour;
@@ -330,48 +365,42 @@ if(d.agents&&d.agents.defaults){delete d.agents.defaults.cliBackends;}
 // 扫描已安装的插件并添加到 allow 列表
 if(!d.plugins)d.plugins={};
 if(!Array.isArray(d.plugins.allow))d.plugins.allow=[];
-// 从 plugins.installs 中提取已安装插件
-// 注意: 使用 installPath 中的目录名作为插件 ID (与 openclaw.plugin.json 中的 id 一致)
-if(d.plugins.installs){
-	Object.keys(d.plugins.installs).forEach(key=>{
-		const inst=d.plugins.installs[key];
-		if(inst&&inst.installPath){
-			// 从 installPath 提取插件目录名 (如 openclaw-weixin)
-			const match=inst.installPath.match(/\/([^\/]+)\/?$/);
-			if(match&&match[1]&&!d.plugins.allow.includes(match[1])){
-				d.plugins.allow.push(match[1]);
-		}
-		}
-	});
-}
+// 不再从废弃的 JSON plugins.installs 推导 allow；官方 SQLite installed_plugin_index 才是安装来源。
 // v2026.5.x: 微信插件渠道名统一为 openclaw-weixin
 // 旧配置里可能残留 weixin，启动前迁移，避免渠道加载失败。
 if(Array.isArray(d.plugins.allow)){
 	d.plugins.allow=d.plugins.allow.map(x=>x==='weixin'?'openclaw-weixin':x)
 		.filter((x,i,a)=>x&&a.indexOf(x)===i);
 }
-['entries','installs'].forEach(ns=>{
-	if(d.plugins&&d.plugins[ns]&&d.plugins[ns].weixin){
-		if(!d.plugins[ns]['openclaw-weixin'])d.plugins[ns]['openclaw-weixin']=d.plugins[ns].weixin;
-		delete d.plugins[ns].weixin;
-	}
-});
+// 安装来源由 SQLite installed_plugin_index 管理；不迁移或重建废弃的
+// plugins.installs 记录，只清理旧名称，避免冷启动再次依赖 JSON ledger。
+if(d.plugins&&d.plugins.installs){
+	delete d.plugins.installs.weixin;
+	delete d.plugins.installs['openclaw-weixin'];
+}
+if(d.plugins&&d.plugins.entries&&d.plugins.entries.weixin){
+	if(!d.plugins.entries['openclaw-weixin'])d.plugins.entries['openclaw-weixin']=d.plugins.entries.weixin;
+	delete d.plugins.entries.weixin;
+}
 ['channel','channels'].forEach(ns=>{
 	if(d[ns]&&d[ns].weixin){
 		if(!d[ns]['openclaw-weixin'])d[ns]['openclaw-weixin']=d[ns].weixin;
 		delete d[ns].weixin;
 	}
 });
-if(!d.plugins.allow.includes('openclaw-weixin') && d.plugins.installs && d.plugins.installs['openclaw-weixin']){
-	d.plugins.allow.push('openclaw-weixin');
-}
+
 // 始终信任 copilot-proxy (内置插件)
 if(!d.plugins.allow.includes('copilot-proxy'))d.plugins.allow.push('copilot-proxy');
-fs.writeFileSync(f,JSON.stringify(d,null,2));
+const tmp=f+'.tmp.'+process.pid;
+fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});
+fs.chmodSync(tmp,0o600);
+fs.renameSync(tmp,f);
 " 2>/dev/null
+		sync_rc=$?
+		[ "$sync_rc" -eq 0 ] || { logger -t openclaw "配置同步失败，拒绝覆盖原文件"; return 1; }
 fi
 
-chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 }
 
 start_service() {
@@ -379,13 +408,19 @@ local enabled port bind pty_port
 config_load openclaw
 config_get enabled main enabled "0"
 config_get port main port "18789"
-config_get bind main bind "lan"
+config_get bind main bind "loopback"
 config_get pty_port main pty_port "18793"
+case "$port" in *[!0-9]*|"") port="18789" ;; esac
+case "$pty_port" in *[!0-9]*|"") pty_port="18793" ;; esac
 
-[ "$enabled" = "1" ] || {
-echo "openclaw 已禁用。请在 /etc/config/openclaw 中设置 enabled 为 1"
-return 0
-}
+	[ "$enabled" = "1" ] || {
+	echo "openclaw 已禁用。请在 /etc/config/openclaw 中设置 enabled 为 1"
+	return 0
+	}
+	prepare_openclaw_runtime_dir || {
+		logger -t openclaw "无法创建受保护的运行时目录，拒绝启动 Gateway/PTY"
+		return 1
+	}
 
 # 检查 Node.js
 if [ ! -x "$NODE_BIN" ]; then
@@ -409,31 +444,75 @@ echo "OpenClaw 未安装。请运行: openclaw-env setup"
 return 1
 fi
 
-	# 同步 UCI 到 JSON
-	sync_uci_to_json
+		# 同步 UCI 到 JSON；配置损坏或原子写失败时拒绝启动，不能以空配置覆盖现场。
+		sync_uci_to_json || {
+			logger -t openclaw "配置同步失败，拒绝启动 Gateway"
+			return 1
+		}
 
-	# 微信 npm 插件自愈注册：OpenClaw 2026.6.11 已把安装记录从
+	# 微信 npm 插件自愈注册：OpenClaw 2026.6.33 已把安装记录从
 	# openclaw.json 的 plugins.installs 迁移到 SQLite installed_plugin_index。
 	# 所有官方 CLI 和 SQLite 注册表操作都以 openclaw 用户执行；完成配置写入后
 	# 强制 refresh 并检查 channel capability，避免重启后只加载 memory-core。
+	verify_wechat_plugin() {
+		local entry="$1" log_file="${2:-/var/run/openclaw/wechat-self-heal.log}" inspect_file="/var/run/openclaw/wechat-verify-$$.json" rc
+		rm -f "$inspect_file"
+		if ! run_openclaw_cli_as_user "$entry" plugins inspect openclaw-weixin --json --no-color >"$inspect_file" 2>&1; then
+			cat "$inspect_file" >> "$log_file" 2>/dev/null || true
+			rm -f "$inspect_file"
+			return 1
+		fi
+		OC_INSPECT_FILE="$inspect_file" "$NODE_BIN" -e '
+const fs=require("fs");
+let d;
+try{d=JSON.parse(fs.readFileSync(process.env.OC_INSPECT_FILE,"utf8"));}catch(e){process.exit(2);}
+const p=d&&d.plugin?d.plugin:d;
+const install=d&&d.install?d.install:{};
+const caps=Array.isArray(d&&d.capabilities)?d.capabilities:[];
+const channel=caps.some(x=>x&&x.kind==="channel"&&Array.isArray(x.ids)&&x.ids.includes("openclaw-weixin"));
+process.exit(p&&p.status==="loaded"&&p.version==="2.4.6"&&install.source==="npm"&&channel?0:1);
+' >/dev/null 2>&1
+		rc=$?
+		cat "$inspect_file" >> "$log_file" 2>/dev/null || true
+		rm -f "$inspect_file"
+		return "$rc"
+	}
 	self_heal_wechat_npm_plugin_config() {
 		[ -x "$NODE_BIN" ] || return 0
 		[ -f "$CONFIG_FILE" ] || return 0
 		local npm_projects_dir="${OC_DATA}/.openclaw/npm/projects"
-		[ -d "$npm_projects_dir" ] || return 0
-		local wechat_plugin_json heal_out index_ok inspect_ok config_ok inspect_file
-		wechat_plugin_json=$(find "$npm_projects_dir" -path "*/node_modules/@tencent-weixin/openclaw-weixin/openclaw.plugin.json" -type f 2>/dev/null | head -n 1)
-		[ -n "$wechat_plugin_json" ] || return 0
-		inspect_file="/tmp/openclaw-wechat-self-heal.inspect"
-		rm -f "$inspect_file"
-		: > /tmp/openclaw-wechat-self-heal.log
+			local wechat_plugin_json heal_out heal_rc index_ok inspect_ok config_ok plugin_present=0
+			wechat_plugin_json=$(find "$npm_projects_dir" -path "*/node_modules/@tencent-weixin/openclaw-weixin/openclaw.plugin.json" -type f 2>/dev/null | head -n 1)
+			if [ -n "$wechat_plugin_json" ] || [ -f "${OC_DATA}/.openclaw/extensions/openclaw-weixin/openclaw.plugin.json" ]; then
+				plugin_present=1
+			fi
+			# 即使插件文件已经由官方安装器写入 npm 项目、但注册表只剩
+			# SQLite 记录，也必须进入预检；不能只看旧 extensions 目录。
+			if [ "$plugin_present" = "0" ]; then
+				local config_has_wechat=""
+				config_has_wechat=$(OPENCLAW_CONFIG_PATH="$CONFIG_FILE" "$NODE_BIN" -e '
+const fs=require("fs");
+try {
+  const d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,"utf8"));
+  const p=d.plugins||{};
+  const c=d.channels||{};
+  const yes=(Array.isArray(p.allow)&&p.allow.includes("openclaw-weixin"))||
+    !!(p.entries&&p.entries["openclaw-weixin"])||!!c["openclaw-weixin"]||
+    !!(p.installs&&p.installs["openclaw-weixin"]);
+  process.stdout.write(yes?"1":"0");
+} catch(e) {}
+' 2>/dev/null)
+				[ "$config_has_wechat" = "1" ] && plugin_present=1
+			fi
+			[ "$plugin_present" = "1" ] || return 0
+			: > /var/run/openclaw/wechat-self-heal.log
 		index_ok=0
 		inspect_ok=0
 		config_ok=0
-		if run_openclaw_cli_as_user "$oc_entry" plugins inspect openclaw-weixin >"$inspect_file" 2>&1; then
-			grep -q '^Install:$' "$inspect_file" && grep -q '^Source: npm$' "$inspect_file" && index_ok=1
-			grep -q '^Status: loaded$' "$inspect_file" && grep -q '^channel: openclaw-weixin$' "$inspect_file" && inspect_ok=1
-		fi
+			if verify_wechat_plugin "$oc_entry" /var/run/openclaw/wechat-self-heal.log; then
+				index_ok=1
+				inspect_ok=1
+			fi
 		OC_CONFIG="$CONFIG_FILE" "$NODE_BIN" -e "
 try {
 	const d=JSON.parse(require('fs').readFileSync(process.env.OC_CONFIG,'utf8'));
@@ -445,28 +524,26 @@ try {
 } catch(e) { process.exit(1); }
 " >/dev/null 2>&1 && config_ok=1
 		if [ "$index_ok" = "1" ] && [ "$inspect_ok" = "1" ] && [ "$config_ok" = "1" ]; then
-			cat "$inspect_file" >> /tmp/openclaw-wechat-self-heal.log
-			logger -t openclaw "微信插件注册状态已有效，跳过重复刷新"
-			rm -f "$inspect_file"
-			return 0
+				logger -t openclaw "微信插件注册状态已有效，跳过重复刷新"
+				return 0
 		fi
 		if [ "$index_ok" != "1" ]; then
 			logger -t openclaw "检测到旧微信直装目录，正在迁移到 SQLite 插件索引"
 			mkdir -p "${OC_DATA}/.npm" "${OC_DATA}/.tmp" 2>/dev/null || true
 			if run_openclaw_cli_as_user "$oc_entry" plugins install --force --pin '@tencent-weixin/openclaw-weixin@2.4.6' \
-				>>/tmp/openclaw-wechat-self-heal.log 2>&1; then
+				>>/var/run/openclaw/wechat-self-heal.log 2>&1; then
 				logger -t openclaw "微信插件已迁移到 SQLite installed_plugin_index"
 			else
-				logger -t openclaw "微信插件 SQLite 索引迁移失败，请查看 /tmp/openclaw-wechat-self-heal.log"
-				rm -f "$inspect_file"
-				return 0
+				logger -t openclaw "微信插件 SQLite 索引迁移失败，请查看 /var/run/openclaw/wechat-self-heal.log"
+					return 1
 			fi
 		fi
-		heal_out=$(OC_CONFIG="$CONFIG_FILE" "$NODE_BIN" -e "
+			heal_out=$(OC_CONFIG="$CONFIG_FILE" "$NODE_BIN" -e "
 const fs=require('fs');
 const p=process.env.OC_CONFIG;
+if(fs.existsSync(p) && fs.lstatSync(p).isSymbolicLink()){console.error('config is symlink');process.exit(2);}
 let d={};
-try{d=JSON.parse(fs.readFileSync(p,'utf8'));}catch(e){}
+try{d=JSON.parse(fs.readFileSync(p,'utf8'));}catch(e){console.error('config parse failed');process.exit(2);}
 if(!d.plugins||typeof d.plugins!=='object')d.plugins={};
 if(!Array.isArray(d.plugins.allow))d.plugins.allow=[];
 if(!d.channels||typeof d.channels!=='object')d.channels={};
@@ -484,37 +561,43 @@ if(d.channels['openclaw-weixin'].enabled!==true){
 	d.channels['openclaw-weixin'].enabled=true; changed=true;
 }
 if(changed){
-	fs.writeFileSync(p,JSON.stringify(d,null,2)+'\n');
+	const tmp=p+'.tmp.'+process.pid;
+	fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});
+	fs.chmodSync(tmp,0o600);
+	fs.renameSync(tmp,p);
 	console.log('FIXED');
 }
-" 2>/dev/null)
+		" 2>/dev/null)
+			heal_rc=$?
+			if [ "$heal_rc" -ne 0 ]; then
+				logger -t openclaw "微信插件配置自愈失败，请查看 /var/run/openclaw/wechat-self-heal.log"
+				return 1
+			fi
 		if echo "$heal_out" | grep -q "FIXED"; then
-			chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+			chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 			logger -t openclaw "已自愈启用 openclaw-weixin channel"
 		fi
 		if ! run_openclaw_cli_as_user "$oc_entry" plugins enable openclaw-weixin \
-			>>/tmp/openclaw-wechat-self-heal.log 2>&1; then
-			logger -t openclaw "微信插件启用失败，请查看 /tmp/openclaw-wechat-self-heal.log"
-			rm -f "$inspect_file"
-			return 0
+			>>/var/run/openclaw/wechat-self-heal.log 2>&1; then
+			logger -t openclaw "微信插件启用失败，请查看 /var/run/openclaw/wechat-self-heal.log"
+					return 1
 		fi
-		if ! run_openclaw_cli_as_user "$oc_entry" plugins registry --refresh \
-			>>/tmp/openclaw-wechat-self-heal.log 2>&1; then
-			logger -t openclaw "微信插件注册表刷新失败，请查看 /tmp/openclaw-wechat-self-heal.log"
-			rm -f "$inspect_file"
-			return 0
+			if ! run_openclaw_cli_as_user "$oc_entry" plugins registry --refresh \
+				>>/var/run/openclaw/wechat-self-heal.log 2>&1; then
+				logger -t openclaw "微信插件注册表刷新失败，请查看 /var/run/openclaw/wechat-self-heal.log"
+				return 1
 		fi
-		if run_openclaw_cli_as_user "$oc_entry" plugins inspect openclaw-weixin >"$inspect_file" 2>&1 && \
-			grep -q '^Status: loaded$' "$inspect_file" && grep -q '^channel: openclaw-weixin$' "$inspect_file"; then
-			cat "$inspect_file" >> /tmp/openclaw-wechat-self-heal.log
-			logger -t openclaw "微信插件 SQLite 注册表已刷新并通过加载验证"
-		else
-			cat "$inspect_file" >> /tmp/openclaw-wechat-self-heal.log 2>/dev/null || true
-			logger -t openclaw "微信插件加载验证失败，请查看 /tmp/openclaw-wechat-self-heal.log"
-		fi
-		rm -f "$inspect_file"
-	}
-	self_heal_wechat_npm_plugin_config
+			if verify_wechat_plugin "$oc_entry" /var/run/openclaw/wechat-self-heal.log; then
+				logger -t openclaw "微信插件 SQLite 注册表已刷新并通过加载验证"
+				else
+					logger -t openclaw "微信插件加载验证失败，请查看 /var/run/openclaw/wechat-self-heal.log"
+					return 1
+				fi
+			}
+		self_heal_wechat_npm_plugin_config || {
+			logger -t openclaw "微信插件自愈未通过，拒绝启动 Gateway"
+			return 1
+		}
 
 	# v2026.3.13: 修复插件配置中的插件名称不匹配问题
 	# OpenClaw 加强了配置验证，plugins.allow 中的名称必须与实际插件名完全匹配
@@ -524,10 +607,10 @@ if(changed){
 		[ ! -d "$qqbot_ext_dir" ] && return
 		[ ! -f "$CONFIG_FILE" ] && return
 		
-		"$NODE_BIN" -e "
+		OPENCLAW_CONFIG_PATH="$CONFIG_FILE" "$NODE_BIN" -e "
 			const fs=require('fs');
 			try{
-				const d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));
+				const d=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));
 				if(!d.plugins)d.plugins={};
 				let modified=false;
 				
@@ -557,11 +640,11 @@ if(changed){
 			}
 				
 				if(modified){
-					fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+					(()=>{const f=process.env.OPENCLAW_CONFIG_PATH;if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error('config is symlink');const tmp=f+'.tmp.'+process.pid;fs.writeFileSync(tmp,JSON.stringify(d,null,2)+'\n',{mode:0o600});fs.chmodSync(tmp,0o600);fs.renameSync(tmp,f);})();
 					console.log('FIXED');
 			}
 		}catch(e){}
-		" 2>/dev/null && chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null
+		" 2>/dev/null && chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null
 	}
 	fix_plugin_config
 
@@ -633,7 +716,7 @@ if(changed){
 				logger -t openclaw "配置迁移失败，请手动检查"
 			# 更新标记文件
 			echo "$current_ver" > "$version_marker" 2>/dev/null
-			chown openclaw:openclaw "$version_marker" 2>/dev/null || true
+			chown -h openclaw:openclaw "$version_marker" 2>/dev/null || true
 		else
 			logger -t openclaw "版本未变化 ($current_ver)，跳过 doctor --fix"
 		fi
@@ -651,11 +734,14 @@ if(changed){
 		[ ! -x "$NODE_BIN" ] && return
 		local critical_token
 		critical_token=$(uci -q get openclaw.main.token || echo "")
-		OC_SYNC_TOKEN="$critical_token" "$NODE_BIN" -e "
+			OC_SYNC_TOKEN="$critical_token" OPENCLAW_CONFIG_PATH="$CONFIG_FILE" "$NODE_BIN" -e "
 const fs = require('fs');
-const f = '${CONFIG_FILE}';
+const path = require('path');
+const f = process.env.OPENCLAW_CONFIG_PATH;
+if (fs.existsSync(f) && fs.lstatSync(f).isSymbolicLink()) { console.error('config is symlink'); process.exit(2); }
+for (let cur = path.dirname(f); cur && cur !== path.dirname(cur); cur = path.dirname(cur)) { if (fs.lstatSync(cur).isSymbolicLink()) { console.error('config parent is symlink'); process.exit(2); } }
 let d = {};
-try { d = JSON.parse(fs.readFileSync(f, 'utf8')); } catch(e) {}
+try { d = JSON.parse(fs.readFileSync(f, 'utf8')); } catch(e) { console.error('config parse failed'); process.exit(2); }
 
 // 确保 gateway.mode 存在
 if (!d.gateway) d.gateway = {};
@@ -663,13 +749,13 @@ if (!d.gateway.mode) d.gateway.mode = 'local';
 
 // 确保端口和绑定配置
 if (!d.gateway.port) d.gateway.port = 18789;
-if (!d.gateway.bind) d.gateway.bind = 'lan';
+if (!d.gateway.bind) d.gateway.bind = 'loopback';
 
-// 确保 controlUi 安全配置存在 (允许非 loopback 绑定和 LuCI iframe 嵌入)
+// 确保 controlUi 安全配置存在；不主动打开危险降级开关。
 if (!d.gateway.controlUi) d.gateway.controlUi = {};
-if (d.gateway.controlUi.allowInsecureAuth !== true) d.gateway.controlUi.allowInsecureAuth = true;
-if (d.gateway.controlUi.dangerouslyDisableDeviceAuth !== true) d.gateway.controlUi.dangerouslyDisableDeviceAuth = true;
-if (d.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback !== true) d.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback = true;
+if (typeof d.gateway.controlUi.allowInsecureAuth !== 'boolean') d.gateway.controlUi.allowInsecureAuth = false;
+if (typeof d.gateway.controlUi.dangerouslyDisableDeviceAuth !== 'boolean') d.gateway.controlUi.dangerouslyDisableDeviceAuth = false;
+if (typeof d.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback !== 'boolean') d.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback = false;
 
 // 确保认证配置
 if (!d.gateway.auth) d.gateway.auth = {};
@@ -691,9 +777,14 @@ d.tools.profile = 'coding';
 if (!d.update) d.update = {};
 d.update.checkOnStart = false;
 
-fs.writeFileSync(f, JSON.stringify(d, null, 2));
+const tmp = f + '.tmp.' + process.pid;
+fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + '\n', { mode: 0o600 });
+fs.chmodSync(tmp, 0o600);
+fs.renameSync(tmp, f);
 " 2>/dev/null
-		chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+			local critical_rc=$?
+			[ "$critical_rc" -eq 0 ] || { logger -t openclaw "关键配置校验失败，保留原文件"; return 1; }
+			chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 	}
 	_ensure_critical_config
 
@@ -704,8 +795,8 @@ fs.writeFileSync(f, JSON.stringify(d, null, 2));
 			[ ! -f "$CONFIG_FILE" ] && return
 			[ ! -x "$NODE_BIN" ] && return
 			local json_token uci_token
-			json_token=$("$NODE_BIN" -e "
-try{const d=JSON.parse(require('fs').readFileSync('${CONFIG_FILE}','utf8'));
+				json_token=$(OPENCLAW_CONFIG_PATH="$CONFIG_FILE" "$NODE_BIN" -e "
+try{const d=JSON.parse(require('fs').readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));
 if(d.gateway&&d.gateway.auth&&d.gateway.auth.token)process.stdout.write(d.gateway.auth.token);}catch(e){}
 			" 2>/dev/null)
 			uci_token=$(uci -q get openclaw.main.token || echo "")
@@ -716,18 +807,25 @@ if(d.gateway&&d.gateway.auth&&d.gateway.auth.token)process.stdout.write(d.gatewa
 				uci commit openclaw 2>/dev/null
 				logger -t openclaw "Token 同步 (doctor 后): JSON -> UCI"
 			elif [ -z "$json_token" ] && [ -n "$uci_token" ]; then
-				OC_SYNC_TOKEN="$uci_token" OC_SYNC_FILE="$CONFIG_FILE" "$NODE_BIN" -e "
-const fs=require('fs');
+					OC_SYNC_TOKEN="$uci_token" OC_SYNC_FILE="$CONFIG_FILE" "$NODE_BIN" -e "
+const fs=require('fs'),path=require('path');
 const f=process.env.OC_SYNC_FILE;
+if(fs.existsSync(f) && fs.lstatSync(f).isSymbolicLink()){console.error('config is symlink');process.exit(2);}
+for(let cur=path.dirname(f);cur&&cur!==path.dirname(cur);cur=path.dirname(cur)){if(fs.lstatSync(cur).isSymbolicLink()){console.error('config parent is symlink');process.exit(2);}}
 let d={};
-try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){}
+try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){console.error('config parse failed');process.exit(2);}
 if(!d.gateway)d.gateway={};
 if(!d.gateway.auth)d.gateway.auth={};
 d.gateway.auth.mode=d.gateway.auth.mode||'token';
 d.gateway.auth.token=process.env.OC_SYNC_TOKEN;
-fs.writeFileSync(f, JSON.stringify(d, null, 2));
-				" 2>/dev/null
-				chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+const tmp=f+'.tmp.'+process.pid;
+fs.writeFileSync(tmp, JSON.stringify(d, null, 2)+'\n', {mode:0o600});
+fs.chmodSync(tmp,0o600);
+fs.renameSync(tmp,f);
+					" 2>/dev/null
+					token_sync_rc=$?
+					[ "$token_sync_rc" -eq 0 ] || { logger -t openclaw "Token 同步失败，保留原文件"; return 1; }
+				chown -h openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 				logger -t openclaw "Token 同步 (doctor 后): UCI -> JSON"
 			fi
 		}
@@ -736,8 +834,7 @@ fs.writeFileSync(f, JSON.stringify(d, null, 2));
 		# v2026.4.10: final permission fix before Gateway start
 		fix_openclaw_state_permissions 2>/dev/null || true
 
-# Patch iframe 安全头，允许 LuCI 嵌入
-patch_iframe_headers
+# 不再削弱 OpenClaw Control UI 的 frame/CSP 安全头。
 
 # Patch WebChat 二次发送会话初始化冲突
 patch_webchat_session_conflict
@@ -769,7 +866,7 @@ _ensure_port_free() {
 	
 	# 端口被占用，尝试清理
 	for occ_pid in $(pgrep -f "openclaw-gateway" 2>/dev/null); do
-		kill "$occ_pid" 2>/dev/null
+		oc_kill_if_openclaw "$occ_pid" TERM
 	done
 	
 	while [ $i -lt $max_wait ]; do
@@ -778,7 +875,7 @@ _ensure_port_free() {
 		else
 			netstat -tulnp 2>/dev/null | grep -q ":${p} " || return 0
 		fi
-		usleep 200000 2>/dev/null || sleep 1
+	oc_sleep_short
 		i=$((i + 1))
 	done
 	
@@ -789,7 +886,7 @@ _ensure_port_free() {
 	else
 		port_pid=$(netstat -tulnp 2>/dev/null | grep ":${p} " | awk '{print $7}' | cut -d'/' -f1 | grep -E '^[0-9]+$' | head -n 1)
 	fi
-	[ -n "$port_pid" ] && kill -9 "$port_pid" 2>/dev/null && usleep 300000 2>/dev/null
+	[ -n "$port_pid" ] && oc_kill_if_openclaw "$port_pid" KILL && oc_sleep_short
 	return 0
 }
 _ensure_port_free "$port"
@@ -798,7 +895,7 @@ _ensure_port_free "$port"
 # 保留该缓存可以显著缩短后续重启时 gateway 第一条日志前的等待时间。
 local node_compile_cache="/tmp/openclaw-node-compile-cache"
 mkdir -p "$node_compile_cache" 2>/dev/null || true
-chown openclaw:openclaw "$node_compile_cache" 2>/dev/null || true
+chown -h openclaw:openclaw "$node_compile_cache" 2>/dev/null || true
 chmod 700 "$node_compile_cache" 2>/dev/null || true
 
 # 启动 OpenClaw Gateway (主服务, 前台运行)
@@ -854,8 +951,9 @@ fi
 
 procd_open_instance "pty"
 procd_set_param command "$NODE_BIN" /usr/share/openclaw/web-pty.js
-procd_set_param env \
+	procd_set_param env \
 OC_CONFIG_PORT="$pty_port" \
+	OC_CONFIG_HOST="127.0.0.1" \
 OC_PTY_TOKEN="$pty_token" \
 OC_CONFIG_SCRIPT="/usr/share/openclaw/oc-config.sh" \
 NODE_COMPILE_CACHE="$node_compile_cache" \
@@ -868,6 +966,7 @@ OPENCLAW_HOME="$OC_DATA" \
 OPENCLAW_STATE_DIR="${OC_DATA}/.openclaw" \
 OPENCLAW_CONFIG_PATH="$CONFIG_FILE" \
 PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+procd_set_param user openclaw
 procd_set_param respawn 3600 5 5
 procd_set_param term_timeout 2
 procd_set_param stdout 1
@@ -883,6 +982,7 @@ stop_service() {
 
 local port
 port=$(uci -q get openclaw.main.port || echo "18789")
+case "$port" in *[!0-9]*|"") port="18789" ;; esac
 
 # v2026.3.14 优化: 快速终止进程树，减少等待时间
 # 1) 先获取所有相关 PID
@@ -892,7 +992,7 @@ gw_pids="$gw_pids $(pgrep -f "openclaw.*gateway.*run" 2>/dev/null)"
 
 # 2) 同时发送 SIGTERM 给所有进程
 for pid in $gw_pids; do
-	[ -n "$pid" ] && kill "$pid" 2>/dev/null
+	[ -n "$pid" ] && oc_kill_if_openclaw "$pid" TERM
 done
 
 # 3) 快速轮询等待端口释放 (200ms 间隔，最多 3 秒)
@@ -904,7 +1004,7 @@ while [ $wait_count -lt $max_wait ]; do
 	else
 		netstat -tulnp 2>/dev/null | grep -q ":${port} " || break
 	fi
-	usleep 200000 2>/dev/null || sleep 1
+	oc_sleep_short
 	wait_count=$((wait_count + 1))
 done
 
@@ -917,9 +1017,9 @@ if [ $wait_count -ge $max_wait ]; then
                 port_pid=$(netstat -tulnp 2>/dev/null | grep ":${port} " | awk '{print $7}' | cut -d'/' -f1 | grep -E '^[0-9]+$' | head -n 1)
         fi
         if [ -n "$port_pid" ]; then
-                kill -9 "$port_pid" 2>/dev/null
+			oc_kill_if_openclaw "$port_pid" KILL
                 # 等待内核回收 (缩短到 0.5 秒)
-                usleep 500000 2>/dev/null || sleep 1
+			oc_sleep_short
         fi
 fi
 
@@ -932,15 +1032,8 @@ for _p in "$port" "$_pty_port"; do
         else
                 _spid=$(netstat -tulnp 2>/dev/null | grep ":${_p} " | awk '{print $7}' | cut -d'/' -f1 | grep -E '^[0-9]+$' | head -n 1)
         fi
-        [ -n "$_spid" ] && kill -9 "$_spid" 2>/dev/null || true
+	[ -n "$_spid" ] && oc_kill_if_openclaw "$_spid" KILL
 done
-
-# 6) 清理该特定系统用户下任何悬挂或离群孤儿进程
-if getent passwd openclaw >/dev/null 2>&1 || grep -q '^openclaw:' /etc/passwd 2>/dev/null; then
-        for _opcup in $(pgrep -u openclaw 2>/dev/null); do
-                kill -9 "$_opcup" 2>/dev/null || true
-        done
-fi
 }
 
 service_triggers() {
@@ -951,7 +1044,7 @@ procd_add_reload_trigger "openclaw"
 reload_service() {
 stop
 # v2026.3.14: stop_service 已优化等待逻辑，缩短额外等待时间
-usleep 300000 2>/dev/null || sleep 1
+	oc_sleep_short
 start
 }
 
@@ -963,8 +1056,9 @@ echo "正在调用 openclaw-env setup..."
 restart_gateway() {
 # 仅重启 Gateway 进程，通过 kill 触发 procd respawn
 # 绝对不能调用 start_service，否则会重启 PTY 实例
+	prepare_openclaw_runtime_dir || return 1
 
-local lock_dir="/tmp/openclaw-restart-gateway.lock"
+local lock_dir="${OPENCLAW_RUNTIME_DIR}/openclaw-restart-gateway.lock"
 if ! mkdir "$lock_dir" 2>/dev/null; then
 	logger -t openclaw "restart_gateway 已在执行，跳过重复请求"
 	return 0
@@ -972,6 +1066,7 @@ fi
 
 local port
 port=$(uci -q get openclaw.main.port || echo "18789")
+case "$port" in *[!0-9]*|"") port="18789" ;; esac
 logger -t openclaw "restart_gateway: 正在重启 Gateway"
 
 # v2026.3.14 优化: 快速终止并重启
@@ -988,7 +1083,7 @@ gw_pid=$(ubus call service list '{"name":"openclaw"}' 2>/dev/null | \
 # 2) OpenClaw 支持 SIGUSR1 触发 in-process restart。
 #    这比 SIGTERM/procd respawn 快很多，并能避免 stop 路径默认 25 秒 shutdown timeout。
 #    注意要发给实际监听端口的 gateway 子进程，而不是 procd 记录的 node 父进程。
-if [ -n "$port_pid" ] && kill -0 "$port_pid" 2>/dev/null; then
+if [ -n "$port_pid" ] && oc_is_openclaw_pid "$port_pid" && kill -0 "$port_pid" 2>/dev/null; then
 	kill -USR1 "$port_pid" 2>/dev/null && {
 		logger -t openclaw "restart_gateway: 已通过 SIGUSR1 请求 Gateway 快速重载"
 		rmdir "$lock_dir" 2>/dev/null || true
@@ -997,12 +1092,12 @@ if [ -n "$port_pid" ] && kill -0 "$port_pid" 2>/dev/null; then
 fi
 
 # 3) SIGUSR1 不可用时，回退到旧的 TERM + procd respawn 路径
-[ -n "$port_pid" ] && kill "$port_pid" 2>/dev/null
-[ -n "$gw_pid" ] && kill -0 "$gw_pid" 2>/dev/null && kill "$gw_pid" 2>/dev/null
+[ -n "$port_pid" ] && oc_kill_if_openclaw "$port_pid" TERM
+[ -n "$gw_pid" ] && oc_kill_if_openclaw "$gw_pid" TERM
 
 # 4) 兜底: kill 所有残留进程
 for pid in $(pgrep -f "openclaw-gateway" 2>/dev/null) $(pgrep -f "openclaw.*gateway.*run" 2>/dev/null); do
-	kill "$pid" 2>/dev/null
+	oc_kill_if_openclaw "$pid" TERM
 done
 
 # 5) 快速轮询等待端口释放 (200ms 间隔，最多 2 秒)
@@ -1013,14 +1108,14 @@ while [ $wait_count -lt 10 ]; do
 	else
 		netstat -tulnp 2>/dev/null | grep -q ":${port} " || break
 	fi
-	usleep 200000 2>/dev/null || sleep 1
+	oc_sleep_short
 	wait_count=$((wait_count + 1))
 done
 
 # 6) 如果端口仍被占用，强制 SIGKILL
 if [ $wait_count -ge 10 ]; then
-	[ -n "$port_pid" ] && kill -9 "$port_pid" 2>/dev/null
-	usleep 300000 2>/dev/null || sleep 1
+	[ -n "$port_pid" ] && oc_kill_if_openclaw "$port_pid" KILL
+	oc_sleep_short
 fi
 
 # 7) 如果 procd 中没有 gateway 服务注册，调用 start
@@ -1035,6 +1130,8 @@ status_service() {
 local port pty_port enabled
 port=$(uci -q get openclaw.main.port || echo "18789")
 pty_port=$(uci -q get openclaw.main.pty_port || echo "18793")
+case "$port" in *[!0-9]*|"") port="18789" ;; esac
+case "$pty_port" in *[!0-9]*|"") pty_port="18793" ;; esac
 enabled=$(uci -q get openclaw.main.enabled || echo "0")
 
 echo "=== OpenClaw 服务状态 ==="

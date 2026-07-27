@@ -4,6 +4,38 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [2.1.0] - 2026-07-27
+
+### 适配 OpenClaw 2026.6.33
+
+- 默认 OpenClaw 固定到 `2026.6.33`（npm `extended-stable`），Node.js ARM64/musl 固定到 `22.23.1`。
+- 新增 `extended-stable` 安装选项；`latest` 明确标注未经插件测试，避免误装破坏性上游版本。
+- 启动和状态页检测已安装 OpenClaw 与适配版本的漂移，并给出可读提示。
+- 微信插件安装顺序统一为官方 `plugins install --force --pin`、`plugins enable`、`plugins registry --refresh`、`plugins inspect`。
+
+### 安全修复
+
+- Web PTY 默认仅监听 loopback，令牌缺失时拒绝连接；限制 Origin、WebSocket 帧大小和终端尺寸，去除通配 CORS/iframe 安全头。
+- PTY procd 实例改为 `openclaw` 用户运行；Node 运行时和全局 npm 包保持 root-owned，状态目录才归 Gateway 用户。
+- 配置和 auth profile 读取失败不再覆盖为空；写入改为 0600 临时文件加 rename 原子替换，并备份损坏 JSON。
+- 高危 LuCI API 改为 POST 并要求 CSRF token；备份恢复增加 BusyBox 兼容的归档路径/符号链接校验。
+- Ollama、端口和 Node 下载路径改为参数化校验；安装包升级下载增加 SHA256 校验。
+
+### Bug 修复
+
+- 微信账号列表按 JSON 记录解析，修复昵称显示错误和退出账号传参错误。
+- 修复配置菜单恢复出厂/备份恢复编号不可达、`json_set` 把数字和布尔值写成字符串的问题。
+- 修复扫码轮询异常吞错导致的无限重试，增加超时和 idle 状态提示。
+- 菜单搜索不再把字母 `q` 当作退出键；上下移动会跳过禁用项。
+
+### 优化
+
+- 状态页在后台标签页暂停轮询，状态 API 合并重复的 procd 查询。
+- 权限修复跳过符号链接并批量处理目录；Node 和安装器构建失败时不再静默接受版本漂移或解压错误。
+- CI 增加契约测试、OpenClaw `engines.node` 校验及 `SHA256SUMS` 发布资产。
+
+---
+
 ## [2.0.11] - 2026-07-10
 
 ### 修复微信扫码后 Gateway 丢失插件

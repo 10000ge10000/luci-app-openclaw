@@ -1,7 +1,8 @@
 config openclaw 'main'
 	option enabled '0'
 	option port '18789'
-	option bind 'lan'
+	# 新装默认只监听回环；升级时保留用户已有的 bind 值。
+	option bind 'loopback'
 	option token ''
 	option pty_port '18793'
 	option install_path '/opt'

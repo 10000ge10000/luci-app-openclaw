@@ -7,22 +7,46 @@
 #   openclaw-env upgrade   — 升级 OpenClaw 到最新版
 #   openclaw-env node      — 仅下载/更新 Node.js
 # 环境变量:
-#   OC_VERSION  — 指定 OpenClaw 版本 (如 2026.6.11)，不设置则安装已测试稳定版
+#   OC_VERSION  — 指定 OpenClaw 版本 (如 2026.6.33)，可使用 extended-stable
 # ============================================================================
 set -e
 
 # ── Node.js 版本策略 (双版本兼容) ──
-# V2: 当前推荐版本，用于 OpenClaw v2026.6.11+ (要求 >= 22.19.0，使用 Alpine musl LTS 包确保可运行)
+# V2: 当前推荐版本，用于 OpenClaw v2026.6.33+ (要求 >= 22.19.0，使用 Alpine musl LTS 包确保可运行)
 # V1: 旧版兼容，用于 OpenClaw v2026.3.8 及更早版本
-NODE_VERSION_V2="22.23.0"
+NODE_VERSION_V2="22.23.1"
 NODE_VERSION_V1="22.15.1"
 # 默认使用 V2 版本 (可通过 NODE_VERSION 环境变量覆盖)
 NODE_VERSION="${NODE_VERSION:-${NODE_VERSION_V2}}"
 # 经过验证的 OpenClaw 稳定版本 (更新此值需同步测试)
-OC_TESTED_VERSION="2026.6.11"
+OC_TESTED_VERSION="2026.6.33"
 # OpenClaw 2026.6.x package.json engines.node 的最低要求。
 # 如果未来上游提高要求，安装成功后还会从 package.json 再做一次强校验。
 OC_NODE_MIN_VERSION="${OC_NODE_MIN_VERSION:-22.19.0}"
+
+oc_sha256_file() {
+	local file="$1"
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$file" 2>/dev/null | awk '{print $1}'
+	elif command -v openssl >/dev/null 2>&1; then
+		openssl dgst -sha256 "$file" 2>/dev/null | awk '{print $NF}'
+	else
+		return 1
+	fi
+}
+
+oc_root_owned_tree() {
+	local root="$1"
+	[ -d "$root" ] && [ ! -L "$root" ] || return 0
+	find "$root" -xdev ! -type l -print0 2>/dev/null | xargs -0 chown -h root:root 2>/dev/null || true
+	find "$root" -xdev ! -type l -print0 2>/dev/null | xargs -0 chmod u=rwX,go=rX 2>/dev/null || true
+}
+
+oc_openclaw_owned_tree() {
+	local root="$1"
+	[ -d "$root" ] && [ ! -L "$root" ] || return 0
+	find "$root" -xdev ! -type l -print0 2>/dev/null | xargs -0 chown -h openclaw:openclaw 2>/dev/null || true
+}
 # 用户可通过 OC_VERSION 环境变量覆盖安装版本
 OC_VERSION="${OC_VERSION:-}"
 
@@ -335,7 +359,10 @@ download_node() {
 
 	# ── 逐个尝试下载 ──
 	local downloaded=0
-	local tmp_file="/tmp/node-v${node_ver}.tar.xz"
+	# 每次下载使用独占临时目录，避免并发安装、符号链接和 TOCTOU 覆盖共享 /tmp 文件。
+	local tmp_dir
+	tmp_dir=$(mktemp -d "/tmp/openclaw-node.XXXXXX")
+	local tmp_file="${tmp_dir}/node-v${node_ver}.tar.xz"
 	local attempt=0
 	local total=$(echo "$mirror_list" | wc -w)
 
@@ -346,9 +373,39 @@ download_node() {
 		   wget -q --timeout=15 -O "$tmp_file" "$mirror_url" 2>/dev/null; then
 			# 校验文件大小 (Node.js xz 压缩包至少 5MB; Alpine 精简包约 12MB, 官方完整包约 30MB)
 			local fsize=$(wc -c < "$tmp_file" 2>/dev/null || echo 0)
-			if [ "$fsize" -gt 5000000 ] 2>/dev/null; then
-				downloaded=1
-				break
+				if [ "$fsize" -gt 5000000 ] 2>/dev/null; then
+						# 优先使用镜像 sidecar 或 Node 官方 SHASUMS256.txt；没有可匹配
+						# 的 SHA256 就拒绝该镜像，不能用文件大小替代供应链校验。
+					local checksum_file="${tmp_dir}/SHA256SUMS"
+					local expected_hash=""
+					local mirror_base="${mirror_url%/*}" checksum_url
+					for checksum_url in "${mirror_url}.sha256" "${mirror_base}/SHASUMS256.txt" "${mirror_base}/SHA256SUMS"; do
+						if curl -fsSL --connect-timeout 10 --max-time 30 -o "$checksum_file" "$checksum_url" 2>/dev/null; then
+								# 优先按当前资产文件名匹配多行 SHASUMS，避免误用
+								# 列表中其他架构/格式的第一行哈希。
+								expected_hash=$(awk -v f="$(basename "$mirror_url")" '$2==f || $2=="*"f {print $1; exit}' "$checksum_file")
+								[ -n "$expected_hash" ] || expected_hash=$(awk 'NF==1 && length($1)==64 && $1 !~ /[^0-9a-fA-F]/ {print $1; exit}' "$checksum_file")
+							[ -n "$expected_hash" ] && break
+						fi
+						rm -f "$checksum_file"
+						expected_hash=""
+					done
+					if [ -n "$expected_hash" ]; then
+						local actual_hash
+							actual_hash=$(oc_sha256_file "$tmp_file" 2>/dev/null || true)
+						if [ "$actual_hash" != "$expected_hash" ]; then
+							log_warn "SHA256 校验失败, 跳过此镜像"
+							rm -f "$tmp_file" "$checksum_file"
+							continue
+						fi
+						log_info "SHA256 校验通过"
+						else
+							log_warn "镜像未提供可匹配的 SHA256 校验文件，拒绝使用该镜像"
+							rm -f "$tmp_file" "$checksum_file"
+							continue
+						fi
+					downloaded=1
+					break
 			else
 				log_warn "文件大小异常 (${fsize} bytes), 跳过"
 				rm -f "$tmp_file"
@@ -359,7 +416,7 @@ download_node() {
 
 	if [ "$downloaded" -eq 0 ]; then
 		log_error "所有镜像均下载失败"
-		rm -f "$tmp_file"
+		rm -rf "$tmp_dir"
 		exit 1
 	fi
 
@@ -367,12 +424,11 @@ download_node() {
 	echo "  正在解压到 ${NODE_BASE}..."
 	# 先解压到临时目录并确认完整，再替换 NODE_BASE。
 	# 这样即使 tar/xz 缺失或压缩包损坏，也不会删除已有 Node.js。
-	local tmp_extract="/tmp/node-extract-$$"
-	rm -rf "$tmp_extract" 2>/dev/null
-	ensure_mkdir "$tmp_extract"
+	local tmp_extract
+	tmp_extract=$(mktemp -d "/tmp/openclaw-node-extract.XXXXXX")
 	if ! tar xf "$tmp_file" -C "$tmp_extract" 2>/dev/null; then
 		log_error "Node.js 解压失败，请确认已安装 GNU tar（opkg install tar）且下载文件完整"
-		rm -rf "$tmp_extract"
+			rm -rf "$tmp_extract" "$tmp_dir"
 		exit 1
 	fi
 	# 找顶层目录 (node-vX.X.X-linux-xxx)
@@ -380,7 +436,7 @@ download_node() {
 	top_dir=$(ls "$tmp_extract" 2>/dev/null | head -1)
 	if [ -z "$top_dir" ] || [ ! -d "$tmp_extract/$top_dir" ]; then
 		log_error "解压后未找到顶层目录，安装失败"
-		rm -rf "$tmp_extract"
+			rm -rf "$tmp_extract" "$tmp_dir"
 		exit 1
 	fi
 	# OverlayFS 兼容: rm -rf 后可能因 whiteout 导致 mkdir 失败
@@ -391,8 +447,7 @@ download_node() {
 	fi
 	ensure_mkdir "$NODE_BASE"
 	cp -a "$tmp_extract/$top_dir/." "$NODE_BASE/"
-	rm -rf "$tmp_extract"
-	rm -f "$tmp_file"
+		rm -rf "$tmp_extract" "$tmp_dir"
 
 	# 验证
 	if [ -x "$NODE_BIN" ]; then
@@ -441,7 +496,10 @@ install_openclaw() {
 		log_info "默认稳定版: v${OC_TESTED_VERSION}"
 	elif [ "$OC_VERSION" = "latest" ]; then
 		oc_pkg="openclaw@latest"
-		log_info "安装 npm latest 稳定标签版本"
+		log_warn "安装 npm latest（未经插件测试，可能包含不兼容变更）"
+	elif [ "$OC_VERSION" = "extended-stable" ]; then
+		oc_pkg="openclaw@extended-stable"
+		log_info "安装 npm extended-stable 扩展稳定标签版本"
 	else
 		oc_pkg="openclaw@${OC_VERSION}"
 		log_info "指定版本: v${OC_VERSION}"
@@ -530,9 +588,11 @@ init_openclaw() {
 	fi
 
 	# 设置文件权限
-	chown -R openclaw:openclaw "$OC_DATA" 2>/dev/null || true
-	chown -R openclaw:openclaw "$OC_GLOBAL" 2>/dev/null || true
-	chown -R openclaw:openclaw "$NODE_BASE" 2>/dev/null || true
+	# Node 运行时和全局 npm 包由 root 管理且不可被 Gateway 用户改写；
+	# 只有状态/认证数据归 openclaw，避免下次 root 启动时执行被篡改的 node。
+	oc_root_owned_tree "$OC_GLOBAL"
+	oc_root_owned_tree "$NODE_BASE"
+	oc_openclaw_owned_tree "$OC_DATA"
 }
 
 do_setup() {
@@ -679,8 +739,9 @@ do_upgrade() {
 	echo "=== 正在升级 OpenClaw ==="
 	echo ""
 	local target_pkg="openclaw@${OC_TESTED_VERSION}"
-	[ "$OC_VERSION" = "latest" ] && target_pkg="openclaw@latest"
-	[ -n "$OC_VERSION" ] && [ "$OC_VERSION" != "latest" ] && [ "$OC_VERSION" != "stable" ] && target_pkg="openclaw@${OC_VERSION}"
+		[ "$OC_VERSION" = "latest" ] && target_pkg="openclaw@latest"
+		[ "$OC_VERSION" = "extended-stable" ] && target_pkg="openclaw@extended-stable"
+		[ -n "$OC_VERSION" ] && [ "$OC_VERSION" != "latest" ] && [ "$OC_VERSION" != "extended-stable" ] && [ "$OC_VERSION" != "stable" ] && target_pkg="openclaw@${OC_VERSION}"
 	echo "目标版本: ${target_pkg#openclaw@}"
 	"$NPM_BIN" install -g "$target_pkg" --prefix="$OC_GLOBAL" $install_flags 2>&1
 
@@ -699,11 +760,16 @@ do_upgrade() {
 		install_openclaw_cli_wrapper || true
 		assert_node_runtime
 		if [ "$current_ver" = "$new_ver" ]; then
-			log_info "当前已是最新版本 v${new_ver}"
-		else
-			log_info "升级成功: v${current_ver} → v${new_ver}"
-		fi
-		echo ""
+				log_info "当前已是最新版本 v${new_ver}"
+			else
+				log_info "升级成功: v${current_ver} → v${new_ver}"
+			fi
+			# Gateway 以 openclaw 用户运行，运行时目录不能继续拥有全局
+			# Node/npm 文件的写权限；升级路径也必须和全新安装保持一致。
+			oc_root_owned_tree "$OC_GLOBAL"
+			oc_root_owned_tree "$NODE_BASE"
+			oc_openclaw_owned_tree "$OC_DATA"
+			echo ""
 		echo "╔══════════════════════════════════════════════════════════════╗"
 		echo "║  ✅ 升级完成！                                               ║"
 		echo "╚══════════════════════════════════════════════════════════════╝"
@@ -736,14 +802,20 @@ do_factory_reset() {
 	fi
 
 	# 3. 重置配置
+	if [ -L "$config_file" ]; then
+		log_error "配置文件是符号链接，拒绝恢复出厂以避免误删目标文件"
+		return 1
+	fi
 	rm -f "$config_file" "${config_file}.bak" 2>/dev/null || true
-	echo '{}' > "$config_file"
-	chown openclaw:openclaw "$config_file" 2>/dev/null || true
+	printf '%s\n' '{}' > "$config_file"
+	chmod 0600 "$config_file" 2>/dev/null || true
+	chown -h openclaw:openclaw "$config_file" 2>/dev/null || true
 
 	# 4. 重置认证信息
-	if [ -f "$auth_file" ]; then
-		echo '{"version":1,"profiles":{},"usageStats":{}}' > "$auth_file"
-		chown openclaw:openclaw "$auth_file" 2>/dev/null || true
+		if [ -f "$auth_file" ]; then
+			echo '{"version":1,"profiles":{},"usageStats":{}}' > "$auth_file"
+			chmod 0600 "$auth_file" 2>/dev/null || true
+			chown -h openclaw:openclaw "$auth_file" 2>/dev/null || true
 	fi
 
 	# 5. 重新初始化
@@ -760,12 +832,34 @@ do_factory_reset() {
 	if [ -x "$NODE_BIN" ] && [ -f "$config_file" ]; then
 		local new_token
 		new_token=$(head -c 24 /dev/urandom | hexdump -e '24/1 "%02x"' 2>/dev/null || dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 48)
-		_JS_KEY="gateway.port" _JS_VAL="18789" "$NODE_BIN" -e "const fs=require('fs');let d={};try{d=JSON.parse(fs.readFileSync('${config_file}','utf8'));}catch(e){}const ks=process.env._JS_KEY.split('.');let o=d;for(let i=0;i<ks.length-1;i++){if(!o[ks[i]]||typeof o[ks[i]]!=='object')o[ks[i]]={};o=o[ks[i]];}let v=process.env._JS_VAL;try{v=JSON.parse(v);}catch(e){}o[ks[ks.length-1]]=v;fs.writeFileSync('${config_file}',JSON.stringify(d,null,2));" 2>/dev/null
-		for kv in "gateway.bind=lan" "gateway.mode=local" "gateway.auth.mode=token" "gateway.auth.token=${new_token}" "gateway.controlUi.allowInsecureAuth=true" "gateway.controlUi.dangerouslyDisableDeviceAuth=true" "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true" "gateway.tailscale.mode=off" "acp.dispatch.enabled=false" "tools.profile=coding"; do
-			local k="${kv%%=*}" v="${kv#*=}"
-			_JS_KEY="$k" _JS_VAL="$v" "$NODE_BIN" -e "const fs=require('fs');let d={};try{d=JSON.parse(fs.readFileSync('${config_file}','utf8'));}catch(e){}const ks=process.env._JS_KEY.split('.');let o=d;for(let i=0;i<ks.length-1;i++){if(!o[ks[i]]||typeof o[ks[i]]!=='object')o[ks[i]]={};o=o[ks[i]];}let v=process.env._JS_VAL;try{v=JSON.parse(v);}catch(e){}o[ks[ks.length-1]]=v;fs.writeFileSync('${config_file}',JSON.stringify(d,null,2));" 2>/dev/null
-		done
-		chown openclaw:openclaw "$config_file" 2>/dev/null || true
+			OC_CONFIG_PATH="$config_file" _JS_TOKEN="$new_token" "$NODE_BIN" -e '
+	const fs=require("fs");
+	const f=process.env.OC_CONFIG_PATH;
+if(fs.existsSync(f)&&fs.lstatSync(f).isSymbolicLink())throw new Error("config is symlink");
+let d=JSON.parse(fs.readFileSync(f,"utf8"));
+if(!d.gateway)d.gateway={};
+d.gateway.bind="loopback";
+d.gateway.mode="local";
+if(!d.gateway.auth)d.gateway.auth={};
+d.gateway.auth.mode="token";
+d.gateway.auth.token=process.env._JS_TOKEN;
+if(!d.gateway.controlUi)d.gateway.controlUi={};
+d.gateway.controlUi.allowInsecureAuth=false;
+d.gateway.controlUi.dangerouslyDisableDeviceAuth=false;
+d.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=false;
+if(!d.gateway.tailscale)d.gateway.tailscale={};
+d.gateway.tailscale.mode="off";
+if(!d.acp)d.acp={};
+if(!d.acp.dispatch)d.acp.dispatch={};
+d.acp.dispatch.enabled=false;
+if(!d.tools)d.tools={};
+d.tools.profile="coding";
+const tmp=f+".tmp."+process.pid;
+fs.writeFileSync(tmp,JSON.stringify(d,null,2)+"\n",{mode:0o600}); fs.chmodSync(tmp,0o600); fs.renameSync(tmp,f);
+			' 2>/dev/null
+			local reset_rc=$?
+			[ "$reset_rc" -eq 0 ] || { log_error "恢复出厂配置写入失败，保留当前配置"; return 1; }
+			chown -h openclaw:openclaw "$config_file" 2>/dev/null || true
 
 		# 同步 token 到 UCI
 		. /lib/functions.sh 2>/dev/null || true
@@ -774,8 +868,9 @@ do_factory_reset() {
 		log_info "新认证令牌: $new_token"
 	fi
 
-	# 7. 确保数据目录权限正确 (防止 root 操作留下的文件)
-	chown -R openclaw:openclaw "$OC_DATA" 2>/dev/null || true
+	# 7. 确保数据目录权限正确 (防止 root 操作留下的文件)，不跟随符号链接。
+	oc_openclaw_owned_tree "$OC_DATA"
+	chmod 0600 "$config_file" 2>/dev/null || true
 
 	# 8. 重启服务
 	/etc/init.d/openclaw start >/dev/null 2>&1 &
@@ -816,22 +911,39 @@ do_setup_offline() {
 	local node_tarball="$offline_dir/node.tar.xz"
 	if [ -f "$node_tarball" ]; then
 		echo "=== 安装 Node.js (离线) ==="
-		rm -rf "$NODE_BASE" 2>/dev/null
-		[ -d /overlay/upper ] && rm -rf "/overlay/upper${NODE_BASE}" 2>/dev/null
-		ensure_mkdir "$NODE_BASE"
-
-		if tar --strip-components=1 -xf "$node_tarball" -C "$NODE_BASE" 2>/dev/null; then
-			: # GNU tar
+		local tmp_extract
+		tmp_extract=$(mktemp -d "/tmp/openclaw-offline-node.XXXXXX")
+		if tar --strip-components=1 -xf "$node_tarball" -C "$tmp_extract" 2>/dev/null; then
+			:
 		else
-			local tmp_extract="/tmp/node-extract-$$"
-			ensure_mkdir "$tmp_extract"
-			tar xf "$node_tarball" -C "$tmp_extract"
-			local top_dir=$(ls "$tmp_extract" 2>/dev/null | head -1)
-			if [ -n "$top_dir" ] && [ -d "$tmp_extract/$top_dir" ]; then
-				cp -a "$tmp_extract/$top_dir/." "$NODE_BASE/"
-			fi
 			rm -rf "$tmp_extract"
+			tmp_extract=$(mktemp -d "/tmp/openclaw-offline-node.XXXXXX")
+			if ! tar xf "$node_tarball" -C "$tmp_extract" 2>/dev/null; then
+				rm -rf "$tmp_extract"
+				log_error "Node.js 离线包解压失败，保留已有运行目录"
+				exit 1
+			fi
+			local top_dir
+			top_dir=$(ls "$tmp_extract" 2>/dev/null | head -1)
+			if [ -n "$top_dir" ] && [ -d "$tmp_extract/$top_dir" ]; then
+				cp -a "$tmp_extract/$top_dir/." "$tmp_extract/"
+				rm -rf "$tmp_extract/$top_dir"
+			else
+				rm -rf "$tmp_extract"
+				log_error "Node.js 离线包结构无效，保留已有运行目录"
+				exit 1
+			fi
 		fi
+		if [ ! -x "$tmp_extract/bin/node" ]; then
+			rm -rf "$tmp_extract"
+			log_error "Node.js 离线包缺少 bin/node，保留已有运行目录"
+			exit 1
+		fi
+		rm -rf "$NODE_BASE" 2>/dev/null
+		[ -d /overlay/upper ] && rm -rf "/overlay/upper$NODE_BASE" 2>/dev/null
+		ensure_mkdir "$NODE_BASE"
+		cp -a "$tmp_extract/." "$NODE_BASE/"
+		rm -rf "$tmp_extract"
 
 		if [ -x "$NODE_BIN" ]; then
 			log_info "Node.js $($NODE_BIN --version 2>/dev/null) 安装成功"

@@ -42,10 +42,12 @@ build_apk() {
 	ACTUAL_VER=$(node --version | sed 's/^v//')
 	echo "Alpine Node.js version: v${ACTUAL_VER} (requested: v${NODE_VER})"
 
-	# 使用实际版本号作为文件名 (Alpine apk 的 nodejs 版本可能与请求版本不同)
+	# 资产文件名必须与请求版本完全一致；否则安装器按版本下载时会得到 404。
+	# Alpine 仓库漂移时直接失败，避免把错误版本静默发布成目标版本资产。
 	if [ "$ACTUAL_VER" != "$NODE_VER" ]; then
-		echo "WARNING: Actual version (${ACTUAL_VER}) differs from requested (${NODE_VER})"
-		echo "         Using actual version for package name"
+		echo "ERROR: Actual version (${ACTUAL_VER}) differs from requested (${NODE_VER})" >&2
+		echo "       Refusing to publish a wrongly named Node.js asset." >&2
+		exit 1
 	fi
 	PKG_NAME="node-v${ACTUAL_VER}-linux-arm64-musl"
 	PKG_DIR="/tmp/${PKG_NAME}"

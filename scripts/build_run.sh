@@ -130,11 +130,27 @@ echo "正在安装文件..."
 
 # 解压 payload (从 MARKER 行之后)
 ARCHIVE=$(awk '/^__ARCHIVE_BELOW__/ {print NR + 1; exit 0; }' "$0")
-tail -n +$ARCHIVE "$0" | tar xzf - -C / 2>/dev/null
+if ! tail -n +"$ARCHIVE" "$0" | tar xzf - -C /; then
+	echo "错误: 安装包 payload 解压失败，已中止" >&2
+	exit 1
+fi
 
 # 双保险：即使构建环境 tar 不支持 owner 规范化，也不要把构建机 UID/GID
 # 带到路由器系统文件中。这里仅修复本插件安装的系统侧文件，不触碰
-# /opt/openclaw 运行数据和 OpenClaw npm 插件状态目录。
+# /opt/openclaw 运行数据和 OpenClaw npm 插件状态目录。BusyBox chown 默认
+# 会解引用符号链接，因此显式使用 -h，并拒绝把顶层路径本身当作链接处理。
+safe_chown_tree() {
+	local root="$1"
+	[ -e "$root" ] || return 0
+	[ -L "$root" ] && return 1
+	if [ -d "$root" ]; then
+		find "$root" -xdev ! -type l -print0 2>/dev/null | \
+			xargs -0 -r chown -h root:root 2>/dev/null || return 1
+	else
+		chown -h root:root "$root" 2>/dev/null || return 1
+	fi
+}
+
 for p in \
 	/etc/init.d/openclaw \
 	/etc/profile.d/openclaw.sh \
@@ -147,7 +163,10 @@ for p in \
 	/usr/share/openclaw \
 	/usr/share/rpcd/acl.d/luci-app-openclaw.json
 do
-	[ -e "$p" ] && chown -R root:root "$p" 2>/dev/null || true
+	if ! safe_chown_tree "$p"; then
+		echo "错误: 无法安全修正安装文件权限: $p" >&2
+		exit 1
+	fi
 done
 
 # UCI 配置文件保护: 升级时不覆盖用户已有配置
@@ -231,7 +250,10 @@ rm -f /tmp/luci-indexcache.*.json 2>/dev/null
 # 重启 Web PTY 服务 (使其加载新文件和新 token)
 # PTY 是 procd 管理的实例, kill 后 procd 会自动 respawn
 PTY_PID=$(pgrep -f 'web-pty.js' 2>/dev/null | head -1)
-if [ -n "$PTY_PID" ]; then
+PTY_CMD=""
+[ -n "$PTY_PID" ] && [ -r "/proc/$PTY_PID/cmdline" ] && \
+	PTY_CMD=$(tr '\000' ' ' < "/proc/$PTY_PID/cmdline" 2>/dev/null || true)
+if [ -n "$PTY_PID" ] && printf '%s' "$PTY_CMD" | grep -q 'web-pty\.js'; then
 	echo "重启配置终端服务..."
 	kill "$PTY_PID" 2>/dev/null
 	sleep 1
