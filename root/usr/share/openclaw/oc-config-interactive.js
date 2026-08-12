@@ -1531,10 +1531,36 @@ async function handleChannels() {
         break;
       }
       case 'telegram-pairing': {
-        console.log(`\n${C.cyan}启动 Telegram 配对助手...${C.reset}\n`);
-        try {
-          await ocCmd('models', 'auth', 'login-telegram-bot');
-        } catch (e) {}
+        // v2026.6+ 兼容 (issue #98): 原代码调用 `ocCmd('models', 'auth', 'login-telegram-bot')`,
+        // 但 OpenClaw 2026.6.x 的 `models auth` 子命令不再接受额外的位置参数
+        // (错误: "Too many arguments for this command. Try: openclaw models auth --help")。
+        // Telegram bot 本身无需"配对"流程,设置 botToken 即可工作,因此这里重定向到
+        // 标准 Bot Token 配置。
+        console.log(`\n${C.yellow}提示: Telegram 机器人无需额外配对流程,设置 Bot Token 即可工作。${C.reset}\n`);
+        console.log(`${C.bold}Telegram Bot 配置${C.reset}\n`);
+        console.log(`${C.yellow}获取 Bot Token:${C.reset}`);
+        console.log(`  1. 打开 Telegram → 搜索 ${C.cyan}@BotFather${C.reset}`);
+        console.log(`  2. 发送 ${C.cyan}/newbot${C.reset} → 按提示创建`);
+        console.log(`  3. 复制生成的 Token\n`);
+
+        const token = await input({ prompt: '请输入 Telegram Bot Token', placeholder: '123456:ABC...' });
+        if (!token) { console.log(`${C.yellow}已取消${C.reset}`); break; }
+
+        // 验证格式
+        if (!/^[0-9]+:[A-Za-z0-9_-]+$/.test(token)) {
+          console.log(`${C.red}✗ Token 格式错误${C.reset}`);
+          console.log(`${C.yellow}正确格式: 123456789:ABCdefGHIjklMNOpqr${C.reset}\n`);
+          break;
+        }
+
+        const cfg = readConfig();
+        if (!cfg.channels) cfg.channels = {};
+        if (!cfg.channels.telegram) cfg.channels.telegram = {};
+        cfg.channels.telegram.botToken = token;
+        writeConfig(cfg);
+
+        console.log(`\n${C.green}✅ Telegram Bot Token 已保存${C.reset}\n`);
+        await askRestart();
         break;
       }
       case 'wizard': {
