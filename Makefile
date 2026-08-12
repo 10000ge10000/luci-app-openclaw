@@ -12,34 +12,21 @@ PKG_RELEASE:=1
 PKG_MAINTAINER:=10000ge10000 <10000ge10000@users.noreply.github.com>
 PKG_LICENSE:=GPL-3.0
 
-LUCI_TITLE:=OpenClaw AI 网关 LuCI 管理插件
-LUCI_DEPENDS:=+luci-compat +luci-base +curl +openssl-util +script-utils +tar +libstdcpp6
-LUCI_PKGARCH:=all
+include $(INCLUDE_DIR)/package.mk
 
-# 优先使用 luci.mk (feeds 模式), 不可用时回退 package.mk
-ifeq ($(wildcard $(TOPDIR)/feeds/luci/luci.mk),)
+define Package/$(PKG_NAME)
+  SECTION:=luci
+  CATEGORY:=LuCI
+  SUBMENU:=3. Applications
+  TITLE:=OpenClaw AI 网关 LuCI 管理插件
+  DEPENDS:=+luci-compat +luci-base +curl +openssl-util +script-utils +tar
+  PKGARCH:=all
+endef
 
-  include $(INCLUDE_DIR)/package.mk
-
-  define Package/$(PKG_NAME)
-    SECTION:=luci
-    CATEGORY:=LuCI
-    SUBMENU:=3. Applications
-    TITLE:=$(LUCI_TITLE)
-    DEPENDS:=$(LUCI_DEPENDS)
-    PKGARCH:=all
-  endef
-
-  define Package/$(PKG_NAME)/description
-    OpenClaw AI Gateway 的 LuCI 管理插件。
-    支持 12+ AI 模型提供商和 Telegram/Discord 等多种消息渠道。
-  endef
-
-else
-
-  include $(TOPDIR)/feeds/luci/luci.mk
-
-endif
+define Package/$(PKG_NAME)/description
+  OpenClaw AI Gateway 的 LuCI 管理插件。
+  支持 12+ AI 模型提供商和 Telegram/Discord 等多种消息渠道。
+endef
 
 define Package/$(PKG_NAME)/conffiles
 /etc/config/openclaw
