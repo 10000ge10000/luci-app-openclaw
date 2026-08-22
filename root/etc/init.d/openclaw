@@ -607,13 +607,35 @@ if(changed){
 	# v2026.4.10: 优化配置迁移 - 只在版本变更时运行 doctor --fix
 	# 原因: doctor --fix 耗时 ~50 秒，每次重启都运行严重影响启动速度
 	# 策略: 使用标记文件记录已运行的版本，只在版本变化时才执行迁移
+	# v2026.7.1: doctor --fix 改为以 openclaw 服务用户执行。
+	# OpenClaw 2026.7.x 的插件安全检查按当前进程 uid 校验插件目录属主
+	# (属主必须等于进程 uid 或为 root)。root 身份运行 doctor 会把
+	# openclaw 属主的微信插件目录判为 suspicious ownership，进而自动
+	# 清理 plugins.allow / channels 中的微信配置。
+	_run_doctor_fix() {
+		local oc_entry="$1"
+		local _doc_cmd="HOME=\"${OC_DATA}\" OPENCLAW_HOME=\"${OC_DATA}\" OPENCLAW_STATE_DIR=\"${OC_DATA}/.openclaw\" OPENCLAW_CONFIG_PATH=\"${CONFIG_FILE}\" NODE_ICU_DATA=\"${NODE_BASE}/share/icu\" \"${NODE_BIN}\" \"${oc_entry}\" doctor --fix"
+		if id openclaw >/dev/null 2>&1; then
+			if command -v su >/dev/null 2>&1; then
+				su -s /bin/sh openclaw -c "${_doc_cmd}" >/dev/null 2>&1
+			elif command -v runuser >/dev/null 2>&1; then
+				runuser -u openclaw -- sh -c "${_doc_cmd}" >/dev/null 2>&1
+			else
+				start-stop-daemon -S -m -p /tmp/openclaw-doctor.pid -c openclaw:openclaw -x /bin/sh -- -c "${_doc_cmd}" >/dev/null 2>&1
+			fi
+		else
+			# openclaw 用户不存在时退回 root 执行，保证迁移仍可运行
+			eval "${_doc_cmd}" >/dev/null 2>&1
+		fi
+	}
+
 	_run_config_migration() {
 		local oc_entry="$1"
 		[ -z "$oc_entry" ] && return
 
-		# 获取当前 OpenClaw 版本号 (只取数字版本，如 2026.4.9)
+		# 获取当前 OpenClaw 版本号 (含补丁后缀，如 2026.7.1-2)
 		local current_ver=""
-		current_ver=$("$NODE_BIN" "$oc_entry" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+		current_ver=$("$NODE_BIN" "$oc_entry" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?' | head -1)
 		[ -z "$current_ver" ] && current_ver="unknown"
 
 		# 检查标记文件
@@ -626,9 +648,7 @@ if(changed){
 		# 只在版本变化时才运行 doctor --fix
 		if [ "$current_ver" != "$last_ver" ]; then
 			logger -t openclaw "检测到版本变更 ($last_ver -> $current_ver)，执行配置迁移 (doctor --fix)..."
-			OPENCLAW_HOME="$OC_DATA" OPENCLAW_CONFIG_PATH="$CONFIG_FILE" \
-				NODE_ICU_DATA="${NODE_BASE}/share/icu" PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:$PATH" \
-				"$NODE_BIN" "$oc_entry" doctor --fix 2>/dev/null && \
+			_run_doctor_fix "$oc_entry" && \
 				logger -t openclaw "配置迁移完成" || \
 				logger -t openclaw "配置迁移失败，请手动检查"
 			# 更新标记文件

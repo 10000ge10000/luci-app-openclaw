@@ -11,6 +11,8 @@
 - `OC_TESTED_VERSION` 更新为 `2026.7.1-2`（npm `latest` 稳定标签），稳定版安装走该版本号。
 - Node.js 最低要求从 `22.19.0` 提升到 `22.22.3`，对齐 OpenClaw 2026.7.x 的 `engines.node`；默认 Node 仍为 `22.23.0`（musl LTS），无需重新下载。
 - 微信插件维持 `@tencent-weixin/openclaw-weixin@2.4.6`（上游最新稳定版）。
+- 适配 2026.7.x 插件目录所有权安全检查：`doctor --fix`（init.d 版本迁移）与配置终端的 `doctor` 诊断改为以 `openclaw` 服务用户执行，避免 root 上下文把 openclaw 属主的微信插件判为 suspicious ownership 后自动清理 `plugins.allow` / `channels` 配置。
+- doctor 版本标记提取正则保留补丁后缀（`2026.7.1-2`），避免上游补丁版迭代时跳过配置迁移。
 - 修复 CI 中 `OC_TESTED_VERSION` 提取正则无法匹配带连字符版本号（如 `2026.7.1-2`）的问题。
 
 ### 修复

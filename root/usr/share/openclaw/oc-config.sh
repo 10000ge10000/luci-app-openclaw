@@ -102,6 +102,30 @@ oc_cmd() {
 	fi
 }
 
+# 以 openclaw 服务用户运行官方诊断。
+# OpenClaw 2026.7.x 的插件安全检查按当前进程 uid 校验插件目录属主
+# (属主必须等于进程 uid 或为 root)。本脚本在 PTY 中以 root 运行，
+# root 身份执行 doctor 会把 openclaw 属主的微信插件目录判为
+# suspicious ownership 并自动清理 plugins.allow / channels 配置。
+oc_doctor_as_openclaw() {
+	if [ -z "$OC_ENTRY" ] || [ ! -x "$NODE_BIN" ]; then
+		echo "ERROR: OpenClaw 未安装或 Node.js 不可用"
+		return 1
+	fi
+	if ! id openclaw >/dev/null 2>&1; then
+		oc_cmd doctor
+		return $?
+	fi
+	local _doc_cmd="HOME=\"${OC_DATA}\" OPENCLAW_HOME=\"${OC_DATA}\" OPENCLAW_STATE_DIR=\"${OC_DATA}/.openclaw\" OPENCLAW_CONFIG_PATH=\"${CONFIG_FILE}\" NODE_ICU_DATA=\"${NODE_BASE}/share/icu\" \"${NODE_BIN}\" \"${OC_ENTRY}\" doctor"
+	if command -v su >/dev/null 2>&1; then
+		su -s /bin/sh openclaw -c "${_doc_cmd}" 2>&1
+	elif command -v runuser >/dev/null 2>&1; then
+		runuser -u openclaw -- sh -c "${_doc_cmd}" 2>&1
+	else
+		start-stop-daemon -S -m -p /tmp/openclaw-doctor-$$.pid -c openclaw:openclaw -x /bin/sh -- -c "${_doc_cmd}" 2>&1
+	fi
+}
+
 # ── JSON 读写 (使用 Node.js) ──
 json_get() {
 	if [ ! -f "$CONFIG_FILE" ]; then echo ""; return; fi
@@ -2175,7 +2199,7 @@ health_check() {
 
 	echo ""
 	echo -e "  ${CYAN}运行官方诊断...${NC}"
-	oc_cmd doctor 2>/dev/null || true
+	oc_doctor_as_openclaw 2>/dev/null || true
 
 	echo ""
 	echo -e "  ${CYAN}最近日志 (最后 10 行):${NC}"
