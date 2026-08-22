@@ -50,7 +50,7 @@ jobs:
           # 从 openclaw-env 中提取版本号 (唯一的版本真相源)
           # NODE_VERSION_V2 是当前推荐的 Node.js 版本
           NODE_VER=$(grep -oP 'NODE_VERSION_V2="\K[0-9.]+' root/usr/bin/openclaw-env)
-          OC_VER=$(grep -oP 'OC_TESTED_VERSION="\K[0-9.]+' root/usr/bin/openclaw-env)
+          OC_VER=$(grep -oP 'OC_TESTED_VERSION="\K[^"]+' root/usr/bin/openclaw-env)
           echo "node_version=${NODE_VER}" >> "$GITHUB_OUTPUT"
           echo "oc_version=${OC_VER}" >> "$GITHUB_OUTPUT"
           echo "Node.js: v${NODE_VER}"
@@ -62,6 +62,18 @@ jobs:
           echo "$VER" > VERSION
           # 同步到 Makefile
           sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$VER/" Makefile
+
+      - name: Run contract tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lua5.1
+          sh tests/test_openclaw_contracts.sh
+          sh tests/test_node_packaging_contract.sh
+          sh tests/test_openclaw_node.sh
+          sh tests/test_status_contract.sh
+          sh tests/test_luci_console_contract.sh
+          sh tests/test_openclaw_paths.sh
+          lua5.1 tests/test_openclaw_paths.lua
 
       - name: Build .run installer (online)
         run: |

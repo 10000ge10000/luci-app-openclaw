@@ -27,8 +27,8 @@
 
 | 组件 | 默认版本 | 说明 |
 |------|----------|------|
-| OpenClaw | `2026.6.11` | npm `latest` 稳定标签 |
-| Node.js | `22.23.0` | Alpine musl LTS 包；OpenClaw 2026.6.x 要求 `>=22.19.0`，安装后会按 `engines.node` 做强校验 |
+| OpenClaw | `2026.7.1-2` | npm `latest` 稳定标签 |
+| Node.js | `22.23.0` | Alpine musl LTS 包；OpenClaw 2026.7.x 要求 `>=22.22.3`，安装后会按 `engines.node` 做强校验 |
 | 微信插件 | `@tencent-weixin/openclaw-weixin@2.4.6` | CLI 使用 `@tencent-weixin/openclaw-weixin-cli@2.1.4` |
 
 ## 📦 安装
@@ -143,7 +143,7 @@ opkg install python3-light
 ## 已知说明
 
 - OpenClaw 的 diagnostic heartbeat 可能在日志中出现类似周期性探测记录。它不是一次真实用户对话请求；如需降低噪音，优先在 OpenClaw 配置或日志采集侧降低诊断日志级别，不建议直接修改模型调用逻辑。
-- 当前仓库提供源码、OpenWrt feeds 集成方式、本地 `.run` / `.ipk` 构建脚本入口；本次维护不自动生成 Release 产物。
+- 当前仓库提供源码、OpenWrt feeds 集成方式、本地 `.run` / `.ipk` 构建脚本入口；推送 `v*` 标签后 CI 会自动构建并发布 Release 产物。
 
 ## 📂 目录结构
 
@@ -171,7 +171,7 @@ luci-app-openclaw/
 ├── scripts/
 │   ├── build_ipk.sh                  # 本地 IPK 构建
 │   ├── build_run.sh                  # .run 安装包构建
-│   ├── download_deps.sh              # 下载离线依赖 (Node.js + OpenClaw)
+│   ├── gen-release-body.sh           # Release 说明生成
 │   └── build-node-musl.sh            # 编译 Node.js musl 静态链接版本
 └── .github/workflows/
     ├── build.yml                     # 在线构建 + 发布

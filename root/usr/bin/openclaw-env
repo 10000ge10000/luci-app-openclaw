@@ -7,22 +7,22 @@
 #   openclaw-env upgrade   — 升级 OpenClaw 到最新版
 #   openclaw-env node      — 仅下载/更新 Node.js
 # 环境变量:
-#   OC_VERSION  — 指定 OpenClaw 版本 (如 2026.6.11)，不设置则安装已测试稳定版
+#   OC_VERSION  — 指定 OpenClaw 版本 (如 2026.7.1-2)，不设置则安装已测试稳定版
 # ============================================================================
 set -e
 
 # ── Node.js 版本策略 (双版本兼容) ──
-# V2: 当前推荐版本，用于 OpenClaw v2026.6.11+ (要求 >= 22.19.0，使用 Alpine musl LTS 包确保可运行)
+# V2: 当前推荐版本，用于 OpenClaw v2026.7.1-2+ (要求 >= 22.22.3，使用 Alpine musl LTS 包确保可运行)
 # V1: 旧版兼容，用于 OpenClaw v2026.3.8 及更早版本
 NODE_VERSION_V2="22.23.0"
 NODE_VERSION_V1="22.15.1"
 # 默认使用 V2 版本 (可通过 NODE_VERSION 环境变量覆盖)
 NODE_VERSION="${NODE_VERSION:-${NODE_VERSION_V2}}"
 # 经过验证的 OpenClaw 稳定版本 (更新此值需同步测试)
-OC_TESTED_VERSION="2026.6.11"
-# OpenClaw 2026.6.x package.json engines.node 的最低要求。
+OC_TESTED_VERSION="2026.7.1-2"
+# OpenClaw 2026.7.x package.json engines.node 的最低要求。
 # 如果未来上游提高要求，安装成功后还会从 package.json 再做一次强校验。
-OC_NODE_MIN_VERSION="${OC_NODE_MIN_VERSION:-22.19.0}"
+OC_NODE_MIN_VERSION="${OC_NODE_MIN_VERSION:-22.22.3}"
 # 用户可通过 OC_VERSION 环境变量覆盖安装版本
 OC_VERSION="${OC_VERSION:-}"
 
@@ -279,6 +279,55 @@ detect_arch() {
 	esac
 }
 
+# 计算文件 sha256 (优先 sha256sum，兜底 openssl；openssl-util 是本包硬依赖)
+oc_sum256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" 2>/dev/null | awk '{print $1}'
+	elif command -v openssl >/dev/null 2>&1; then
+		openssl dgst -sha256 -r "$1" 2>/dev/null | awk '{print $1}'
+	else
+		return 1
+	fi
+}
+
+# 校验 Node tarball 完整性:
+# - 官方 / unofficial-builds / npmmirror 镜像: 拉取同目录 SHASUMS256.txt 比对
+# - 自托管 node-bins: 优先下载同名 .sha256 边车文件; 旧资产没有哈希时降级为体积检查
+# - 哈希源本身不可用时仅告警不阻断 (离线/镜像异常场景仍可继续)
+verify_node_tarball() {
+	local file="$1" mirror_url="$2" filename
+	filename=$(basename "$mirror_url")
+	local actual
+	actual=$(oc_sum256 "$file") || { log_warn "无可用 sha256 工具，跳过完整性校验"; return 0; }
+
+	local expected=""
+	if [ "${mirror_url#*node-bins}" != "$mirror_url" ]; then
+		# 自托管 Release 资产: 尝试 .sha256 边车文件
+		if curl -fsSL --connect-timeout 10 --max-time 30 -o "${file}.sha256" "${mirror_url}.sha256" 2>/dev/null; then
+			expected=$(awk '{print $1}' "${file}.sha256" 2>/dev/null)
+			rm -f "${file}.sha256"
+		fi
+	else
+		# 官方系镜像: 同版本目录下的 SHASUMS256.txt
+		local shasum_url="${mirror_url%/*}/SHASUMS256.txt"
+		if curl -fsSL --connect-timeout 10 --max-time 30 -o "${file}.sums" "$shasum_url" 2>/dev/null; then
+			expected=$(awk -v f="$filename" '$2 == f {print $1}' "${file}.sums" 2>/dev/null)
+			rm -f "${file}.sums"
+		fi
+	fi
+
+	if [ -z "$expected" ]; then
+		log_warn "未获取到 ${filename} 的官方哈希，跳过强校验 (仅体积检查)"
+		return 0
+	fi
+	if [ "$actual" = "$expected" ]; then
+		log_info "SHA256 校验通过"
+		return 0
+	fi
+	log_error "SHA256 校验失败: ${filename}"
+	return 1
+}
+
 download_node() {
 	local node_ver="$1"
 	local node_arch
@@ -347,8 +396,12 @@ download_node() {
 			# 校验文件大小 (Node.js xz 压缩包至少 5MB; Alpine 精简包约 12MB, 官方完整包约 30MB)
 			local fsize=$(wc -c < "$tmp_file" 2>/dev/null || echo 0)
 			if [ "$fsize" -gt 5000000 ] 2>/dev/null; then
-				downloaded=1
-				break
+				if verify_node_tarball "$tmp_file" "$mirror_url"; then
+					downloaded=1
+					break
+				else
+					rm -f "$tmp_file"
+				fi
 			else
 				log_warn "文件大小异常 (${fsize} bytes), 跳过"
 				rm -f "$tmp_file"

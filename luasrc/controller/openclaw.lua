@@ -49,7 +49,9 @@ local function is_safe_openclaw_root(value)
 	if paths_ok and oc_paths.is_safe_openclaw_root then
 		return oc_paths.is_safe_openclaw_root(value)
 	end
-	return value == "/opt/openclaw" or value:match("^/mnt/[^/]+/openclaw$") ~= nil or value:match("^/media/[^/]+/openclaw$") ~= nil
+	-- 与 luasrc/openclaw/paths.lua 的白名单保持一致（此处仅作模块加载失败时的兜底）
+	if value == "/openclaw" or value == "/opt/openclaw" or value == "/overlay/upper/opt/openclaw" then return true end
+	return value:match("^/mnt/[^/]+/openclaw$") ~= nil or value:match("^/media/[^/]+/openclaw$") ~= nil or value:match("^/srv/[^/]+/openclaw$") ~= nil
 end
 
 local function compare_versions(a, b)
@@ -120,6 +122,7 @@ local function wechat_enable_plugin_config_cmd(install_path, node_bin, log_file,
 	local config_file = oc_data .. "/.openclaw/openclaw.json"
 	local register_js = [[
 const fs = require('fs');
+const path = require('path');
 const configPath = process.env.OC_CONFIG;
 let d = {};
 try {
@@ -385,12 +388,19 @@ local function get_install_path()
 end
 
 -- 确保网关端口可用：检测占用并尝试优雅停止或强制杀死占用进程
+-- 优雅停止必须走安装目录里的 CLI wrapper 全路径：uhttpd 进程不加载
+-- /etc/profile.d，裸 `openclaw` 在 LuCI 环境下必然 PATH 不可达。
+local function gateway_graceful_stop_cmd()
+	local oc_cli = get_install_path() .. "/global/bin/openclaw"
+	return "if [ -x " .. shellquote(oc_cli) .. " ]; then " .. shellquote(oc_cli) .. " gateway stop >/dev/null 2>&1 || true; fi"
+end
+
 local function ensure_port_free(port)
 	local sys = require "luci.sys"
 	if not port or port == "" then return end
 	if not tostring(port):match("^%d+$") then return end
 	-- 优先尝试使用 openclaw 自身的 stop 命令（如果已安装）
-	sys.exec("openclaw gateway stop >/dev/null 2>&1 || true")
+	sys.exec(gateway_graceful_stop_cmd())
 
 	-- 查询占用端口的行
 	local check_cmd = ""
@@ -407,7 +417,7 @@ local function ensure_port_free(port)
 		pid = pid and pid:gsub("%s+", "") or nil
 		if pid and pid ~= "" then
 			-- 再次尝试优雅停止
-			sys.exec("openclaw gateway stop >/dev/null 2>&1 || true")
+			sys.exec(gateway_graceful_stop_cmd())
 			-- 发送 SIGTERM
 			sys.exec("kill -TERM " .. pid .. " >/dev/null 2>&1 || true")
 			-- 等待释放，最多等待 5 次（每次 1s）

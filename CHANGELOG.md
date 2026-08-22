@@ -4,6 +4,30 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [2.0.12] - 2026-08-22
+
+### 适配 OpenClaw v2026.7.1-2
+
+- `OC_TESTED_VERSION` 更新为 `2026.7.1-2`（npm `latest` 稳定标签），稳定版安装走该版本号。
+- Node.js 最低要求从 `22.19.0` 提升到 `22.22.3`，对齐 OpenClaw 2026.7.x 的 `engines.node`；默认 Node 仍为 `22.23.0`（musl LTS），无需重新下载。
+- 微信插件维持 `@tencent-weixin/openclaw-weixin@2.4.6`（上游最新稳定版）。
+- 修复 CI 中 `OC_TESTED_VERSION` 提取正则无法匹配带连字符版本号（如 `2026.7.1-2`）的问题。
+
+### 修复
+
+- 修复微信插件安装/登录最后一步必然失败的问题：启用插件的内置 JS 使用了 `path.dirname` 却未 `require('path')`，导致 `ReferenceError`（对应 #88、#96）。
+- 修复 LuCI 停止/重启网关时优雅停止命令失效的问题：裸 `openclaw gateway stop` 在 uhttpd 环境 PATH 不可达，改为调用安装目录 CLI wrapper 全路径（对应 #100）。
+- LuCI 侧安全根目录白名单回退实现与 `paths.lua` 对齐（补 `/openclaw`、`/srv/*/openclaw`、`/overlay/upper/opt/openclaw`）。
+- `/etc/config/openclaw` 补充 `pty_token` 字段声明，配置结构自文档化。
+
+### 优化
+
+- Node.js 下载增加 SHA256 完整性校验：官方 / unofficial-builds / npmmirror 镜像拉取同目录 `SHASUMS256.txt` 比对；自托管 `node-bins` 资产优先校验 `.sha256` 边车文件，旧资产无哈希时降级为体积检查并告警。
+- CI 构建流程新增契约测试步骤（`tests/` 全部 shell + lua 测试），版本断言不同步将直接阻断发布。
+- README 修正：移除目录结构中不存在的 `download_deps.sh`；Release 产物说明与 CI 实际行为对齐。
+
+---
+
 ## [2.0.11] - 2026-07-10
 
 ### 修复微信扫码后 Gateway 丢失插件
