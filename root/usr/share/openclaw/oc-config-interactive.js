@@ -33,6 +33,10 @@ const CONFIG_FILE = process.env.OPENCLAW_CONFIG_PATH || `${OC_STATE_DIR}/opencla
 const NODE_BIN = `${NODE_BASE}/bin/node`;
 const PERMISSIONS_HELPER = '/usr/libexec/openclaw-permissions.sh';
 
+// 写前备份的后缀。特意不用 .bak: OpenClaw 自身维护 openclaw.json.bak
+// 及 .bak.1~.bak.4 轮转，占用同名文件会破坏上游备份链。
+const CONFIG_BACKUP_SUFFIX = '.luci-pre-write';
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 辅助函数 (与 oc-config.sh 逻辑对应)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -84,26 +88,135 @@ function fixStatePermissions() {
   }
 }
 
-function readConfig() {
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-    }
-  } catch (e) {
-    console.error(`${C.red}读取配置失败:${C.reset} ${e.message}`);
+/**
+ * 配置文件损坏时抛出的专用错误。
+ * 用于把“文件存在但内容不是合法 JSON 对象”与“文件不存在”区分开。
+ */
+class ConfigParseError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ConfigParseError';
   }
-  return {};
 }
 
 /**
- * 写入 JSON 配置文件
+ * 配置损坏时给用户的恢复指引。
+ * 不直接自动改文件，避免在用户不知情的情况下丢配置。
+ */
+function configRecoveryHint() {
+  const lines = [
+    `${C.yellow}配置文件可能已损坏，为避免覆盖后丢失全部配置，本次操作已中止。${C.reset}`,
+    `${C.yellow}文件:${C.reset} ${CONFIG_FILE}`,
+    '',
+    `${C.cyan}可尝试的恢复方式:${C.reset}`,
+    `  1. 让 OpenClaw 自行修复:  openclaw doctor --fix`,
+    `  2. 查看具体语法错误:      openclaw config validate`,
+  ];
+  const lastGood = `${CONFIG_FILE}.last-good`;
+  if (fs.existsSync(lastGood)) {
+    lines.push(`  3. 从上次正常配置恢复:    cp ${lastGood} ${CONFIG_FILE}`);
+  }
+  const preWrite = `${CONFIG_FILE}${CONFIG_BACKUP_SUFFIX}`;
+  if (fs.existsSync(preWrite)) {
+    lines.push(`  4. 从上次修改前的副本恢复: cp ${preWrite} ${CONFIG_FILE}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 读取 JSON 配置文件。
+ *
+ * 语义 (与旧实现的关键差异):
+ * - 文件不存在 / 内容为空  → 返回 {} (首次安装属正常情况)
+ * - 文件存在但解析失败     → 抛出 ConfigParseError，绝不返回 {}
+ *
+ * 旧实现在解析失败时返回 {}，调用方随后 writeConfig() 会把这个空对象
+ * 写回磁盘，导致 models.providers / apiKey / channels 等全部配置被静默清空。
+ * 因此这里必须 fail closed，让写入路径中止。
+ */
+function readConfig() {
+  if (!fs.existsSync(CONFIG_FILE)) return {};
+
+  let raw;
+  try {
+    raw = fs.readFileSync(CONFIG_FILE, 'utf8');
+  } catch (e) {
+    throw new ConfigParseError(`无法读取配置文件: ${e.message}`);
+  }
+
+  if (raw.trim() === '') return {};
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new ConfigParseError(`配置文件不是合法 JSON: ${e.message}`);
+  }
+
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ConfigParseError('配置根节点必须是 JSON 对象');
+  }
+  return parsed;
+}
+
+/**
+ * 只读场景下的安全读取: 配置损坏时返回 {} 而不抛错。
+ * 仅供“显示当前值”这类不会回写磁盘的路径使用 (如菜单标题里的当前配置)。
+ * 任何会写回磁盘的逻辑都必须用 readConfig()。
+ */
+function readConfigForDisplay() {
+  try {
+    return readConfig();
+  } catch (e) {
+    if (e instanceof ConfigParseError) return {};
+    throw e;
+  }
+}
+
+/**
+ * 写入 JSON 配置文件 (原子写 + 写前备份 + 写后校验)。
+ *
+ * 旧实现直接 fs.writeFileSync 覆盖目标文件，写入中断会留下截断的 JSON，
+ * 且没有任何备份可回退。这里改为:
+ *   1. 先把现有配置复制为 .luci-pre-write 备份
+ *   2. 写入同目录临时文件
+ *   3. 回读校验临时文件可被 JSON.parse
+ *   4. rename 原子替换目标文件
+ *
+ * 备份后缀特意不用 .bak: OpenClaw 自身维护 openclaw.json.bak 及 .bak.1~.bak.4
+ * 轮转，占用同名文件会破坏上游的备份链。
  */
 function writeConfig(config) {
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+    throw new Error('拒绝写入非对象配置');
+  }
+
   const dir = path.dirname(CONFIG_FILE);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true }); try { execSync(`chown openclaw:openclaw "${dir}"`, { stdio: "ignore" }); } catch {}
   }
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+
+  // 保留原文件权限位，避免 rename 后权限被临时文件的 0600 覆盖
+  let mode = 0o644;
+  if (fs.existsSync(CONFIG_FILE)) {
+    try { mode = fs.statSync(CONFIG_FILE).mode & 0o777; } catch {}
+    // 写前备份 (best effort: 备份失败不应阻止用户修改配置)
+    try { fs.copyFileSync(CONFIG_FILE, `${CONFIG_FILE}${CONFIG_BACKUP_SUFFIX}`); } catch {}
+  }
+
+  const payload = `${JSON.stringify(config, null, 2)}\n`;
+  const tmpFile = `${CONFIG_FILE}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmpFile, payload, { mode: 0o600 });
+    // 回读校验: 确认落盘内容可解析，避免把坏内容 rename 成正式配置
+    JSON.parse(fs.readFileSync(tmpFile, 'utf8'));
+    try { fs.chmodSync(tmpFile, mode); } catch {}
+    fs.renameSync(tmpFile, CONFIG_FILE);
+  } catch (e) {
+    try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
+    throw new Error(`写入配置失败，原配置未被修改: ${e.message}`);
+  }
+
   try {
     execSync(`chown openclaw:openclaw "${CONFIG_FILE}"`, { stdio: 'ignore' });
     fixStatePermissions();
@@ -112,9 +225,12 @@ function writeConfig(config) {
 
 /**
  * 获取 JSON 配置值 (对应 json_get)
+ *
+ * 只读路径: 配置损坏时返回 null 而不抛错，保证菜单仍能打开并显示恢复提示。
+ * 需要回写磁盘的逻辑必须直接用 readConfig()，以便在损坏时中止写入。
  */
 function jsonGet(keyPath) {
-  const config = readConfig();
+  const config = readConfigForDisplay();
   const keys = keyPath.split('.');
   let value = config;
   for (const key of keys) {
@@ -148,7 +264,8 @@ function jsonSet(keyPath, value) {
 function getCurrentModel() {
   const primary = jsonGet('agents.defaults.model.primary');
   if (primary) return primary;
-  const config = readConfig();
+  // 只读路径: 与 jsonGet 保持一致，配置损坏时不抛错
+  const config = readConfigForDisplay();
   if (config.models?.defaultModel) return config.models.defaultModel;
   return null;
 }
@@ -2076,6 +2193,13 @@ async function main() {
 }
 
 main().catch(e => {
+  if (e instanceof ConfigParseError) {
+    // 配置损坏: 给出可直接执行的恢复步骤，而不是丢一句解析错误了事
+    console.error(`\n${C.red}配置读取失败:${C.reset} ${e.message}\n`);
+    console.error(configRecoveryHint());
+    console.error('');
+    process.exit(2);
+  }
   console.error(`${C.red}错误:${C.reset}`, e.message);
   process.exit(1);
 });
