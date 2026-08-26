@@ -4,6 +4,116 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [2.1.1] - 2026-08-27
+
+本次维护以 OpenClaw 2026.7.1-2 为基准，逐项核对配置写入与上游 schema 的一致性。
+当前适配版本已等于 npm `latest`，因此**未升级 OpenClaw 版本**，修的是项目自身
+与现行 schema 的既有偏离。
+
+> 版本号说明：`v2.1.0` 标签（2026-07-27）出自 `release/v2.1.0-openclaw-2026.6.33`
+> 分支，适配的是更旧的 OpenClaw 2026.6.33，与 main 的 2.0.12 语义倒挂。
+> 为避免版本号回退，本次直接发布 2.1.1 并明确适配 2026.7.1-2。
+
+### 修复配置丢失（严重）
+
+- **配置管理界面写入可能清空整份配置**：`readConfig()` 在 `JSON.parse` 失败时返回 `{}`，
+  调用方随后 `writeConfig()` 把空对象写回磁盘。实测一份仅多出尾随逗号的配置
+  （OpenClaw 自身的 JSON5 解析器可容忍），用户只改一个网关端口，文件即从 124 字节
+  （含 apiKey）变成 40 字节，`models.providers` 与 API Key 全部丢失。
+  现改为解析失败即中止写入，并给出 `doctor --fix` / `config validate` / `last-good` 恢复指引。
+- **服务启动时同样会清空配置**：`init.d` 的 `sync_uci_to_json()` 有同类缺陷，且位于
+  `start_service` 路径上自动执行，不需要用户操作。实测一次普通的
+  `/etc/init.d/openclaw start` 就会让 apiKey 与 `channels.openclaw-weixin` 消失。
+  现改为解析失败即跳过同步，配置原样保留。
+- 配置写入改为原子操作：写前备份（`.luci-pre-write`，不占用 OpenClaw 自己的 `.bak` 轮转链）
+  → 临时文件 → 回读校验 → `rename` 替换，并保留原文件权限位。
+
+### 修复配置类型与键名（严重）
+
+- **所有配置值都被写成字符串**：`json_set` 原实现"读取值并作为字符串保存"，
+  而上游严格校验类型，实测拒绝 `gateway.port: Invalid input`、
+  `acp.dispatch.enabled: Invalid input (allowed: true, false)`、
+  `channels.telegram.enabled: must be boolean`。现按 schema 类型表自动判定
+  number/boolean/string/json。注意 `init.d` 只在冷启动修正这些字段，而
+  `restart_gateway` 走 SIGUSR1 快速重载不经过修正——这正是"改完配置重启后网关起不来"的路径。
+- **日志级别设置从未生效**：`gateway.logLevel` 不在 schema 中
+  （`gateway.additionalProperties: false`），`config set` 直接报 `Unrecognized key`，
+  手写进文件则被静默忽略。改为正确键 `logging.level`，菜单补齐上游 7 档枚举
+  （silent/fatal/error/warn/info/debug/trace），并清理旧配置里的错误键。
+- **绑定地址提供了上游不接受的值**：`gateway.bind=all` 实测被拒
+  （允许 auto/lan/loopback/custom/tailnet）。菜单改用上游枚举，旧值 `all`
+  自动映射为 `custom` + `customBindHost=0.0.0.0`。
+- 修复一类"假成功"：写入失败时界面仍打印 ✅。`--set` 与端口/模式/ACP/绑定地址
+  菜单现在都检查返回码；端口另加 1–65535 校验；仅在 JSON 写入成功后才同步 UCI。
+
+### 修复功能不可达
+
+- **备份与重置菜单有三个选项打不开**：菜单打印 1–5，`case` 分支却只有
+  `1) 2) 3) c) d)`，导致「查看备份列表」「从最新备份恢复」「完全恢复出厂」
+  按提示操作只会得到"无效选择"，真正的逻辑挂在从不显示的 `c`/`d` 上。已修正键位。
+
+### 修复 Telegram 配对（issue #98）
+
+- 「Telegram 配对助手」调用的 `openclaw models auth login-telegram-bot` 在 2026.6+
+  已移除，实测报 `Too many arguments for this command`。改为对齐上游
+  `openclaw pairing list` / `pairing approve`，与 shell 侧早已正确实现的流程一致。
+  配对与 Bot Token 配置是两件不同的事，本次明确区分，不合并为同一入口。
+
+### 修复打包与 feeds 集成（issue #60）
+
+- OpenWrt 25.x 下 `Ignoring feed 'openclaw' - index missing`：不再依赖 `luci.mk`
+  的隐式 Package 生成，统一 `include package.mk` 并显式定义 `Package/...`。
+- Makefile 漏装交互式菜单：`oc-config-interactive.js` 与 `oc-menu-engine.js` 只在
+  build 脚本里被 `cp *.js` 带上，走 feeds/SDK 编译的包会缺这两个文件，此时
+  `can_use_interactive()` 静默回落到功能较少的传统菜单——用户看不到报错，
+  只会觉得界面与教程不一致。现三条打包路径清单一致。
+- 保留 `libstdcpp6` 依赖（issue #28：缺失会导致 Node.js 无法运行）。
+
+### AI Provider / Model 清单改造
+
+- **不再硬编码易过期的模型 ID**。用 OpenClaw 2026.7.1-2 实测核对，原菜单里
+  `openai/gpt-5.2`、`gpt-5-mini`、`gpt-4.1`、`o3`、`o4-mini`、
+  `claude-sonnet-4-20250514`、`claude-opus-4-20250514`、`claude-sonnet-4.5`、
+  `xai/grok-4`、`grok-3`、`deepseek/deepseek-r1`、`meta-llama/llama-4-maverick`、
+  `01-ai/Yi-1.5-34B-Chat-16K`、`Qwen/Qwen2.5-*`、`THUDM/glm-4-9b-chat`、
+  `github-copilot/gpt-4.1`、`gpt-4o` 等在上游 catalog 中均已不存在。
+- 改为三层架构：精选预设 `model-presets.json`（shell 与 JS 共读的唯一数据源，
+  14 provider / 44 模型，32 条 builtin 预设已逐条核对存在）→ 动态发现
+  `openclaw models list --provider <id>`（带 6s 超时，失败静默回落）→ 手动输入
+  （永久保留的兼容出口）。上游模型迭代时不必再改本插件。
+- SiliconFlow 非 OpenClaw 内置/官方插件 provider，无法用上游 catalog 核实模型 ID，
+  改为引导用户从官方模型广场复制当前 ID——与其留一份会腐坏的列表，不如给可靠来源。
+
+### 安全
+
+- **状态变更端点缺少 CSRF 保护**：`service_ctl`（启停服务）、`uninstall`（删除运行环境）、
+  `plugin_upgrade`（下载执行 .run）、`backup`（create/restore/delete）、
+  `get_token`（返回网关与 PTY 凭据）原为 `call()`，允许 GET 触发且不校验 token，
+  诱导已登录管理员访问一个链接即可卸载环境或读出凭据。现改为 `post()`，
+  前端 8 处调用同步改为带 CSRF token 的 POST。只读端点保持 `call()` 不变。
+- **Web PTY 头部过度开放**：移除 `Access-Control-Allow-Origin: *` 与
+  `X-Frame-Options: ALLOWALL`，CSP 从 `default-src *` 收紧到 `'self'`
+  （保留 `unsafe-inline`——页面确有内联块；去掉 `unsafe-eval`），
+  新增 `Referrer-Policy: no-referrer`。WebSocket token 校验未削弱。
+- **PTY token 泄漏**：页面原先把含 token 的 WebSocket URL 写进可见调试文本与 console。
+  现读取后立即用 `history.replaceState` 从地址栏移除，展示与日志一律用脱敏 URL。
+- **恢复 profile 隔离能力**：`openclaw-env` 生成的 CLI wrapper 无条件 export
+  `OPENCLAW_HOME` 等变量，把官方文档承诺的 per-instance 环境变量与
+  `openclaw --profile` 全部覆盖，导致无法按官方文档跑多实例网关、
+  也无法做隔离的配置写入测试。改为仅在调用方未提供时填默认值。
+
+### 测试
+
+- 新增测试 runner `tests/run_all.sh`，测试数从 7 项增至 16 项，全部通过。
+- 新增契约测试：配置写入安全、配置类型、菜单按键覆盖、打包清单一致性
+  （含真实构建 `.ipk` 并解包校验）、模型预设架构、Telegram 配对语义、
+  init.d 启动同步安全、LuCI CSRF、Web PTY 安全。
+- 上游 schema 关键字段类型固化为 `tests/fixtures/openclaw-schema-types.tsv`。
+- 每项契约测试均用变异测试反向验证过：故意退化实现后测试必须失败，
+  确保护栏不是"永远通过"的空壳。
+
+---
+
 ## [2.0.12] - 2026-08-22
 
 ### 适配 OpenClaw v2026.7.1-2
