@@ -2458,7 +2458,7 @@ reset_to_defaults() {
 				echo -e "  ${CYAN}已取消${NC}"
 			fi
 			;;
-		c)
+		4)
 			echo ""
 			echo -e "  ${RED}╔══════════════════════════════════════════════════════╗${NC}"
 			echo -e "  ${RED}║  ⚠️  完全恢复出厂设置                               ║${NC}"
@@ -2640,7 +2640,7 @@ backup_restore_menu() {
 				oc_cmd backup verify "$latest" 2>&1
 			fi
 			;;
-		c)
+		4)
 			echo ""
 			if [ -d "$backup_dir" ]; then
 				local count=$(ls "${backup_dir}"/*-openclaw-backup.tar.gz 2>/dev/null | wc -l)
@@ -2658,7 +2658,7 @@ backup_restore_menu() {
 			echo ""
 			echo -e "  ${DIM}备份目录: ${backup_dir}${NC}"
 			;;
-		d)
+		5)
 			local latest=$(ls -t "${backup_dir}"/*-openclaw-backup.tar.gz 2>/dev/null | head -1)
 			if [ -z "$latest" ]; then
 				echo -e "  ${YELLOW}未找到备份文件，请先创建备份${NC}"
