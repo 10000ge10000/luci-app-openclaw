@@ -310,6 +310,61 @@ async function ocCmd(...args) {
 }
 
 /**
+ * 静默执行 OpenClaw CLI 并返回输出。
+ *
+ * ocCmd() 会把子进程输出直接透传到终端，适合交互式命令；
+ * 但解析 `pairing list --json` 这类结果时需要拿到纯输出且不污染界面，
+ * 因此单独提供同步捕获版本。
+ *
+ * 返回 { ok, stdout }: 命令不存在或非零退出时 ok=false，不抛异常。
+ */
+function ocCmdCapture(...args) {
+  const ocEntry = findOpenClawEntry();
+  if (!ocEntry) return { ok: false, stdout: '' };
+  try {
+    const stdout = execFileSync(NODE_BIN, [ocEntry, ...args], {
+      encoding: 'utf8',
+      timeout: 20000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        OPENCLAW_HOME: OC_DATA,
+        OPENCLAW_CONFIG_PATH: CONFIG_FILE,
+        OPENCLAW_STATE_DIR: OC_STATE_DIR,
+        HOME: OC_DATA,
+      },
+    });
+    return { ok: true, stdout: stdout || '' };
+  } catch (e) {
+    // 保留 stdout: 部分命令失败时仍会输出有用信息
+    return { ok: false, stdout: (e && (e.stdout || '')) ? String(e.stdout) : '' };
+  }
+}
+
+/**
+ * 从 `openclaw pairing list <channel> --json` 的输出中提取配对码。
+ * 优先按 JSON 解析；输出夹带非 JSON 前后缀时回退到正则扫描。
+ */
+function parsePairingCodes(raw) {
+  if (!raw || !raw.trim()) return [];
+  const codes = [];
+  const pushFrom = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(pushFrom); return; }
+    if (typeof node.code === 'string' && node.code.trim()) codes.push(node.code.trim());
+    Object.keys(node).forEach((k) => pushFrom(node[k]));
+  };
+  try {
+    pushFrom(JSON.parse(raw));
+  } catch {
+    const re = /"code"\s*:\s*"([^"]+)"/g;
+    let m;
+    while ((m = re.exec(raw)) !== null) codes.push(m[1]);
+  }
+  return [...new Set(codes)];
+}
+
+/**
  * 注册模型并设为默认 (对应 register_and_set_model)
  */
 function registerAndSetModel(modelId) {
@@ -602,12 +657,12 @@ async function showChannelsMenu() {
       { label: `${C.dim}提示: 微信配置请使用 LuCI 界面「微信配置」菜单${C.reset}`, disabled: true },
       { label: '', disabled: true },
       { key: '1', label: 'QQ 机器人', desc: '腾讯QQ', value: 'qq' },
-      { key: '2', label: 'Telegram', desc: `${C.green}最常用${C.reset}`, value: 'telegram' },
+      { key: '2', label: 'Telegram', desc: `${C.green}最常用${C.reset} — 配置 Bot Token`, value: 'telegram' },
       { key: '3', label: 'Discord', desc: '', value: 'discord' },
       { key: '4', label: '飞书 (Feishu)', desc: '', value: 'feishu' },
       { key: '5', label: 'Slack', desc: '', value: 'slack' },
       { key: '6', label: 'WhatsApp', desc: '需通过 Web 控制台扫码', value: 'whatsapp' },
-      { key: '7', label: 'Telegram 配对助手', desc: '', value: 'telegram-pairing' },
+      { key: '7', label: 'Telegram 配对助手', desc: '审批用户配对请求 (需先配置 Token)', value: 'telegram-pairing' },
       { key: '8', label: '官方完整渠道配置向导', desc: '', value: 'wizard' },
       { label: '', disabled: true },
       { key: '0', label: '返回', desc: '', value: 'back' },
@@ -1650,10 +1705,100 @@ async function handleChannels() {
         break;
       }
       case 'telegram-pairing': {
-        console.log(`\n${C.cyan}启动 Telegram 配对助手...${C.reset}\n`);
+        // 配对 (pairing) 与 Bot Token 配置是两件不同的事:
+        //   - Token 配置 -> 上面的 'telegram' 分支 / channels add --bot-token
+        //   - 用户配对   -> openclaw pairing list / pairing approve
+        // 旧实现调用的 `models auth login-telegram-bot` 在 2026.6+ 已不存在
+        // (实测报 Too many arguments for this command)，这里改为对齐上游
+        // pairing 命令，与 oc-config.sh 的 telegram_pairing() 行为保持一致。
+        console.log(`\n${C.bold}🤝 Telegram 配对助手${C.reset}\n`);
+
+        const tgToken = jsonGet('channels.telegram.botToken');
+        if (!tgToken) {
+          console.log(`${C.yellow}未检测到 Telegram Bot Token，请先在「Telegram」中配置 Token。${C.reset}\n`);
+          await input({ prompt: '按回车返回', defaultValue: '' });
+          break;
+        }
+
+        // 先确认 Token 与网络可用，避免用户在配对环节盲等
+        console.log(`${C.cyan}诊断 Telegram API 连通性...${C.reset}`);
+        let botName = '';
         try {
-          await ocCmd('models', 'auth', 'login-telegram-bot');
-        } catch (e) {}
+          const probe = execSync(
+            `curl -s --connect-timeout 5 --max-time 10 "https://api.telegram.org/bot${tgToken}/getMe"`,
+            { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+          );
+          if (/"ok"\s*:\s*true/.test(probe)) {
+            const m = probe.match(/"username"\s*:\s*"([^"]+)"/);
+            botName = m ? m[1] : '';
+            console.log(`${C.green}✅ Telegram API 连通正常${botName ? ` — @${botName}` : ''}${C.reset}`);
+          } else {
+            console.log(`${C.red}❌ Telegram API 连通检测未通过${C.reset}`);
+            console.log(`${C.yellow}   可能原因: Token 不正确、网络不通 或 Telegram 被屏蔽${C.reset}`);
+            console.log(`${C.cyan}   建议: 重新配置 Token 或检查代理/网络设置${C.reset}\n`);
+            await input({ prompt: '按回车返回', defaultValue: '' });
+            break;
+          }
+        } catch {
+          console.log(`${C.yellow}⚠️  无法完成连通性检测，继续尝试配对${C.reset}`);
+        }
+
+        console.log('');
+        console.log(`${C.green}请在 Telegram 中向 Bot 发送 /start，然后回到这里继续${C.reset}`);
+        console.log('');
+        const go = await input({ prompt: '发送 /start 后按回车继续 (输入 q 退出)', defaultValue: '' });
+        if (String(go).toLowerCase() === 'q') break;
+
+        const approveCode = (code) => {
+          const res = ocCmdCapture('pairing', 'approve', 'telegram', code);
+          return res.ok || /approved|success|ok/i.test(res.stdout);
+        };
+
+        let paired = false;
+        for (let attempt = 1; attempt <= 3 && !paired; attempt++) {
+          console.log(`${C.cyan}检测配对请求... (第 ${attempt}/3 轮)${C.reset}`);
+          const listed = ocCmdCapture('pairing', 'list', 'telegram', '--json');
+          const codes = parsePairingCodes(listed.stdout);
+
+          for (const code of codes) {
+            console.log(`${C.cyan}发现配对请求: ${code}${C.reset}`);
+            if (approveCode(code)) {
+              console.log(`\n${C.green}${C.bold}🎉 Telegram 配对成功！${C.reset}`);
+              paired = true;
+            } else {
+              console.log(`${C.yellow}配对码 ${code} 处理失败${C.reset}`);
+            }
+          }
+
+          if (!paired && attempt < 3) {
+            console.log(`${C.yellow}未检测到，等待 8 秒后重试...${C.reset}`);
+            await new Promise((r) => setTimeout(r, 8000));
+          }
+        }
+
+        if (!paired) {
+          console.log('');
+          console.log(`${C.yellow}未自动检测到配对请求。${C.reset}`);
+          console.log(`${C.cyan}如果 Bot 已回复配对码，可手动输入 (回车跳过):${C.reset}`);
+          const manual = await input({ prompt: '配对码', defaultValue: '' });
+          if (manual) {
+            if (approveCode(String(manual).trim())) {
+              console.log(`${C.green}${C.bold}🎉 Telegram 配对成功！${C.reset}`);
+              paired = true;
+            } else {
+              console.log(`${C.yellow}配对失败，请确认配对码是否正确或重新发送 /start${C.reset}`);
+            }
+          }
+        }
+
+        if (paired) {
+          console.log(`\n${C.cyan}正在重启 Gateway 使配对生效...${C.reset}`);
+          await restartGateway();
+          console.log(`${C.green}✅ 现在可以在 Telegram 中与 Bot 对话了！${C.reset}\n`);
+        } else {
+          console.log('');
+          await input({ prompt: '按回车返回', defaultValue: '' });
+        }
         break;
       }
       case 'wizard': {
