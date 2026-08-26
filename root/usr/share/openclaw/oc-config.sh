@@ -129,15 +129,60 @@ oc_doctor_as_openclaw() {
 # ── JSON 读写 (使用 Node.js) ──
 json_get() {
 	if [ ! -f "$CONFIG_FILE" ]; then echo ""; return; fi
-	_JS_KEY="$1" "$NODE_BIN" -e "
-		const fs=require('fs');
+	_OC_JS_KEY="$1" _OC_JS_CONFIG="$CONFIG_FILE" "$NODE_BIN" -e '
+		const fs=require("fs");
 		try{
-			const d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));
-			const ks=process.env._JS_KEY.split('.');let v=d;
-			for(const k of ks){v=v[k];if(v===undefined){console.log('');process.exit(0);}}
-			if(typeof v==='object')console.log(JSON.stringify(v));else console.log(v);
-		}catch(e){console.log('');}
-	" 2>/dev/null
+			const d=JSON.parse(fs.readFileSync(process.env._OC_JS_CONFIG,"utf8"));
+			const ks=process.env._OC_JS_KEY.split(".");let v=d;
+			for(const k of ks){v=v[k];if(v===undefined||v===null){console.log("");process.exit(0);}}
+			if(typeof v==="object")console.log(JSON.stringify(v));else console.log(v);
+		}catch(e){console.log("");}
+	' 2>/dev/null
+}
+
+# ── 配置写入类型表 ──
+# 依据: OpenClaw 官方 schema，基线见 tests/fixtures/openclaw-schema-types.tsv
+#
+# 上游对配置类型做严格校验: gateway.port 必须是 integer、
+# acp.dispatch.enabled / channels.*.enabled 必须是 boolean。
+# 写成字符串会导致 openclaw config validate 失败，进而网关拒绝启动
+# (实测报错: gateway.port: Invalid input / acp.dispatch.enabled: Invalid input)。
+#
+# 用集中表而非在每个调用点传类型，保证现有与将来新增的调用点都默认正确。
+oc_schema_type_for_key() {
+	case "$1" in
+		gateway.port|gateway.handshakeTimeoutMs|gateway.channelHealthCheckMinutes)
+			echo "number" ;;
+		gateway.channelStaleEventThresholdMinutes|gateway.channelMaxRestartsPerHour)
+			echo "number" ;;
+		acp.dispatch.enabled|update.checkOnStart|plugins.enabled)
+			echo "boolean" ;;
+		gateway.controlUi.allowInsecureAuth)
+			echo "boolean" ;;
+		gateway.controlUi.dangerouslyDisableDeviceAuth)
+			echo "boolean" ;;
+		gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback)
+			echo "boolean" ;;
+		gateway.allowRealIpFallback)
+			echo "boolean" ;;
+		channels.*.enabled)
+			echo "boolean" ;;
+		*)
+			echo "string" ;;
+	esac
+}
+
+# 枚举白名单。写入前校验，避免把上游不接受的值(如 gateway.bind=all)落盘。
+oc_schema_enum_for_key() {
+	case "$1" in
+		gateway.bind)      echo "auto lan loopback custom tailnet" ;;
+		gateway.mode)      echo "local remote" ;;
+		gateway.auth.mode) echo "none token password trusted-proxy" ;;
+		logging.level)     echo "silent fatal error warn info debug trace" ;;
+		tools.profile)     echo "minimal coding messaging full" ;;
+		models.mode)       echo "merge replace" ;;
+		*)                 echo "" ;;
+	esac
 }
 
 json_set() {
@@ -188,53 +233,121 @@ json_set() {
 		return 1
 	fi
 	
-	# 步骤4: 使用临时文件传递值，避免环境变量转义问题
+	# 步骤4: 解析目标类型并校验枚举
+	# 第三个参数可显式指定类型 (string/number/boolean/json)，
+	# 未指定时按 schema 类型表自动判定。
+	local val_type="${3:-}"
+	[ -n "$val_type" ] || val_type="$(oc_schema_type_for_key "$key")"
+
+	local allowed
+	allowed="$(oc_schema_enum_for_key "$key")"
+	if [ -n "$allowed" ]; then
+		local matched=0 a
+		for a in $allowed; do
+			[ "$value" = "$a" ] && { matched=1; break; }
+		done
+		if [ "$matched" -ne 1 ]; then
+			echo "ERROR: $key 的值 '$value' 不被 OpenClaw 接受" >&2
+			echo "HINT: 允许的值: $allowed" >&2
+			return 1
+		fi
+	fi
+
+	# 步骤5: 使用临时文件传递值，避免环境变量转义问题
 	local tmp_val_file="/tmp/.oc_json_val_$$"
 	if ! printf '%s' "$value" > "$tmp_val_file" 2>/dev/null; then
 		echo "ERROR: 无法创建临时文件 $tmp_val_file" >&2
 		return 1
 	fi
-	
-	# 步骤5: 执行 JSON 写入
-	_JS_KEY="$key" _JS_DEBUG="${OC_CONFIG_DEBUG:-0}" "$NODE_BIN" -e "
-		const fs=require('fs');let d={};
-		const debug=process.env._JS_DEBUG==='1';
-		try{
-			const content=fs.readFileSync('${CONFIG_FILE}','utf8');
-			d=JSON.parse(content);
-		}catch(e){
-			if(debug)console.error('JSON parse warning:',e.message);
+
+	# 步骤6: 执行 JSON 写入
+	# 与 JS 侧同样的安全要求:
+	#   - 配置存在但解析失败时必须中止，不能用 {} 覆盖 (否则整份配置连同
+	#     models.providers 里的 apiKey 一起丢失)
+	#   - 按 schema 类型落值，不能一律写成字符串
+	#   - 原子写: 临时文件 -> 回读校验 -> rename
+	_OC_JS_KEY="$key" _OC_JS_TYPE="$val_type" _OC_JS_VALFILE="$tmp_val_file" \
+	_OC_JS_CONFIG="$CONFIG_FILE" _OC_JS_DEBUG="${OC_CONFIG_DEBUG:-0}" "$NODE_BIN" -e '
+		const fs=require("fs");
+		const debug=process.env._OC_JS_DEBUG==="1";
+		const target=process.env._OC_JS_CONFIG;
+		let d={};
+		let raw="";
+		try{ raw=fs.readFileSync(target,"utf8"); }catch(e){ raw=""; }
+		if(raw.trim()!==""){
+			try{
+				d=JSON.parse(raw);
+			}catch(e){
+				console.error("ERROR: 配置文件不是合法 JSON: "+e.message);
+				console.error("HINT: 为避免覆盖后丢失全部配置，本次写入已中止。");
+				console.error("HINT: 可尝试 openclaw doctor --fix 或 openclaw config validate 定位问题。");
+				process.exit(2);
+			}
+			if(d===null||typeof d!=="object"||Array.isArray(d)){
+				console.error("ERROR: 配置根节点必须是 JSON 对象，本次写入已中止。");
+				process.exit(2);
+			}
 		}
-		const ks=process.env._JS_KEY.split('.');let o=d;
+		const rawVal=fs.readFileSync(process.env._OC_JS_VALFILE,"utf8");
+		const wantType=process.env._OC_JS_TYPE||"string";
+		let v;
+		if(wantType==="number"){
+			v=Number(rawVal.trim());
+			if(!Number.isFinite(v)){
+				console.error("ERROR: "+process.env._OC_JS_KEY+" 需要数字，收到: "+rawVal.trim());
+				process.exit(3);
+			}
+		}else if(wantType==="boolean"){
+			const t=rawVal.trim().toLowerCase();
+			if(t==="true"||t==="1")v=true;
+			else if(t==="false"||t==="0")v=false;
+			else{
+				console.error("ERROR: "+process.env._OC_JS_KEY+" 需要 true/false，收到: "+rawVal.trim());
+				process.exit(3);
+			}
+		}else if(wantType==="json"){
+			try{ v=JSON.parse(rawVal); }catch(e){
+				console.error("ERROR: "+process.env._OC_JS_KEY+" 需要合法 JSON: "+e.message);
+				process.exit(3);
+			}
+		}else{
+			v=rawVal;
+		}
+		const ks=process.env._OC_JS_KEY.split(".");let o=d;
 		for(let i=0;i<ks.length-1;i++){
-			if(!o[ks[i]]||typeof o[ks[i]]!=='object')o[ks[i]]={};
+			if(!o[ks[i]]||typeof o[ks[i]]!=="object"||Array.isArray(o[ks[i]]))o[ks[i]]={};
 			o=o[ks[i]];
 		}
-		// 读取值并作为字符串保存
-		let v=fs.readFileSync('${tmp_val_file}','utf8');
 		o[ks[ks.length-1]]=v;
+		let mode=0o644;
+		try{ if(fs.existsSync(target)) mode=fs.statSync(target).mode & 0o777; }catch(e){}
+		const tmp=target+".tmp-"+process.pid;
 		try{
-			fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
-			if(debug)console.log('JSON saved successfully');
+			fs.writeFileSync(tmp,JSON.stringify(d,null,2)+"\n",{mode:0o600});
+			JSON.parse(fs.readFileSync(tmp,"utf8"));
+			try{ fs.chmodSync(tmp,mode); }catch(e){}
+			fs.renameSync(tmp,target);
+			if(debug)console.log("JSON saved successfully ("+wantType+")");
 		}catch(e){
-			console.error('ERROR: Failed to write config:',e.message);
+			try{ if(fs.existsSync(tmp)) fs.unlinkSync(tmp); }catch(e2){}
+			console.error("ERROR: Failed to write config: "+e.message);
 			process.exit(1);
 		}
-	" 2>&1
+	' 2>&1
 	local _js_rc=$?
-	
+
 	# 清理临时文件
 	rm -f "$tmp_val_file" 2>/dev/null
-	
-	# 步骤6: 检查执行结果
+
+	# 步骤7: 检查执行结果
 	if [ $_js_rc -ne 0 ]; then
 		echo "ERROR: JSON 写入失败 (exit code: $_js_rc)" >&2
 		return 1
 	fi
-	
-	# 步骤7: 修复文件所有权
+
+	# 步骤8: 修复文件所有权
 	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-	
+
 	return 0
 }
 
@@ -2713,7 +2826,9 @@ advanced_menu() {
 		gw_port=$(json_get "gateway.port" 2>/dev/null || echo "18789")
 		gw_bind=$(json_get "gateway.bind" 2>/dev/null || echo "lan")
 		gw_mode=$(json_get "gateway.mode" 2>/dev/null || echo "local")
-		log_level=$(json_get "gateway.logLevel" 2>/dev/null || echo "")
+		# 读 logging.level (正确键)；兼容旧配置里残留的 gateway.logLevel 以便显示
+		log_level=$(json_get "logging.level" 2>/dev/null || echo "")
+		[ -n "$log_level" ] || log_level=$(json_get "gateway.logLevel" 2>/dev/null || echo "")
 		acp_dispatch=$(json_get "acp.dispatch.enabled" 2>/dev/null || echo "false")
 
 		echo ""
@@ -2738,32 +2853,57 @@ advanced_menu() {
 				echo ""
 				prompt_with_default "请输入 Gateway 端口" "$gw_port" new_port
 				if [ -n "$new_port" ] && [ "$new_port" != "$gw_port" ]; then
-					json_set "gateway.port" "$new_port"
-					# 同步到 UCI
-					uci set openclaw.main.port="$new_port" 2>/dev/null
-					uci commit openclaw 2>/dev/null
-					echo -e "  ${GREEN}✅ 端口已设置为 ${new_port}${NC}"
-					ask_restart
+					# 端口必须是 1-65535 的整数，先自行校验再写入，
+					# 避免把非法值交给 json_set 后只得到一条底层报错。
+					case "$new_port" in
+						''|*[!0-9]*)
+							echo -e "  ${YELLOW}无效端口: 必须是数字${NC}"
+							;;
+						*)
+							if [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
+								echo -e "  ${YELLOW}无效端口: 需在 1-65535 之间${NC}"
+							elif json_set "gateway.port" "$new_port"; then
+								# 仅在 JSON 写入成功后才同步 UCI，避免两边不一致
+								uci set openclaw.main.port="$new_port" 2>/dev/null
+								uci commit openclaw 2>/dev/null
+								echo -e "  ${GREEN}✅ 端口已设置为 ${new_port}${NC}"
+								ask_restart
+							fi
+							;;
+					esac
 				fi
 				;;
 			2)
 				echo ""
+				# 取值必须与 OpenClaw schema 的 gateway.bind 枚举一致:
+				# auto/lan/loopback/custom/tailnet。历史上这里提供的 all
+				# 不被上游接受 (实测: gateway.bind: Invalid input)，
+				# 想监听所有接口应使用 custom + customBindHost。
 				echo -e "  ${CYAN}绑定地址选项:${NC}"
 				echo "    lan      - 仅 LAN 接口 (推荐)"
 				echo "    loopback - 仅本机访问"
-				echo "    all      - 所有接口 (0.0.0.0)"
+				echo "    auto     - 自动选择"
+				echo "    custom   - 自定义地址 (可配合 0.0.0.0 监听所有接口)"
+				echo "    tailnet  - Tailscale 网络"
 				echo ""
 				prompt_with_default "请输入绑定地址" "$gw_bind" new_bind
 				if [ -n "$new_bind" ]; then
+					# 兼容旧值: 用户/旧配置里的 all 等价于 custom + 0.0.0.0
+					if [ "$new_bind" = "all" ]; then
+						echo -e "  ${YELLOW}提示: OpenClaw 已不接受 all，已改用 custom + 0.0.0.0${NC}"
+						new_bind="custom"
+						json_set "gateway.customBindHost" "0.0.0.0" || true
+					fi
 					case "$new_bind" in
-						lan|loopback|all)
-							json_set "gateway.bind" "$new_bind"
-							uci set openclaw.main.bind="$new_bind" 2>/dev/null
-							uci commit openclaw 2>/dev/null
-							echo -e "  ${GREEN}✅ 绑定地址已设置为 ${new_bind}${NC}"
-							ask_restart
+						auto|lan|loopback|custom|tailnet)
+							if json_set "gateway.bind" "$new_bind"; then
+								uci set openclaw.main.bind="$new_bind" 2>/dev/null
+								uci commit openclaw 2>/dev/null
+								echo -e "  ${GREEN}✅ 绑定地址已设置为 ${new_bind}${NC}"
+								ask_restart
+							fi
 							;;
-						*) echo -e "  ${YELLOW}无效选项${NC}" ;;
+						*) echo -e "  ${YELLOW}无效选项 (允许: auto/lan/loopback/custom/tailnet)${NC}" ;;
 					esac
 				fi
 				;;
@@ -2775,21 +2915,27 @@ advanced_menu() {
 				echo ""
 				prompt_with_default "请输入运行模式" "$gw_mode" new_mode
 				if [ -n "$new_mode" ] && [ "$new_mode" != "$gw_mode" ]; then
-					json_set "gateway.mode" "$new_mode"
-					echo -e "  ${GREEN}✅ 运行模式已设置为 ${new_mode}${NC}"
-					ask_restart
+					if json_set "gateway.mode" "$new_mode"; then
+						echo -e "  ${GREEN}✅ 运行模式已设置为 ${new_mode}${NC}"
+						ask_restart
+					fi
 				fi
 				;;
 			4)
 				echo ""
+				# 正确键是顶层 logging.level。gateway.logLevel 不存在于
+				# OpenClaw schema (gateway.additionalProperties=false)，
+				# 实测 config set 报 Unrecognized key，手写进文件则被静默忽略，
+				# 表现为"界面显示已设置但从未生效"。
 				echo -e "  ${CYAN}日志级别选项:${NC}"
-				echo "    debug, info, warn, error"
+				echo "    silent, fatal, error, warn, info, debug, trace"
 				echo ""
 				prompt_with_default "请输入日志级别" "${log_level:-info}" new_level
 				if [ -n "$new_level" ]; then
-					json_set "gateway.logLevel" "$new_level"
-					echo -e "  ${GREEN}✅ 日志级别已设置为 ${new_level}${NC}"
-					ask_restart
+					if json_set "logging.level" "$new_level"; then
+						echo -e "  ${GREEN}✅ 日志级别已设置为 ${new_level}${NC}"
+						ask_restart
+					fi
 				fi
 				;;
 			5)
@@ -2801,11 +2947,12 @@ advanced_menu() {
 				prompt_with_default "请输入设置" "$acp_dispatch" new_acp
 				case "$new_acp" in
 					true|false)
-						json_set "acp.dispatch.enabled" "$new_acp"
-						echo -e "  ${GREEN}✅ ACP Dispatch 已设置为 ${new_acp}${NC}"
-						ask_restart
+						if json_set "acp.dispatch.enabled" "$new_acp"; then
+							echo -e "  ${GREEN}✅ ACP Dispatch 已设置为 ${new_acp}${NC}"
+							ask_restart
+						fi
 						;;
-					*) echo -e "  ${YELLOW}无效选项${NC}" ;;
+					*) echo -e "  ${YELLOW}无效选项 (只接受 true / false)${NC}" ;;
 				esac
 				;;
 			6)
@@ -2891,11 +3038,19 @@ case "${1:-}" in
 		;;
 	--set)
 		if [ -n "${2:-}" ] && [ -n "${3:-}" ]; then
-			json_set "$2" "$3"
-			chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-			echo -e "${GREEN}✅ 已设置 $2${NC}"
+			# 必须检查 json_set 的返回码: 类型/枚举校验失败或配置损坏时
+			# 写入会被拒绝，此时不能再报告成功 (否则就是"界面显示已设置、
+			# 实际未生效"的假成功)。
+			if json_set "$2" "$3"; then
+				chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+				echo -e "${GREEN}✅ 已设置 $2${NC}"
+			else
+				echo -e "${RED}❌ 设置失败: $2${NC}" >&2
+				exit 1
+			fi
 		else
-			echo "用法: oc-config.sh --set <key> <value>"
+			echo "用法: oc-config.sh --set <key> <value> [类型]"
+			echo "类型可选: string | number | boolean | json (默认按 schema 自动判定)"
 		fi
 		;;
 	--get)

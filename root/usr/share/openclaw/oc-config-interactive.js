@@ -625,7 +625,9 @@ async function showAdvancedMenu() {
   const gwPort = jsonGet('gateway.port') || '18789';
   const gwBind = jsonGet('gateway.bind') || 'lan';
   const gwMode = jsonGet('gateway.mode') || 'local';
-  const logLevel = jsonGet('gateway.logLevel') || '未设置';
+  // 正确键是顶层 logging.level；gateway.logLevel 不在 OpenClaw schema 中
+  // (gateway.additionalProperties=false)，仅为显示旧配置残留值做兼容读取。
+  const logLevel = jsonGet('logging.level') || jsonGet('gateway.logLevel') || '未设置';
   const acpDispatch = jsonGet('acp.dispatch.enabled') || 'false';
 
   const result = await select({
@@ -1790,12 +1792,21 @@ async function handleAdvancedConfig() {
           title: '绑定地址选项',
           showSearch: false,
           items: [
+            // 取值必须与 schema 的 gateway.bind 枚举一致:
+            // auto/lan/loopback/custom/tailnet。旧选项 all 不被上游接受
+            // (实测: gateway.bind: Invalid input)，监听所有接口用 custom。
             { key: '1', label: 'lan', desc: '仅 LAN 接口 (推荐)', value: 'lan' },
             { key: '2', label: 'loopback', desc: '仅本机访问', value: 'loopback' },
-            { key: '3', label: 'all', desc: '所有接口 (0.0.0.0)', value: 'all' },
+            { key: '3', label: 'auto', desc: '自动选择', value: 'auto' },
+            { key: '4', label: 'custom', desc: '自定义地址 (0.0.0.0 = 所有接口)', value: 'custom' },
+            { key: '5', label: 'tailnet', desc: 'Tailscale 网络', value: 'tailnet' },
           ],
         });
         if (bindChoice) {
+          if (bindChoice.value === 'custom') {
+            const host = await input({ prompt: '监听地址', defaultValue: jsonGet('gateway.customBindHost') || '0.0.0.0' });
+            if (host) jsonSet('gateway.customBindHost', host);
+          }
           jsonSet('gateway.bind', bindChoice.value);
           try { execSync(`uci set openclaw.main.bind="${bindChoice.value}" && uci commit openclaw`, { stdio: 'ignore' }); } catch {}
           console.log(`\n${C.green}✅ 绑定地址已设置为 ${bindChoice.value}${C.reset}\n`);
@@ -1824,14 +1835,28 @@ async function handleAdvancedConfig() {
           title: '日志级别选项',
           showSearch: false,
           items: [
-            { key: '1', label: 'debug', desc: '详细调试', value: 'debug' },
-            { key: '2', label: 'info', desc: '常规信息', value: 'info' },
-            { key: '3', label: 'warn', desc: '警告及以上', value: 'warn' },
-            { key: '4', label: 'error', desc: '仅错误', value: 'error' },
+            // 取值与 schema 的 logging.level 枚举一致 (7 档)
+            { key: '1', label: 'info', desc: '常规信息 (默认)', value: 'info' },
+            { key: '2', label: 'warn', desc: '警告及以上', value: 'warn' },
+            { key: '3', label: 'error', desc: '仅错误', value: 'error' },
+            { key: '4', label: 'debug', desc: '详细调试', value: 'debug' },
+            { key: '5', label: 'trace', desc: '最详细 (排障用)', value: 'trace' },
+            { key: '6', label: 'fatal', desc: '仅致命错误', value: 'fatal' },
+            { key: '7', label: 'silent', desc: '完全静默', value: 'silent' },
           ],
         });
         if (levelChoice) {
-          jsonSet('gateway.logLevel', levelChoice.value);
+          // 正确键是顶层 logging.level；gateway.logLevel 不在 schema 中，
+          // 写入会被上游忽略，表现为"显示已设置但从未生效"。
+          jsonSet('logging.level', levelChoice.value);
+          // 清理旧配置里可能残留的错误键，避免界面回显到失效值
+          try {
+            const cfg = readConfig();
+            if (cfg.gateway && Object.prototype.hasOwnProperty.call(cfg.gateway, 'logLevel')) {
+              delete cfg.gateway.logLevel;
+              writeConfig(cfg);
+            }
+          } catch {}
           console.log(`\n${C.green}✅ 日志级别已设置为 ${levelChoice.value}${C.reset}\n`);
           await askRestart();
         }
