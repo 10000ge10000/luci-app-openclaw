@@ -86,6 +86,7 @@ define Package/$(PKG_NAME)/install
 	$(INSTALL_DATA) ./root/usr/share/openclaw/web-pty.js $(1)/usr/share/openclaw/web-pty.js
 	$(INSTALL_BIN) ./root/usr/share/openclaw/oc-config-interactive.js $(1)/usr/share/openclaw/oc-config-interactive.js
 	$(INSTALL_DATA) ./root/usr/share/openclaw/oc-menu-engine.js $(1)/usr/share/openclaw/oc-menu-engine.js
+	$(INSTALL_DATA) ./root/usr/share/openclaw/model-presets.json $(1)/usr/share/openclaw/model-presets.json
 	$(INSTALL_DIR) $(1)/usr/share/openclaw/ui
 	$(CP) ./root/usr/share/openclaw/ui/* $(1)/usr/share/openclaw/ui/
 endef

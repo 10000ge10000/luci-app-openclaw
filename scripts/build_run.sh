@@ -85,6 +85,8 @@ install_files() {
 	cp "$PKG_DIR/root/usr/share/openclaw/oc-config.sh" "$dest/usr/share/openclaw/"
 	chmod +x "$dest/usr/share/openclaw/oc-config.sh"
 	cp "$PKG_DIR/root/usr/share/openclaw/"*.js "$dest/usr/share/openclaw/"
+	# 精选模型预设 (shell 与 JS 共读的唯一数据源)
+	cp "$PKG_DIR/root/usr/share/openclaw/model-presets.json" "$dest/usr/share/openclaw/"
 
 	# Web PTY UI (recursive copy)
 	cp -r "$PKG_DIR/root/usr/share/openclaw/ui" "$dest/usr/share/openclaw/"

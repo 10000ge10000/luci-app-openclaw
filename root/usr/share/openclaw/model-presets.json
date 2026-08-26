@@ -1,0 +1,156 @@
+{
+  "_comment": [
+    "精选模型预设 —— shell 与 JS 两侧共读的唯一数据源。",
+    "",
+    "架构分三层 (见 docs/notes/):",
+    "  1. 本文件的精选列表: 离线可用、首屏快，每个 provider 给 4 档",
+    "     (推荐 / 最强 / 均衡 / 快速低价)。",
+    "  2. 动态发现: 菜单里的「从 OpenClaw 获取模型列表」调用",
+    "     openclaw models list --provider <id> --plain，带超时并在失败时",
+    "     静默回落到本文件。",
+    "  3. 手动输入: 永久保留的兼容出口。",
+    "",
+    "维护约定:",
+    "  - model 字段必须是 provider 侧的裸模型 ID (不含 'provider/' 前缀)。",
+    "  - 只收录已用 openclaw models list --provider <id> 核实存在的 ID，",
+    "    不要凭文档或印象填写。",
+    "  - verified 记录核实日期与 OpenClaw 版本，便于判断是否过期。",
+    "  - catalogSource=builtin 表示上游内置 catalog 可直接发现该 provider；",
+    "    plugin 表示需先安装官方 provider 插件，模型列表以插件为准。"
+  ],
+  "verified": {
+    "date": "2026-08-26",
+    "openclawVersion": "2026.7.1-2",
+    "method": "openclaw models list --provider <id> --plain"
+  },
+  "providers": {
+    "openai": {
+      "label": "OpenAI",
+      "catalogSource": "builtin",
+      "models": [
+        { "model": "gpt-5.6-sol", "tier": "recommended", "desc": "GPT-5.6 Sol 旗舰 (推荐)" },
+        { "model": "gpt-5.6", "tier": "strongest", "desc": "GPT-5.6 通用最强" },
+        { "model": "gpt-5.5", "tier": "balanced", "desc": "GPT-5.5 均衡" },
+        { "model": "gpt-5.4-mini", "tier": "fast", "desc": "GPT-5.4 mini 快速低价" }
+      ]
+    },
+    "anthropic": {
+      "label": "Anthropic",
+      "catalogSource": "builtin",
+      "models": [
+        { "model": "claude-sonnet-5", "tier": "recommended", "desc": "Claude Sonnet 5 (推荐, 1M 上下文)" },
+        { "model": "claude-opus-4-8", "tier": "strongest", "desc": "Claude Opus 4.8 顶级推理" },
+        { "model": "claude-sonnet-4-6", "tier": "balanced", "desc": "Claude Sonnet 4.6 均衡" },
+        { "model": "claude-haiku-4-5", "tier": "fast", "desc": "Claude Haiku 4.5 轻量快速" }
+      ]
+    },
+    "google": {
+      "label": "Google Gemini",
+      "catalogSource": "builtin",
+      "models": [
+        { "model": "gemini-3.1-pro-preview", "tier": "recommended", "desc": "Gemini 3.1 Pro 预览 (推荐)" },
+        { "model": "gemini-2.5-pro", "tier": "strongest", "desc": "Gemini 2.5 Pro 稳定旗舰" },
+        { "model": "gemini-3.5-flash", "tier": "balanced", "desc": "Gemini 3.5 Flash 均衡" },
+        { "model": "gemini-3.1-flash-lite", "tier": "fast", "desc": "Gemini 3.1 Flash-Lite 极速低价" }
+      ]
+    },
+    "openrouter": {
+      "label": "OpenRouter",
+      "catalogSource": "builtin",
+      "models": [
+        { "model": "auto", "tier": "recommended", "desc": "自动路由 (推荐)" },
+        { "model": "moonshotai/kimi-k2.6", "tier": "balanced", "desc": "Kimi K2.6" }
+      ]
+    },
+    "github-copilot": {
+      "label": "GitHub Copilot",
+      "catalogSource": "builtin",
+      "models": [
+        { "model": "gpt-5.5", "tier": "recommended", "desc": "GPT-5.5 (推荐, 400k 上下文)" },
+        { "model": "claude-opus-4.8", "tier": "strongest", "desc": "Claude Opus 4.8" },
+        { "model": "claude-sonnet-4.6", "tier": "balanced", "desc": "Claude Sonnet 4.6" },
+        { "model": "gpt-5.4-mini", "tier": "fast", "desc": "GPT-5.4 mini" }
+      ]
+    },
+    "xai": {
+      "label": "xAI Grok",
+      "catalogSource": "builtin",
+      "models": [
+        { "model": "grok-4.3", "tier": "recommended", "desc": "Grok 4.3 (推荐)" },
+        { "model": "grok-4.20-beta-latest-reasoning", "tier": "strongest", "desc": "Grok 4.20 推理版" },
+        { "model": "grok-4.20-beta-latest-non-reasoning", "tier": "fast", "desc": "Grok 4.20 非推理版" }
+      ]
+    },
+    "mistral": {
+      "label": "Mistral",
+      "catalogSource": "builtin",
+      "models": [
+        { "model": "mistral-large-latest", "tier": "recommended", "desc": "Mistral Large (推荐)" },
+        { "model": "mistral-medium-3-5", "tier": "balanced", "desc": "Mistral Medium 3.5" },
+        { "model": "codestral-latest", "tier": "strongest", "desc": "Codestral 代码专用" },
+        { "model": "mistral-small-latest", "tier": "fast", "desc": "Mistral Small 快速" }
+      ]
+    },
+    "deepseek": {
+      "label": "DeepSeek",
+      "catalogSource": "builtin",
+      "models": [
+        { "model": "deepseek-chat", "tier": "recommended", "desc": "DeepSeek Chat (推荐)" },
+        { "model": "deepseek-reasoner", "tier": "strongest", "desc": "DeepSeek Reasoner 推理" }
+      ]
+    },
+    "moonshot": {
+      "label": "Moonshot Kimi",
+      "catalogSource": "builtin",
+      "models": [
+        { "model": "kimi-k2.6", "tier": "recommended", "desc": "Kimi K2.6 (推荐)" },
+        { "model": "kimi-k2.7-code", "tier": "strongest", "desc": "Kimi K2.7 Code 代码专用" }
+      ]
+    },
+    "minimax": {
+      "label": "MiniMax",
+      "catalogSource": "builtin",
+      "models": [
+        { "model": "MiniMax-M3", "tier": "recommended", "desc": "MiniMax M3 (推荐)" },
+        { "model": "MiniMax-M2.7", "tier": "balanced", "desc": "MiniMax M2.7" },
+        { "model": "MiniMax-M2.7-highspeed", "tier": "fast", "desc": "MiniMax M2.7 高速版" }
+      ]
+    },
+    "zai": {
+      "label": "智谱 GLM / Z.AI",
+      "catalogSource": "plugin",
+      "models": [
+        { "model": "glm-5.2", "tier": "recommended", "desc": "GLM-5.2 (推荐)" },
+        { "model": "glm-5.1", "tier": "strongest", "desc": "GLM-5.1" },
+        { "model": "glm-4.7", "tier": "balanced", "desc": "GLM-4.7 均衡" },
+        { "model": "glm-4.7-flash", "tier": "fast", "desc": "GLM-4.7 Flash 快速" }
+      ]
+    },
+    "qwen": {
+      "label": "阿里云通义千问 Qwen",
+      "catalogSource": "plugin",
+      "models": [
+        { "model": "qwen3.5-plus", "tier": "recommended", "desc": "Qwen3.5 Plus (推荐)" },
+        { "model": "qwen3.6-plus", "tier": "strongest", "desc": "Qwen3.6 Plus" },
+        { "model": "qwen3-coder-next", "tier": "balanced", "desc": "Qwen3 Coder Next 代码专用" },
+        { "model": "qwen3-coder-plus", "tier": "fast", "desc": "Qwen3 Coder Plus" }
+      ]
+    },
+    "qianfan": {
+      "label": "百度千帆",
+      "catalogSource": "plugin",
+      "models": [
+        { "model": "ernie-5.0-thinking-preview", "tier": "recommended", "desc": "ERNIE 5.0 Thinking 预览 (推荐)" },
+        { "model": "deepseek-v3.2", "tier": "balanced", "desc": "DeepSeek V3.2 (千帆托管)" }
+      ]
+    },
+    "tencent-tokenhub": {
+      "label": "腾讯混元 TokenHub",
+      "catalogSource": "plugin",
+      "models": [
+        { "model": "hy3", "tier": "recommended", "desc": "混元 HY3 (推荐)" },
+        { "model": "hy3-preview", "tier": "strongest", "desc": "混元 HY3 预览版" }
+      ]
+    }
+  }
+}

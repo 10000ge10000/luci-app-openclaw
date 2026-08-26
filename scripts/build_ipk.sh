@@ -82,6 +82,8 @@ cp "$PKG_DIR/VERSION" "$DATA_DIR/usr/share/openclaw/VERSION"
 cp "$PKG_DIR/root/usr/share/openclaw/oc-config.sh" "$DATA_DIR/usr/share/openclaw/"
 chmod +x "$DATA_DIR/usr/share/openclaw/oc-config.sh"
 cp "$PKG_DIR/root/usr/share/openclaw/"*.js "$DATA_DIR/usr/share/openclaw/"
+# 精选模型预设 (shell 与 JS 共读的唯一数据源)
+cp "$PKG_DIR/root/usr/share/openclaw/model-presets.json" "$DATA_DIR/usr/share/openclaw/"
 
 # Web PTY UI
 cp -r "$PKG_DIR/root/usr/share/openclaw/ui" "$DATA_DIR/usr/share/openclaw/"

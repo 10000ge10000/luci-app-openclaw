@@ -134,4 +134,41 @@ if grep -E '^[[:space:]]*ifeq[[:space:]]*\(\$\(wildcard[[:space:]].*luci\.mk' "$
 fi
 grep -Fq 'define Package/$(PKG_NAME)' "$MK" || fail "Makefile must define Package/... explicitly"
 
+# 新增的共享数据文件必须显式安装: build 脚本只 cp *.js 通配，
+# .json 不会被自动带上 (model-presets.json 曾因此漏装)。
+for s in "$MK" "$IPK" "$RUN"; do
+	grep -Fq 'model-presets.json' "$s" \
+		|| fail "$(basename "$s") must install model-presets.json (the *.js glob does not cover it)"
+done
+
+# ── 真实构建产物校验 ──
+# 前面的检查都是静态文本比对，抓不到"脚本已改但产物仍缺文件"的情况
+# (例如同步失误)。这里实际构建一次 .ipk 并检查解包内容。
+# 需要 ar/tar，缺失时跳过而不是误报。
+if command -v ar >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+	BUILD_TMP=$(mktemp -d 2>/dev/null || echo "/tmp/oc-parity-build-$$")
+	mkdir -p "$BUILD_TMP"
+	cleanup_build() { rm -rf "$BUILD_TMP"; }
+	trap cleanup_build EXIT
+
+	if ( cd "$REPO_ROOT" && sh scripts/build_ipk.sh "$BUILD_TMP" ) >/dev/null 2>&1; then
+		IPK_FILE=$(ls "$BUILD_TMP"/*.ipk 2>/dev/null | head -1)
+		if [ -n "$IPK_FILE" ]; then
+			EXTRACT="$BUILD_TMP/extract"
+			mkdir -p "$EXTRACT"
+			( cd "$EXTRACT" && { ar x "$IPK_FILE" 2>/dev/null || tar xzf "$IPK_FILE" 2>/dev/null; } )
+			if [ -f "$EXTRACT/data.tar.gz" ]; then
+				mkdir -p "$EXTRACT/data"
+				tar xzf "$EXTRACT/data.tar.gz" -C "$EXTRACT/data" 2>/dev/null
+				SHARE="$EXTRACT/data/usr/share/openclaw"
+				for want in oc-config.sh oc-config-interactive.js oc-menu-engine.js web-pty.js model-presets.json VERSION; do
+					[ -f "$SHARE/$want" ] \
+						|| fail "built .ipk is missing /usr/share/openclaw/$want"
+				done
+				[ -d "$SHARE/ui" ] || fail "built .ipk is missing /usr/share/openclaw/ui/"
+			fi
+		fi
+	fi
+fi
+
 echo "ok"

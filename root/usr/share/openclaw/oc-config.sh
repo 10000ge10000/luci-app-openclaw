@@ -126,6 +126,109 @@ oc_doctor_as_openclaw() {
 	fi
 }
 
+# ── 精选模型预设 (与 JS 侧共读同一份数据源) ──
+# 见 root/usr/share/openclaw/model-presets.json。
+# 三层架构: 精选预设 -> 动态发现 (openclaw models list --provider) -> 手动输入。
+OC_MODEL_PRESETS="${OC_MODEL_PRESETS:-/usr/share/openclaw/model-presets.json}"
+OC_MODEL_DISCOVERY_TIMEOUT="${OC_MODEL_DISCOVERY_TIMEOUT:-6}"
+
+# oc_preset_models <provider> — 输出该 provider 的精选模型，每行 "model<TAB>desc"
+oc_preset_models() {
+	[ -f "$OC_MODEL_PRESETS" ] || return 0
+	[ -x "$NODE_BIN" ] || return 0
+	_OC_PP="$1" _OC_PF="$OC_MODEL_PRESETS" "$NODE_BIN" -e '
+		const fs=require("fs");
+		try{
+			const j=JSON.parse(fs.readFileSync(process.env._OC_PF,"utf8"));
+			const p=(j.providers||{})[process.env._OC_PP];
+			if(!p||!Array.isArray(p.models))process.exit(0);
+			for(const m of p.models){
+				if(m&&m.model)console.log(m.model+"\t"+(m.desc||""));
+			}
+		}catch(e){}
+	' 2>/dev/null
+}
+
+# oc_discover_models <provider> — 动态发现当前可用模型 (失败/超时输出空)
+# 上游行为: models list --all 不是各 provider 的超集，必须按 provider 查询；
+# 未安装对应插件时返回 "No models found."，属正常情况。
+# 带 timeout: 避免在 OpenWrt 上把菜单卡死。
+oc_discover_models() {
+	local provider="$1"
+	[ -x "$NODE_BIN" ] || return 0
+	[ -n "$OC_ENTRY" ] || return 0
+	timeout "$OC_MODEL_DISCOVERY_TIMEOUT" "$NODE_BIN" "$OC_ENTRY" models list \
+		--provider "$provider" --plain 2>/dev/null \
+		| sed -n "s|^${provider}/||p" \
+		| grep -v '^[[:space:]]*$'
+}
+
+# oc_pick_model <provider> <默认模型> — 交互式选择模型，结果写入全局 OC_PICKED_MODEL
+# 菜单: 精选预设 (数字) / d 动态发现 / m 手动输入
+oc_pick_model() {
+	local provider="$1" fallback="$2"
+	local list idx line model desc choice
+	OC_PICKED_MODEL=""
+
+	list="$(oc_preset_models "$provider")"
+
+	echo ""
+	if [ -n "$list" ]; then
+		echo -e "  ${CYAN}精选模型:${NC}"
+		idx=1
+		printf '%s\n' "$list" | while IFS="$(printf '\t')" read -r model desc; do
+			[ -n "$model" ] || continue
+			echo -e "    ${CYAN}${idx})${NC} ${model}${desc:+  — ${desc}}"
+			idx=$((idx + 1))
+		done
+	else
+		echo -e "  ${YELLOW}该 Provider 无内置精选列表${NC}"
+	fi
+	echo -e "    ${CYAN}d)${NC} 从 OpenClaw 获取完整模型列表"
+	echo -e "    ${CYAN}m)${NC} 手动输入模型 ID"
+	echo ""
+	prompt_with_default "请选择模型" "1" choice
+
+	case "$choice" in
+		d|D)
+			echo -e "  ${CYAN}正在获取模型列表...${NC}"
+			local found
+			found="$(oc_discover_models "$provider")"
+			if [ -z "$found" ]; then
+				echo -e "  ${YELLOW}未获取到模型列表 (可能需先安装插件或配置 API Key)${NC}"
+				prompt_with_default "请手动输入模型 ID" "$fallback" OC_PICKED_MODEL
+			else
+				echo ""
+				idx=1
+				printf '%s\n' "$found" | while read -r model; do
+					[ -n "$model" ] || continue
+					echo -e "    ${CYAN}${idx})${NC} ${model}"
+					idx=$((idx + 1))
+				done
+				echo ""
+				prompt_with_default "请输入序号或直接输入模型 ID" "1" choice
+				case "$choice" in
+					''|*[!0-9]*) OC_PICKED_MODEL="$choice" ;;
+					*) OC_PICKED_MODEL="$(printf '%s\n' "$found" | sed -n "${choice}p")" ;;
+				esac
+			fi
+			;;
+		m|M)
+			prompt_with_default "请输入模型 ID" "$fallback" OC_PICKED_MODEL
+			;;
+		''|*[!0-9]*)
+			# 非数字直接当作手动输入的模型 ID
+			OC_PICKED_MODEL="$choice"
+			;;
+		*)
+			OC_PICKED_MODEL="$(printf '%s\n' "$list" | sed -n "${choice}p" | cut -f1)"
+			;;
+	esac
+
+	[ -n "$OC_PICKED_MODEL" ] || OC_PICKED_MODEL="$fallback"
+	[ -n "$OC_PICKED_MODEL" ]
+}
+
 # ── JSON 读写 (使用 Node.js) ──
 json_get() {
 	if [ ! -f "$CONFIG_FILE" ]; then echo ""; return; fi
@@ -878,26 +981,10 @@ configure_model() {
 			if [ -n "$api_key" ]; then
 				auth_set_apikey openai "$api_key"
 				echo ""
-				echo -e "  ${CYAN}可用模型:${NC}"
-				echo -e "    ${CYAN}a)${NC} gpt-5.2       — 最强编程与代理旗舰 (推荐)"
-				echo -e "    ${CYAN}b)${NC} gpt-5-mini    — 高性价比推理"
-				echo -e "    ${CYAN}c)${NC} gpt-5-nano    — 极速低成本"
-				echo -e "    ${CYAN}d)${NC} gpt-4.1       — 最强非推理模型"
-				echo -e "    ${CYAN}e)${NC} o3            — 推理模型"
-				echo -e "    ${CYAN}f)${NC} o4-mini       — 推理轻量"
-				echo -e "    ${CYAN}g)${NC} 手动输入模型名"
-				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="gpt-5.2" ;;
-					b) model_name="gpt-5-mini" ;;
-					c) model_name="gpt-5-nano" ;;
-					d) model_name="gpt-4.1" ;;
-					e) model_name="o3" ;;
-					f) model_name="o4-mini" ;;
-					g) prompt_with_default "请输入模型名称" "gpt-5.2" model_name ;;
-					*) model_name="gpt-5.2" ;;
-				esac
+				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
+				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
+				oc_pick_model openai "gpt-5.6-sol"
+				model_name="$OC_PICKED_MODEL"
 				register_and_set_model "openai/${model_name}"
 				echo -e "  ${GREEN}✅ OpenAI 已配置，活跃模型: openai/${model_name}${NC}"
 			fi
@@ -911,24 +998,10 @@ configure_model() {
 			if [ -n "$api_key" ]; then
 				auth_set_apikey anthropic "$api_key"
 				echo ""
-				echo -e "  ${CYAN}可用模型:${NC}"
-				echo -e "    ${CYAN}a)${NC} claude-sonnet-4-20250514   — Claude Sonnet 4 (推荐)"
-				echo -e "    ${CYAN}b)${NC} claude-opus-4-20250514     — Claude Opus 4 顶级推理"
-				echo -e "    ${CYAN}c)${NC} claude-haiku-4-5           — Claude Haiku 4.5 轻量快速"
-				echo -e "    ${CYAN}d)${NC} claude-sonnet-4.5          — Claude Sonnet 4.5"
-				echo -e "    ${CYAN}e)${NC} claude-sonnet-4.6          — Claude Sonnet 4.6"
-				echo -e "    ${CYAN}f)${NC} 手动输入模型名"
-				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="claude-sonnet-4-20250514" ;;
-					b) model_name="claude-opus-4-20250514" ;;
-					c) model_name="claude-haiku-4-5" ;;
-					d) model_name="claude-sonnet-4-5" ;;
-					e) model_name="claude-sonnet-4-6" ;;
-					f) prompt_with_default "请输入模型名称" "claude-sonnet-4-20250514" model_name ;;
-					*) model_name="claude-sonnet-4-20250514" ;;
-				esac
+				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
+				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
+				oc_pick_model anthropic "claude-sonnet-5"
+				model_name="$OC_PICKED_MODEL"
 				register_and_set_model "anthropic/${model_name}"
 				echo -e "  ${GREEN}✅ Anthropic 已配置，活跃模型: anthropic/${model_name}${NC}"
 			fi
@@ -942,24 +1015,10 @@ configure_model() {
 			if [ -n "$api_key" ]; then
 				auth_set_apikey google "$api_key"
 				echo ""
-				echo -e "  ${CYAN}可用模型:${NC}"
-				echo -e "    ${CYAN}a)${NC} gemini-2.5-pro           — 旗舰推理 (推荐)"
-				echo -e "    ${CYAN}b)${NC} gemini-2.5-flash         — 快速均衡"
-				echo -e "    ${CYAN}c)${NC} gemini-2.5-flash-lite    — 极速低成本"
-				echo -e "    ${CYAN}d)${NC} gemini-3-flash-preview   — Gemini 3 Flash 预览"
-				echo -e "    ${CYAN}e)${NC} gemini-3-pro-preview     — Gemini 3 Pro 预览"
-				echo -e "    ${CYAN}f)${NC} 手动输入模型名"
-				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="gemini-2.5-pro" ;;
-					b) model_name="gemini-2.5-flash" ;;
-					c) model_name="gemini-2.5-flash-lite" ;;
-					d) model_name="gemini-3-flash-preview" ;;
-					e) model_name="gemini-3-pro-preview" ;;
-					f) prompt_with_default "请输入模型名称" "gemini-2.5-pro" model_name ;;
-					*) model_name="gemini-2.5-pro" ;;
-				esac
+				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
+				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
+				oc_pick_model google "gemini-2.5-pro"
+				model_name="$OC_PICKED_MODEL"
 				register_and_set_model "google/${model_name}"
 				echo -e "  ${GREEN}✅ Google Gemini 已配置，活跃模型: google/${model_name}${NC}"
 			fi
@@ -974,26 +1033,10 @@ configure_model() {
 			if [ -n "$api_key" ]; then
 				auth_set_apikey openrouter "$api_key"
 				echo ""
-				echo -e "  ${CYAN}常用模型 (格式: provider/model):${NC}"
-				echo -e "    ${CYAN}a)${NC} anthropic/claude-sonnet-4    — Claude Sonnet 4 (推荐)"
-				echo -e "    ${CYAN}b)${NC} anthropic/claude-opus-4      — Claude Opus 4"
-				echo -e "    ${CYAN}c)${NC} openai/gpt-5.2              — GPT-5.2"
-				echo -e "    ${CYAN}d)${NC} google/gemini-2.5-pro        — Gemini 2.5 Pro"
-				echo -e "    ${CYAN}e)${NC} deepseek/deepseek-r1         — DeepSeek R1"
-				echo -e "    ${CYAN}f)${NC} meta-llama/llama-4-maverick  — Meta Llama 4"
-				echo -e "    ${CYAN}g)${NC} 手动输入模型名"
-				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="anthropic/claude-sonnet-4" ;;
-					b) model_name="anthropic/claude-opus-4" ;;
-					c) model_name="openai/gpt-5.2" ;;
-					d) model_name="google/gemini-2.5-pro" ;;
-					e) model_name="deepseek/deepseek-r1" ;;
-					f) model_name="meta-llama/llama-4-maverick" ;;
-					g) prompt_with_default "请输入模型名称" "anthropic/claude-sonnet-4" model_name ;;
-					*) model_name="anthropic/claude-sonnet-4" ;;
-				esac
+				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
+				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
+				oc_pick_model openrouter "auto"
+				model_name="$OC_PICKED_MODEL"
 				register_and_set_model "openrouter/${model_name}"
 				echo -e "  ${GREEN}✅ OpenRouter 已配置，活跃模型: openrouter/${model_name}${NC}"
 			fi
@@ -1013,40 +1056,10 @@ configure_model() {
 				echo -e "  ${CYAN}选择默认模型:${NC}"
 				echo ""
 				echo -e "  ${CYAN}── GPT 系列 ──${NC}"
-				echo -e "    ${CYAN}a)${NC}  github-copilot/gpt-4.1           — GPT-4.1 ${GREEN}(推荐)${NC}"
-				echo -e "    ${CYAN}b)${NC}  github-copilot/gpt-4o            — GPT-4o"
-				echo -e "    ${CYAN}c)${NC}  github-copilot/gpt-5             — GPT-5"
-				echo -e "    ${CYAN}d)${NC}  github-copilot/gpt-5-mini        — GPT-5 mini"
-				echo -e "    ${CYAN}e)${NC}  github-copilot/gpt-5.1           — GPT-5.1"
-				echo -e "    ${CYAN}f)${NC}  github-copilot/gpt-5.2           — GPT-5.2"
-				echo -e "    ${CYAN}g)${NC}  github-copilot/gpt-5.2-codex     — GPT-5.2 Codex"
-				echo ""
-				echo -e "  ${CYAN}── Claude 系列 ──${NC}"
-				echo -e "    ${CYAN}h)${NC}  github-copilot/claude-sonnet-4   — Claude Sonnet 4"
-				echo -e "    ${CYAN}i)${NC}  github-copilot/claude-sonnet-4.5 — Claude Sonnet 4.5"
-				echo -e "    ${CYAN}j)${NC}  github-copilot/claude-sonnet-4.6 — Claude Sonnet 4.6"
-				echo ""
-				echo -e "  ${CYAN}── Gemini 系列 ──${NC}"
-				echo -e "    ${CYAN}k)${NC}  github-copilot/gemini-2.5-pro    — Gemini 2.5 Pro"
-				echo ""
-				echo -e "    ${CYAN}m)${NC}  手动输入模型名"
-				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="github-copilot/gpt-4.1" ;;
-					b) model_name="github-copilot/gpt-4o" ;;
-					c) model_name="github-copilot/gpt-5" ;;
-					d) model_name="github-copilot/gpt-5-mini" ;;
-					e) model_name="github-copilot/gpt-5.1" ;;
-					f) model_name="github-copilot/gpt-5.2" ;;
-					g) model_name="github-copilot/gpt-5.2-codex" ;;
-					h) model_name="github-copilot/claude-sonnet-4" ;;
-					i) model_name="github-copilot/claude-sonnet-4.5" ;;
-					j) model_name="github-copilot/claude-sonnet-4.6" ;;
-					k) model_name="github-copilot/gemini-2.5-pro" ;;
-					m) prompt_with_default "请输入模型名称" "github-copilot/gpt-4.1" model_name ;;
-					*) model_name="github-copilot/gpt-4.1" ;;
-				esac
+				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
+				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
+				oc_pick_model github-copilot "gpt-5.5"
+				model_name="github-copilot/$OC_PICKED_MODEL"
 				register_and_set_model "$model_name"
 				echo -e "  ${GREEN}✅ 活跃模型已设置: ${model_name}${NC}"
 			else
@@ -1086,50 +1099,10 @@ configure_model() {
 					if [ -n "$api_key" ]; then
 						echo ""
 						echo -e "  ${CYAN}── 千问商业版 ──${NC}"
-						echo -e "    ${CYAN}a)${NC}  qwen-max             — 千问Max 旗舰模型 (推荐)"
-						echo -e "    ${CYAN}b)${NC}  qwen-plus            — 千问Plus 均衡之选 (已升级Qwen3.5)"
-						echo -e "    ${CYAN}c)${NC}  qwen-flash           — 千问Flash 速度最快 (已升级Qwen3.5)"
-						echo -e "    ${CYAN}d)${NC}  qwen-turbo           — 千问Turbo 经济实惠"
-						echo -e "    ${CYAN}e)${NC}  qwen-long            — 千问Long 超长上下文 (1000万Token)"
-						echo -e "  ${CYAN}── 千问Coder ──${NC}"
-						echo -e "    ${CYAN}f)${NC}  qwen3-coder-plus     — 代码专用旗舰 (100万上下文)"
-						echo -e "    ${CYAN}g)${NC}  qwen3-coder-flash    — 代码专用极速"
-						echo -e "  ${CYAN}── 推理模型 ──${NC}"
-						echo -e "    ${CYAN}h)${NC}  qwq-plus             — QwQ推理模型 (数学/代码强化)"
-						echo -e "  ${CYAN}── 千问开源版 ──${NC}"
-						echo -e "    ${CYAN}i)${NC}  qwen3-235b-a22b      — Qwen3 235B MoE"
-						echo -e "    ${CYAN}j)${NC}  qwen3-32b            — Qwen3 32B"
-						echo -e "    ${CYAN}k)${NC}  qwen3-30b-a3b        — Qwen3 30B MoE"
-						echo -e "  ${CYAN}── 第三方模型 ──${NC}"
-						echo -e "    ${CYAN}l)${NC}  deepseek-r1           — DeepSeek R1 推理"
-						echo -e "    ${CYAN}m)${NC}  deepseek-v3           — DeepSeek V3"
-						echo -e "    ${CYAN}n)${NC}  kimi-k2.5            — Kimi K2.5"
-						echo -e "    ${CYAN}o)${NC}  glm-5                — 智谱 GLM-5"
-						echo -e "    ${CYAN}p)${NC}  MiniMax-M2.5         — MiniMax M2.5"
-						echo -e "  ${CYAN}────────────${NC}"
-						echo -e "    ${CYAN}z)${NC}  手动输入模型名"
-						echo ""
-						prompt_with_default "请选择模型" "a" model_choice
-						case "$model_choice" in
-							a) model_name="qwen-max" ;;
-							b) model_name="qwen-plus" ;;
-							c) model_name="qwen-flash" ;;
-							d) model_name="qwen-turbo" ;;
-							e) model_name="qwen-long" ;;
-							f) model_name="qwen3-coder-plus" ;;
-							g) model_name="qwen3-coder-flash" ;;
-							h) model_name="qwq-plus" ;;
-							i) model_name="qwen3-235b-a22b" ;;
-							j) model_name="qwen3-32b" ;;
-							k) model_name="qwen3-30b-a3b" ;;
-							l) model_name="deepseek-r1" ;;
-							m) model_name="deepseek-v3" ;;
-							n) model_name="kimi-k2.5" ;;
-							o) model_name="glm-5" ;;
-							p) model_name="MiniMax-M2.5" ;;
-							z) prompt_with_default "请输入模型名称" "qwen-max" model_name ;;
-							*) model_name="qwen-max" ;;
-						esac
+						# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
+						# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
+						oc_pick_model qwen "qwen3.5-plus"
+						model_name="$OC_PICKED_MODEL"
 						auth_set_apikey dashscope "$api_key"
 						register_custom_provider dashscope "https://dashscope.aliyuncs.com/compatible-mode/v1" "$api_key" "$model_name" "$model_name"
 						register_and_set_model "dashscope/${model_name}"
@@ -1188,26 +1161,10 @@ configure_model() {
 			prompt_with_default "请输入 xAI API Key" "" api_key
 			if [ -n "$api_key" ]; then
 				echo ""
-				echo -e "  ${CYAN}可用模型:${NC}"
-				echo -e "    ${CYAN}a)${NC} grok-4              — Grok 4 旗舰 (推荐)"
-				echo -e "    ${CYAN}b)${NC} grok-4-fast         — Grok 4 Fast"
-				echo -e "    ${CYAN}c)${NC} grok-3              — Grok 3"
-				echo -e "    ${CYAN}d)${NC} grok-3-fast         — Grok 3 Fast"
-				echo -e "    ${CYAN}e)${NC} grok-3-mini         — Grok 3 Mini"
-				echo -e "    ${CYAN}f)${NC} grok-3-mini-fast    — Grok 3 Mini Fast"
-				echo -e "    ${CYAN}g)${NC} 手动输入模型名"
-				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="grok-4" ;;
-					b) model_name="grok-4-fast" ;;
-					c) model_name="grok-3" ;;
-					d) model_name="grok-3-fast" ;;
-					e) model_name="grok-3-mini" ;;
-					f) model_name="grok-3-mini-fast" ;;
-					g) prompt_with_default "请输入模型名称" "grok-4" model_name ;;
-					*) model_name="grok-4" ;;
-				esac
+				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
+				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
+				oc_pick_model xai "grok-4.3"
+				model_name="$OC_PICKED_MODEL"
 				auth_set_apikey xai "$api_key"
 				register_and_set_model "xai/${model_name}"
 				echo -e "  ${GREEN}✅ xAI Grok 已配置，活跃模型: xai/${model_name}${NC}"
@@ -1230,30 +1187,15 @@ configure_model() {
 				echo -e "  ${CYAN}── 非Pro模型 (支持代金券/免费额度) ──${NC}"
 				echo -e "    ${CYAN}1)${NC} deepseek-ai/DeepSeek-V3       — DeepSeek-V3 (推荐)"
 				echo -e "    ${CYAN}2)${NC} deepseek-ai/DeepSeek-R1       — DeepSeek-R1 (推理模型)"
-				echo -e "    ${CYAN}3)${NC} Qwen/Qwen2.5-72B-Instruct     — 通义千问 2.5 72B"
-				echo -e "    ${CYAN}4)${NC} Qwen/Qwen2.5-7B-Instruct      — 通义千问 2.5 7B"
-				echo -e "    ${CYAN}5)${NC} THUDM/glm-4-9b-chat           — 智谱 GLM-4 9B"
-				echo -e "    ${CYAN}6)${NC} 01-ai/Yi-1.5-34B-Chat-16K     — 零一万物 Yi-1.5 34B"
+				# SiliconFlow 不是 OpenClaw 内置/官方插件 provider (走 OpenAI 兼容接入)，
+				# 无法用上游 catalog 核实模型 ID。原硬编码清单里的 Qwen2.5-7B/72B、
+				# Yi-1.5-34B-Chat-16K、glm-4-9b-chat 均已明显过期，因此不再维护，
+				# 改为引导用户从官方模型广场复制当前 ID。
+				echo -e "  ${CYAN}请从官方模型广场复制模型 ID:${NC}"
+				echo -e "    ${CYAN}https://cloud.siliconflow.cn/models${NC}"
+				echo -e "  ${DIM}格式形如 deepseek-ai/DeepSeek-V3.2；Pro/ 前缀模型仅支持充值余额${NC}"
 				echo ""
-				echo -e "  ${CYAN}── Pro模型 (仅支持充值余额) ──${NC}"
-				echo -e "    ${CYAN}7)${NC} Pro/deepseek-ai/DeepSeek-V3   — DeepSeek-V3 (Pro增强侧)"
-				echo -e "    ${CYAN}8)${NC} Pro/zai-org/GLM-5             — 智谱 GLM-5"
-				echo ""
-				echo -e "    ${CYAN}0)${NC} 手动输入其他任意模型名称"
-				echo ""
-				prompt_with_default "请选择模型 [0-8]" "1" model_choice
-				case "$model_choice" in
-					1) model_name="deepseek-ai/DeepSeek-V3" ;;
-					2) model_name="deepseek-ai/DeepSeek-R1" ;;
-					3) model_name="Qwen/Qwen2.5-72B-Instruct" ;;
-					4) model_name="Qwen/Qwen2.5-7B-Instruct" ;;
-					5) model_name="THUDM/glm-4-9b-chat" ;;
-					6) model_name="01-ai/Yi-1.5-34B-Chat-16K" ;;
-					7) model_name="Pro/deepseek-ai/DeepSeek-V3" ;;
-					8) model_name="Pro/zai-org/GLM-5" ;;
-					0) prompt_with_default "请输入模型详细名称" "deepseek-ai/DeepSeek-V3" model_name ;;
-					*) model_name="deepseek-ai/DeepSeek-V3" ;;
-				esac
+				prompt_with_default "请输入模型 ID" "" model_name
 				auth_set_apikey siliconflow "$api_key"
 				register_custom_provider siliconflow "https://api.siliconflow.cn/v1" "$api_key" "$model_name" "$model_name"
 				register_and_set_model "siliconflow/${model_name}"
@@ -1389,33 +1331,10 @@ configure_model() {
 				echo ""
 				echo -e "  ${CYAN}可用模型 (Coding Plan 套餐内):${NC}"
 				echo -e "  ${CYAN}── 智能推荐 ──${NC}"
-				echo -e "    ${CYAN}a)${NC} tc-code-latest        — 自动路由 (由平台选择最佳模型) ${GREEN}★ 推荐${NC}"
-				echo -e "  ${CYAN}── 推理模型 ──${NC}"
-				echo -e "    ${CYAN}b)${NC} hunyuan-t1            — 混元 T1 深度推理"
-				echo -e "    ${CYAN}c)${NC} hunyuan-2.0-thinking  — 混元 2.0 Thinking"
-				echo -e "  ${CYAN}── 旗舰模型 ──${NC}"
-				echo -e "    ${CYAN}d)${NC} hunyuan-turbos        — 混元 TurboS 旗舰"
-				echo -e "    ${CYAN}e)${NC} hunyuan-2.0-instruct  — 混元 2.0 Instruct"
-				echo -e "  ${CYAN}── 第三方模型 ──${NC}"
-				echo -e "    ${CYAN}f)${NC} glm-5                 — 智谱 GLM-5"
-				echo -e "    ${CYAN}g)${NC} kimi-k2.5             — Moonshot Kimi K2.5"
-				echo -e "    ${CYAN}h)${NC} minimax-m2.5          — MiniMax M2.5"
-				echo -e "  ${CYAN}────────────${NC}"
-				echo -e "    ${CYAN}z)${NC} 手动输入模型名"
-				echo ""
-				prompt_with_default "请选择默认模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="tc-code-latest" ;;
-					b) model_name="hunyuan-t1" ;;
-					c) model_name="hunyuan-2.0-thinking" ;;
-					d) model_name="hunyuan-turbos" ;;
-					e) model_name="hunyuan-2.0-instruct" ;;
-					f) model_name="glm-5" ;;
-					g) model_name="kimi-k2.5" ;;
-					h) model_name="minimax-m2.5" ;;
-					z) prompt_with_default "请输入模型名称" "tc-code-latest" model_name ;;
-					*) model_name="tc-code-latest" ;;
-				esac
+				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
+				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
+				oc_pick_model tencent-tokenhub "hy3"
+				model_name="$OC_PICKED_MODEL"
 				echo ""
 				echo -e "  ${CYAN}正在注册腾讯云 Coding Plan 提供商 (含全部套餐模型)...${NC}"
 				auth_set_apikey lkeap "$api_key"
@@ -1437,21 +1356,10 @@ configure_model() {
 				auth_set_apikey qianfan "$api_key"
 				echo ""
 				echo -e "  ${CYAN}可用模型:${NC}"
-				echo -e "    ${CYAN}a)${NC} ernie-4.0-8k        — 文心一言 4.0 (推荐)"
-				echo -e "    ${CYAN}b)${NC} ernie-3.5-8k        — 文心一言 3.5"
-				echo -e "    ${CYAN}c)${NC} ernie-4.0-turbo-8k  — 文心一言 4.0 Turbo"
-				echo -e "    ${CYAN}d)${NC} ernie-speed-8k      — 文心一言 Speed 极速"
-				echo -e "    ${CYAN}e)${NC} 手动输入模型名"
-				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="ernie-4.0-8k" ;;
-					b) model_name="ernie-3.5-8k" ;;
-					c) model_name="ernie-4.0-turbo-8k" ;;
-					d) model_name="ernie-speed-8k" ;;
-					e) prompt_with_default "请输入模型名称" "ernie-4.0-8k" model_name ;;
-					*) model_name="ernie-4.0-8k" ;;
-				esac
+				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
+				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
+				oc_pick_model qianfan "ernie-5.0-thinking-preview"
+				model_name="$OC_PICKED_MODEL"
 				# 百度千帆使用 OpenAI 兼容接口
 				# 注: OpenClaw v2026.3.28+ 支持 qianfan 原生 provider
 				register_custom_provider qianfan "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop" "$api_key" "$model_name" "$model_name"
@@ -1495,25 +1403,10 @@ configure_model() {
 			if [ -n "$api_key" ]; then
 				echo ""
 				echo -e "  ${CYAN}可用模型:${NC}"
-				echo -e "    ${CYAN}a)${NC} glm-5.1        — GLM-5.1 (推荐)"
-				echo -e "    ${CYAN}b)${NC} glm-5          — GLM-5"
-				echo -e "    ${CYAN}c)${NC} glm-4.7        — GLM-4.7"
-				echo -e "    ${CYAN}d)${NC} glm-4.7-flash  — GLM-4.7 Flash"
-				echo -e "    ${CYAN}e)${NC} glm-4.5        — GLM-4.5"
-				echo -e "    ${CYAN}f)${NC} glm-4.5-flash  — GLM-4.5 Flash (免费额度)"
-				echo -e "    ${CYAN}g)${NC} 手动输入模型名"
-				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
-				case "$model_choice" in
-					a) model_name="glm-5.1" ;;
-					b) model_name="glm-5" ;;
-					c) model_name="glm-4.7" ;;
-					d) model_name="glm-4.7-flash" ;;
-					e) model_name="glm-4.5" ;;
-					f) model_name="glm-4.5-flash" ;;
-					g) prompt_with_default "请输入模型名称" "glm-5.1" model_name ;;
-					*) model_name="glm-5.1" ;;
-				esac
+				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
+				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
+				oc_pick_model zai "glm-5.2"
+				model_name="$OC_PICKED_MODEL"
 				# 智谱 GLM 使用原生 zai provider (OpenClaw 内置支持)
 				auth_set_apikey zai "$api_key"
 				register_custom_provider zai "$zai_base_url" "$api_key" "$model_name" "$model_name" "128000" "4096"
@@ -1544,7 +1437,7 @@ configure_model() {
 			echo ""
 			prompt_with_default "API Base URL (如 https://api.anthropic.com)" "" base_url
 			prompt_with_default "API Key" "" api_key
-			prompt_with_default "模型名称" "claude-sonnet-4-20250514" model_name
+			prompt_with_default "模型名称" "claude-sonnet-5" model_name
 			if [ -n "$base_url" ] && [ -n "$api_key" ] && [ -n "$model_name" ]; then
 				_ACP_URL="${base_url%/}" _ACP_KEY="$api_key" _ACP_MID="$model_name" "$NODE_BIN" -e "
 					const fs=require('fs');
