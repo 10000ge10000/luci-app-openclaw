@@ -834,10 +834,17 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 						'当前版本: ' + d.current_version + '<br><br>' +
 						'<button class="btn cbi-button cbi-button-apply" onclick="ocUpgradeWechatPlugin(\'' + d.latest_version + '\')">立即升级</button>' +
 						'</div>';
-				} else if (d.current_version) {
-					resultEl.innerHTML = '<div class="oc-result-success">✅ 当前已是最新版本: ' + d.current_version + '</div>';
-				} else {
+				} else if (!d.current_version) {
 					resultEl.innerHTML = '<div class="oc-result-error">❌ 插件未安装，请先安装</div>';
+				} else if (d.status !== 'ok' || !d.latest_version) {
+					// 查询失败不能显示"已是最新": 否则真有新版时用户也看不到。
+					// 后端在 latest_version 为空时会返回 status=error 与 message。
+					resultEl.innerHTML = '<div class="oc-result-error">⚠️ 无法确认最新版本' +
+						'<br>当前已安装: ' + d.current_version +
+						(d.message ? '<br><span style="font-size:12px;">' + d.message + '</span>' : '') +
+						'</div>';
+				} else {
+					resultEl.innerHTML = '<div class="oc-result-success">✅ 当前已是最新版本: ' + d.current_version + '</div>';
 				}
 			} catch(e) {
 				document.getElementById('oc-upgrade-progress').style.display = 'none';

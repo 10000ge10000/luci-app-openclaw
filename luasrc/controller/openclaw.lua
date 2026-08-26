@@ -1966,7 +1966,12 @@ function action_wechat_check_upgrade()
 	local sys = require "luci.sys"
 
 	local install_path = get_install_path()
-	local npx_bin = install_path .. "/node/bin/npx"
+	-- view 是 npm 的子命令, 不是 npx 的。
+	-- 历史实现用 npx view，npx 会把 view 当成待执行的包去解析并失败:
+	--   npm error could not determine executable to run
+	-- 该错误被 2>/dev/null 吞掉后 latest_version 恒为空，
+	-- is_newer_version("" , x) 恒为 false —— 升级检测从未真正工作过。
+	local npm_bin = install_path .. "/node/bin/npm"
 	local oc_data = install_path .. "/data"
 
 	-- 获取当前已安装版本
@@ -1980,17 +1985,24 @@ function action_wechat_check_upgrade()
 		current_version = content:match('"version"%s*:%s*"([^"]+)"') or ""
 	end
 
-	-- 检测最新版本 (通过 npm view)
+	-- 检测最新版本 (npm view)
 	local latest_version = ""
+	local check_err = ""
 	local env_prefix = string.format(
 		"HOME=%s PATH=%s/node/bin:%s/global/bin:$PATH",
 		oc_data, install_path, install_path
 	)
+	-- 保留 stderr 以便查询失败时能给出可诊断的提示，而不是静默显示"已是最新"
 	local check_cmd = string.format(
-		"%s %s view @tencent-weixin/openclaw-weixin version 2>/dev/null",
-		env_prefix, npx_bin
+		"%s %s view @tencent-weixin/openclaw-weixin version 2>&1",
+		env_prefix, npm_bin
 	)
-	latest_version = sys.exec(check_cmd):gsub("%s+", "")
+	local raw = sys.exec(check_cmd) or ""
+	-- npm 输出可能夹带告警行，取最后一个形如 x.y.z 的 token
+	latest_version = raw:match("(%d+%.%d+%.%d+[%w%.%-]*)%s*$") or ""
+	if latest_version == "" then
+		check_err = raw:gsub("%s+$", ""):sub(1, 200)
+	end
 
 	local has_upgrade = false
 	if is_newer_version(latest_version, current_version) then
@@ -1998,11 +2010,15 @@ function action_wechat_check_upgrade()
 	end
 
 	http.prepare_content("application/json")
+	-- 查询失败时必须显式区分"已是最新"与"查不到"，
+	-- 否则用户永远看到"已是最新版"而不知道检测其实没跑通。
 	http.write_json({
-		status = "ok",
+		status = (latest_version ~= "") and "ok" or "error",
 		current_version = current_version,
 		latest_version = latest_version,
-		has_upgrade = has_upgrade
+		has_upgrade = has_upgrade,
+		message = (latest_version ~= "") and "" or
+			("无法查询最新版本 (请检查网络或 npm 源): " .. check_err)
 	})
 end
 
