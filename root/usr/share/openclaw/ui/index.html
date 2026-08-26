@@ -131,7 +131,19 @@
   // 从 URL 参数或 hash 获取 PTY token 用于 WebSocket 认证
   const urlParams = new URLSearchParams(location.search);
   const ptyToken = urlParams.get('pty_token') || '';
+  // 取到 token 后立刻从地址栏移除: 否则它会留在浏览器历史、
+  // 以及任何 Referer/截图里。内存中的 ptyToken 仍可用于建连。
+  if (ptyToken && window.history && history.replaceState) {
+    try {
+      const clean = new URL(location.href);
+      clean.searchParams.delete('pty_token');
+      history.replaceState(null, '', clean.pathname + (clean.search || '') + clean.hash);
+    } catch (e) {}
+  }
   const wsUrl = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=' + encodeURIComponent(ptyToken) : '');
+  // 展示用 URL: 隐去 token。真实 wsUrl 只用于建立连接，
+  // 不写入页面文本或 console —— 否则 token 会留在截图、录屏与浏览器历史里。
+  const wsUrlSafe = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=<hidden>' : '');
   let ws = null;
   let connected = false;
   let retryCount = 0;
@@ -142,8 +154,8 @@
 
   console.log('[oc-config] protocol:', location.protocol);
   console.log('[oc-config] host:', location.host, 'port:', location.port);
-  console.log('[oc-config] WebSocket URL:', wsUrl);
-  loadingDebug.textContent = wsUrl;
+  console.log('[oc-config] WebSocket URL:', wsUrlSafe);
+  loadingDebug.textContent = wsUrlSafe;
 
   function connect() {
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
@@ -151,11 +163,11 @@
     if (ws) { try { ws.close(); } catch(e){} ws = null; }
 
     retryCount++;
-    console.log('[oc-config] Connecting to', wsUrl, '(attempt', retryCount + ')');
+    console.log('[oc-config] Connecting to', wsUrlSafe, '(attempt', retryCount + ')');
     loadingMsg.textContent = retryCount > 1
       ? '正在重新连接... (第 ' + retryCount + ' 次)'
       : '正在连接终端...';
-    loadingDebug.textContent = wsUrl;
+    loadingDebug.textContent = wsUrlSafe;
 
     // 先做一个 HTTP 预检确认服务器可达
     fetch('/health').then(function(r) {
