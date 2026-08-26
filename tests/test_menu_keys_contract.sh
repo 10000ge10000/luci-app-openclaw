@@ -94,12 +94,25 @@ for fn in $MENUS; do
 	done
 done
 
-# 回归钉子: 这两个功能曾经挂在不显示的 c/d 上
-awk '/^backup_restore_menu\(\)/,/^\}$/' "$SH_CONFIG" | grep -Eq '^\t\t4\)' \
+# 回归钉子: 这两个功能曾经挂在不显示的 c/d 上。
+#
+# 注意不要在 grep 模式里写 \t: BusyBox grep 会把它当制表符，
+# 而 GNU grep (CI runner) 当作字面字符 t —— 同一个断言在两边结果相反。
+# 这里用 awk 判断行首制表符，避免依赖 grep 的转义方言。
+has_case_label() {
+	awk -v fn="$1" -v key="$2" '
+		index($0, fn "()") == 1 { inside = 1 }
+		inside && /^\}$/ { inside = 0 }
+		inside && $0 == "\t\t" key ")" { found = 1 }
+		END { exit(found ? 0 : 1) }
+	' "$SH_CONFIG"
+}
+
+has_case_label backup_restore_menu 4 \
 	|| fail "backup menu option 4 (list backups) must be reachable"
-awk '/^backup_restore_menu\(\)/,/^\}$/' "$SH_CONFIG" | grep -Eq '^\t\t5\)' \
+has_case_label backup_restore_menu 5 \
 	|| fail "backup menu option 5 (restore from latest) must be reachable"
-awk '/^reset_to_defaults\(\)/,/^\}$/' "$SH_CONFIG" | grep -Eq '^\t\t4\)' \
+has_case_label reset_to_defaults 4 \
 	|| fail "reset menu option 4 (factory reset) must be reachable"
 
 echo "ok"
