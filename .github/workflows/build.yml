@@ -67,13 +67,10 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq lua5.1
-          sh tests/test_openclaw_contracts.sh
-          sh tests/test_node_packaging_contract.sh
-          sh tests/test_openclaw_node.sh
-          sh tests/test_status_contract.sh
-          sh tests/test_luci_console_contract.sh
-          sh tests/test_openclaw_paths.sh
-          lua5.1 tests/test_openclaw_paths.lua
+          # 用 runner 统一执行 tests/ 下全部测试。
+          # 原先逐个列出测试文件，新增测试很容易漏进 CI ——
+          # 护栏建好了却不阻断发布，等于没建。
+          sh tests/run_all.sh
 
       - name: Build .run installer (online)
         run: |
