@@ -16,35 +16,42 @@ LUCI_TITLE:=OpenClaw AI 网关 LuCI 管理插件
 LUCI_DEPENDS:=+luci-compat +luci-base +curl +openssl-util +script-utils +tar +libstdcpp6
 LUCI_PKGARCH:=all
 
-# 优先使用 luci.mk (feeds 模式), 不可用时回退 package.mk
-ifeq ($(wildcard $(TOPDIR)/feeds/luci/luci.mk),)
+# 始终使用 package.mk 并显式定义 Package/...。
+#
+# 历史实现在检测到 feeds/luci/luci.mk 时改走 luci.mk 分支，且不定义
+# Package/...，依赖 luci.mk 由 LUCI_* 变量自动生成。该机制在 OpenWrt 25.x
+# 的 feeds 布局下失效，表现为 (issue #60):
+#   Ignoring feed 'openclaw' - index missing
+# 且 menuconfig 的 LuCI → Applications 下找不到本插件。
+#
+# 显式声明对两种集成方式都有效，不再依赖 luci.mk 的隐式行为:
+#   1. 作为 feeds 源: echo "src-git openclaw ..." >> feeds.conf.default
+#   2. 直接放入 package/ 目录
+include $(INCLUDE_DIR)/package.mk
 
-  include $(INCLUDE_DIR)/package.mk
+define Package/$(PKG_NAME)
+  SECTION:=luci
+  CATEGORY:=LuCI
+  SUBMENU:=3. Applications
+  TITLE:=$(LUCI_TITLE)
+  DEPENDS:=$(LUCI_DEPENDS)
+  PKGARCH:=all
+endef
 
-  define Package/$(PKG_NAME)
-    SECTION:=luci
-    CATEGORY:=LuCI
-    SUBMENU:=3. Applications
-    TITLE:=$(LUCI_TITLE)
-    DEPENDS:=$(LUCI_DEPENDS)
-    PKGARCH:=all
-  endef
-
-  define Package/$(PKG_NAME)/description
-    OpenClaw AI Gateway 的 LuCI 管理插件。
-    支持 12+ AI 模型提供商和 Telegram/Discord 等多种消息渠道。
-  endef
-
-else
-
-  include $(TOPDIR)/feeds/luci/luci.mk
-
-endif
+define Package/$(PKG_NAME)/description
+  OpenClaw AI Gateway 的 LuCI 管理插件。
+  支持 12+ AI 模型提供商和 Telegram/Discord 等多种消息渠道。
+endef
 
 define Package/$(PKG_NAME)/conffiles
 /etc/config/openclaw
 endef
 
+# 安装清单必须与 scripts/build_ipk.sh / scripts/build_run.sh 保持一致。
+# 特别是 /usr/share/openclaw 下的 oc-config-interactive.js 与 oc-menu-engine.js:
+# 缺失时 oc-config.sh 的 can_use_interactive() 会静默回落到功能较少的传统
+# 数字菜单，用户只会觉得"界面和教程不一样"，不会看到任何报错。
+# tests/test_packaging_parity.sh 会校验三条打包路径的清单一致性。
 define Package/$(PKG_NAME)/install
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./root/etc/config/openclaw $(1)/etc/config/openclaw
@@ -77,6 +84,8 @@ define Package/$(PKG_NAME)/install
 	$(INSTALL_DATA) ./VERSION $(1)/usr/share/openclaw/VERSION
 	$(INSTALL_BIN) ./root/usr/share/openclaw/oc-config.sh $(1)/usr/share/openclaw/oc-config.sh
 	$(INSTALL_DATA) ./root/usr/share/openclaw/web-pty.js $(1)/usr/share/openclaw/web-pty.js
+	$(INSTALL_BIN) ./root/usr/share/openclaw/oc-config-interactive.js $(1)/usr/share/openclaw/oc-config-interactive.js
+	$(INSTALL_DATA) ./root/usr/share/openclaw/oc-menu-engine.js $(1)/usr/share/openclaw/oc-menu-engine.js
 	$(INSTALL_DIR) $(1)/usr/share/openclaw/ui
 	$(CP) ./root/usr/share/openclaw/ui/* $(1)/usr/share/openclaw/ui/
 endef
