@@ -1954,8 +1954,22 @@ fs.writeFileSync(p, JSON.stringify(d, null, 2));
 	-- 清理临时文件
 	sys.exec("rm -f /tmp/openclaw-wechat-*.log /tmp/openclaw-wechat-*.pid /tmp/openclaw-wechat-*.exit /tmp/openclaw-wechat-qrcode.txt")
 
+	-- 重启网关让卸载真正生效。
+	--
+	-- 不重启会留下登录态残留: 网关进程仍在内存中持有已加载的微信渠道，
+	-- 会把会话游标(get_updates_buf, 内含账号标识)写回刚被删除的
+	-- .openclaw/openclaw-weixin/accounts/ 目录，于是目录被重新创建。
+	-- 实测卸载后该文件 mtime 与卸载时刻相同 —— 是删除后被重建，而非漏删。
+	--
+	-- action_wechat_login / action_wechat_logout 本来就会重启网关，
+	-- 只有卸载遗漏了这一步，属实现不一致。
+	sys.exec("/etc/init.d/openclaw restart &")
+
+	-- 重启是异步的，等待一小段时间让网关放开插件文件句柄后再清理残留状态目录。
+	sys.exec("(sleep 6; rm -rf " .. shellquote(wechat_state_dir) .. " 2>/dev/null) &")
+
 	http.prepare_content("application/json")
-	http.write_json({ status = "ok", message = "微信插件已卸载" })
+	http.write_json({ status = "ok", message = "微信插件已卸载，网关正在重启" })
 end
 
 -- ═══════════════════════════════════════════
