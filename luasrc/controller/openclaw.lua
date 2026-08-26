@@ -325,7 +325,10 @@ function index()
 	entry({"admin", "services", "openclaw", "status_api"}, call("action_status"), nil).leaf = true
 
 	-- 服务控制 API
-	entry({"admin", "services", "openclaw", "service_ctl"}, call("action_service_ctl"), nil).leaf = true
+	-- 会改状态的端点必须用 post(): LuCI 的 test_post_security() 同时要求
+	-- POST 方法与匹配的 CSRF token，call() 允许 GET 触发，
+	-- 诱导已登录管理员访问一个链接即可启停服务。
+	entry({"admin", "services", "openclaw", "service_ctl"}, post("action_service_ctl"), nil).leaf = true
 
 	-- 安装/升级日志 API (轮询)
 	entry({"admin", "services", "openclaw", "setup_log"}, call("action_setup_log"), nil).leaf = true
@@ -333,20 +336,22 @@ function index()
 	-- 版本检查 API (仅检查插件版本)
 	entry({"admin", "services", "openclaw", "check_update"}, call("action_check_update"), nil).leaf = true
 
-	-- 卸载运行环境 API
-	entry({"admin", "services", "openclaw", "uninstall"}, call("action_uninstall"), nil).leaf = true
+	-- 卸载运行环境 API (破坏性操作，必须 POST + CSRF)
+	entry({"admin", "services", "openclaw", "uninstall"}, post("action_uninstall"), nil).leaf = true
 
-	-- 获取网关 Token API (仅认证用户可访问)
-	entry({"admin", "services", "openclaw", "get_token"}, call("action_get_token"), nil).leaf = true
+	-- 获取网关 Token API (返回凭据，必须 POST + CSRF 防止被第三方页面读取)
+	entry({"admin", "services", "openclaw", "get_token"}, post("action_get_token"), nil).leaf = true
 
-	-- 插件升级 API
-	entry({"admin", "services", "openclaw", "plugin_upgrade"}, call("action_plugin_upgrade"), nil).leaf = true
+	-- 插件升级 API (会下载并执行 .run，必须 POST + CSRF)
+	entry({"admin", "services", "openclaw", "plugin_upgrade"}, post("action_plugin_upgrade"), nil).leaf = true
 
 	-- 插件升级日志 API (轮询)
 	entry({"admin", "services", "openclaw", "plugin_upgrade_log"}, call("action_plugin_upgrade_log"), nil).leaf = true
 
 	-- 配置备份 API (v2026.3.8+: openclaw backup create/verify)
-	entry({"admin", "services", "openclaw", "backup"}, call("action_backup"), nil).leaf = true
+	-- 含 create/restore/delete 等破坏性动作，必须 POST + CSRF。
+	-- 只读的 list 也走同一入口，一并要求 POST 以保持调用方式统一。
+	entry({"admin", "services", "openclaw", "backup"}, post("action_backup"), nil).leaf = true
 
 	-- 系统配置检测 API (安装前检测)
 	entry({"admin", "services", "openclaw", "check_system"}, call("action_check_system"), nil).leaf = true

@@ -28,7 +28,13 @@ act.cfgvalue = function(self, section)
 	local plugin_upgrade_url = luci.dispatcher.build_url("admin", "services", "openclaw", "plugin_upgrade")
 	local plugin_upgrade_log_url = luci.dispatcher.build_url("admin", "services", "openclaw", "plugin_upgrade_log")
 	local check_system_url = luci.dispatcher.build_url("admin", "services", "openclaw", "check_system")
+	-- CSRF token: 会改状态或返回凭据的端点已改为 post()，
+	-- LuCI 的 test_post_security() 要求表单里带上与会话匹配的 token。
+	local csrf_token = luci.dispatcher.context.authtoken or ""
 	local html = {}
+
+	html[#html+1] = '<script type="text/javascript">var ocCsrfToken=' ..
+		string.format('%q', csrf_token) .. ';</script>'
 
 	-- 按钮区域
 	html[#html+1] = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0;">'
@@ -182,7 +188,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'logEl.textContent+="════════════════════════════════════════\\n";'
 	html[#html+1] = 'logEl.textContent+="安装路径: "+install_path+"\\n";'
 	html[#html+1] = 'logEl.textContent+="正在启动安装...\\n";'
-	html[#html+1] = '(new XHR()).get("' .. ctl_url .. '?action=setup&version="+encodeURIComponent(version)+"&install_path="+encodeURIComponent(install_path),null,function(x){'
+	html[#html+1] = '(new XHR()).post("' .. ctl_url .. '?action=setup&version="+encodeURIComponent(version)+"&install_path="+encodeURIComponent(install_path),{token:ocCsrfToken},function(x){'
 	html[#html+1] = 'try{JSON.parse(x.responseText);}catch(e){}'
 	html[#html+1] = 'ocPollSetupLog();'
 	html[#html+1] = '});'
@@ -307,7 +313,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'function ocServiceCtl(action){'
 	html[#html+1] = 'var el=document.getElementById("action-result");'
 	html[#html+1] = 'el.innerHTML="<span style=\\"color:#999\\">⏳ 正在执行...</span>";'
-	html[#html+1] = '(new XHR()).get("' .. ctl_url .. '?action="+action,null,function(x){'
+	html[#html+1] = '(new XHR()).post("' .. ctl_url .. '?action="+action,{token:ocCsrfToken},function(x){'
 	html[#html+1] = 'try{var r=JSON.parse(x.responseText);'
 	html[#html+1] = 'if(r.status==="ok"){el.innerHTML="<span style=\\"color:green\\">✅ "+action+" 已完成</span>";}'
 	html[#html+1] = 'else{el.innerHTML="<span style=\\"color:red\\">❌ "+(r.message||"失败")+"</span>";}'
@@ -407,7 +413,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'titleEl.textContent="📋 插件升级日志";'
 	html[#html+1] = 'statusEl.innerHTML="<span style=\\"color:#7aa2f7;\\">⏳ 插件升级中...</span>";'
 	html[#html+1] = 'resultEl.style.display="none";'
-	html[#html+1] = '(new XHR()).get("' .. plugin_upgrade_url .. '?version="+encodeURIComponent(ver),null,function(x){'
+	html[#html+1] = '(new XHR()).post("' .. plugin_upgrade_url .. '?version="+encodeURIComponent(ver),{token:ocCsrfToken},function(x){'
 	html[#html+1] = 'try{JSON.parse(x.responseText);}catch(e){}'
 	html[#html+1] = 'ocPollPluginUpgradeLog();'
 	html[#html+1] = '});'
@@ -481,7 +487,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var el=document.getElementById("action-result");'
 	html[#html+1] = 'btn.disabled=true;btn.textContent="⏳ 正在卸载...";'
 	html[#html+1] = 'el.innerHTML="<span style=\\"color:#999\\">正在停止服务并清理文件...</span>";'
-	html[#html+1] = '(new XHR()).get("' .. uninstall_url .. '",null,function(x){'
+	html[#html+1] = '(new XHR()).post("' .. uninstall_url .. '",{token:ocCsrfToken},function(x){'
 	html[#html+1] = 'btn.disabled=false;btn.textContent="🗑️ 卸载环境";'
 	html[#html+1] = 'try{var r=JSON.parse(x.responseText);'
 	html[#html+1] = 'if(r.status==="ok"){'
@@ -542,7 +548,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'function ocLoadBackupList(){'
 	html[#html+1] = 'var el=document.getElementById("oc-backup-list");'
 	html[#html+1] = 'el.innerHTML="<div style=\\"color:#7aa2f7;font-size:12px;padding:8px;\\">⏳ 加载备份列表...</div>";'
-	html[#html+1] = '(new XHR()).get("' .. backup_url .. '?action=list",null,function(x){'
+	html[#html+1] = '(new XHR()).post("' .. backup_url .. '?action=list",{token:ocCsrfToken},function(x){'
 	html[#html+1] = 'try{var r=JSON.parse(x.responseText);'
 	html[#html+1] = 'if(r.status==="ok"&&r.backups&&r.backups.length>0){'
 	html[#html+1] = 'var h="<table style=\\"width:100%;border-collapse:collapse;font-size:12px;\\">";'
@@ -584,7 +590,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'btnC.disabled=true;btnF.disabled=true;'
 	html[#html+1] = 'resEl.style.display="block";'
 	html[#html+1] = 'resEl.innerHTML="<div style=\\"color:#7aa2f7;font-size:12px;padding:8px;\\">⏳ 正在创建备份..."+(onlyConfig?"（仅配置）":"（完整备份，可能需要较长时间）")+"</div>";'
-	html[#html+1] = '(new XHR()).get("' .. backup_url .. '?action=create&only_config="+onlyConfig,null,function(x){'
+	html[#html+1] = '(new XHR()).post("' .. backup_url .. '?action=create&only_config="+onlyConfig,{token:ocCsrfToken},function(x){'
 	html[#html+1] = 'btnC.disabled=false;btnF.disabled=false;'
 	html[#html+1] = 'try{var r=JSON.parse(x.responseText);'
 	html[#html+1] = 'if(r.status==="ok"){'
@@ -603,7 +609,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var resEl=document.getElementById("oc-backup-result");'
 	html[#html+1] = 'resEl.style.display="block";'
 	html[#html+1] = 'resEl.innerHTML="<div style=\\"color:#7aa2f7;font-size:12px;padding:8px;\\">⏳ 正在恢复配置...</div>";'
-	html[#html+1] = '(new XHR()).get("' .. backup_url .. '?action=restore&file="+encodeURIComponent(filename),null,function(x){'
+	html[#html+1] = '(new XHR()).post("' .. backup_url .. '?action=restore&file="+encodeURIComponent(filename),{token:ocCsrfToken},function(x){'
 	html[#html+1] = 'try{var r=JSON.parse(x.responseText);'
 	html[#html+1] = 'if(r.status==="ok"){'
 	html[#html+1] = 'resEl.innerHTML="<div style=\\"border:1px solid #c6e9c9;background:#e6f7e9;padding:10px 14px;border-radius:6px;font-size:12px;\\">"+'
@@ -622,7 +628,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var resEl=document.getElementById("oc-backup-result");'
 	html[#html+1] = 'resEl.style.display="block";'
 	html[#html+1] = 'resEl.innerHTML="<div style=\\"color:#7aa2f7;font-size:12px;padding:8px;\\">⏳ 正在删除...</div>";'
-	html[#html+1] = '(new XHR()).get("' .. backup_url .. '?action=delete&file="+encodeURIComponent(filename),null,function(x){'
+	html[#html+1] = '(new XHR()).post("' .. backup_url .. '?action=delete&file="+encodeURIComponent(filename),{token:ocCsrfToken},function(x){'
 	html[#html+1] = 'try{var r=JSON.parse(x.responseText);'
 	html[#html+1] = 'if(r.status==="ok"){'
 	html[#html+1] = 'resEl.innerHTML="<div style=\\"border:1px solid #c6e9c9;background:#e6f7e9;padding:10px 14px;border-radius:6px;font-size:12px;\\">"+'

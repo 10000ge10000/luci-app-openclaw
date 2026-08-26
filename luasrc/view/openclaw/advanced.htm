@@ -47,13 +47,15 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 	var ptyPort = '<%=pty_port%>';
 	var statusUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "status_api")%>';
 	var tokenUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "get_token")%>';
+	// get_token 返回凭据，已改为 post()，需带 CSRF token
+	var ocCsrfToken = '<%=token%>';
 	var container = document.getElementById('oc-terminal-container');
 	var loading = document.getElementById('oc-terminal-loading');
 	var ptyToken = '';
 
 	function checkAndLoadTerminal() {
 		// 先获取 PTY token
-		(new XHR()).get(tokenUrl, null, function(tx) {
+		(new XHR()).post(tokenUrl, { token: ocCsrfToken }, function(tx) {
 			try {
 				var td = JSON.parse(tx.responseText);
 				ptyToken = td.pty_token || '';

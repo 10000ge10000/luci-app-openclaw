@@ -97,6 +97,8 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 	var gwToken = '';
 	var statusUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "status_api")%>';
 	var tokenUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "get_token")%>';
+	// get_token 返回凭据，已改为 post()，需带 CSRF token
+	var ocCsrfToken = '<%=token%>';
 	var container = document.getElementById('oc-console-container');
 	var loading = document.getElementById('oc-console-loading');
 	var addrEl = document.getElementById('oc-console-addr');
@@ -116,7 +118,7 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 		addrEl.textContent = window.location.hostname + ':' + gwPort;
 
 		// 先获取 token，再检查状态
-		(new XHR()).get(tokenUrl, null, function(tx) {
+		(new XHR()).post(tokenUrl, { token: ocCsrfToken }, function(tx) {
 			try {
 				var td = JSON.parse(tx.responseText);
 				gwToken = td.token || '';
