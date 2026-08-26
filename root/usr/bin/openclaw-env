@@ -247,13 +247,24 @@ install_openclaw_cli_wrapper() {
 	# npm 默认生成的 openclaw 可能是指向 openclaw.mjs 的 symlink。
 	# 写 wrapper 前必须先 unlink，否则重定向会顺着 symlink 覆盖真实 CLI 入口。
 	rm -f "$OC_GLOBAL/bin/openclaw" 2>/dev/null || true
+	# 用 : "${VAR:=default}" 而非 export VAR=... 赋默认值。
+	#
+	# 历史实现无条件 export，把 OpenClaw 官方文档承诺的 per-instance 环境变量
+	# (OPENCLAW_HOME / OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH) 全部覆盖，
+	# 连 `openclaw --profile <name>` 也随之失效 —— profile 会解析回同一份
+	# 生产配置。后果是无法做隔离的写入测试，也无法按官方文档跑多实例网关。
+	#
+	# 现改为"仅当调用方未设置时才填默认值"，默认行为不变，但允许覆盖。
 	cat > "$OC_GLOBAL/bin/openclaw" << EOF
 #!/bin/sh
-export HOME="${OC_DATA}"
-export OPENCLAW_HOME="${OC_DATA}"
-export OPENCLAW_STATE_DIR="${OC_DATA}/.openclaw"
-export OPENCLAW_CONFIG_PATH="${OC_DATA}/.openclaw/openclaw.json"
-export NODE_ICU_DATA="${NODE_BASE}/share/icu"
+# luci-app-openclaw 生成的 OpenClaw CLI 包装器。
+# 只在调用方未提供时设置默认值，保留官方的 per-instance / --profile 隔离能力。
+: "\${HOME:=${OC_DATA}}"
+: "\${OPENCLAW_HOME:=${OC_DATA}}"
+: "\${OPENCLAW_STATE_DIR:=\${OPENCLAW_HOME}/.openclaw}"
+: "\${OPENCLAW_CONFIG_PATH:=\${OPENCLAW_STATE_DIR}/openclaw.json}"
+: "\${NODE_ICU_DATA:=${NODE_BASE}/share/icu}"
+export HOME OPENCLAW_HOME OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH NODE_ICU_DATA
 export PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:\$PATH"
 exec "${NODE_BIN}" "${oc_entry}" "\$@"
 EOF
