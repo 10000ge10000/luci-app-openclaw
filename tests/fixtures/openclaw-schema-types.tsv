@@ -1,0 +1,36 @@
+# OpenClaw 官方 schema 关键字段类型基线
+# 来源: openclaw config schema (OpenClaw 2026.7.1-2, 提取日期 2026-08-26)
+# 格式: <key><TAB><type><TAB><enum(逗号分隔, - 表示无枚举)>
+#
+# 说明:
+#   - 本文件是配置写入类型契约的唯一依据，不要凭记忆或历史版本修改。
+#   - 上游升级后需重新执行: openclaw config schema 并重新生成本文件。
+#   - gateway 的 additionalProperties=false，即 gateway.* 不接受未列出的键
+#     (历史上项目误写过 gateway.logLevel，正确键是顶层 logging.level)。
+#   - plugins 的 additionalProperties=false，且不含 installs
+#     (plugins.installs 由插件索引托管，config set 明确拒绝写入)。
+gateway.port	integer	-
+gateway.bind	string	auto,lan,loopback,custom,tailnet
+gateway.mode	string	local,remote
+gateway.customBindHost	string	-
+gateway.auth.mode	string	none,token,password,trusted-proxy
+gateway.auth.token	string	-
+gateway.controlUi.allowInsecureAuth	boolean	-
+gateway.controlUi.dangerouslyDisableDeviceAuth	boolean	-
+gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback	boolean	-
+logging.level	string	silent,fatal,error,warn,info,debug,trace
+acp.dispatch.enabled	boolean	-
+tools.profile	string	minimal,coding,messaging,full
+update.checkOnStart	boolean	-
+models.mode	string	merge,replace
+agents.defaults.model	string|object	-
+plugins.enabled	boolean	-
+channels.<id>.enabled	boolean	-
+channels.<id>.botToken	string	-
+models.providers.<id>.api	string	openai-completions,openai-responses,openai-chatgpt-responses,anthropic-messages,google-generative-ai,google-vertex,github-copilot,bedrock-converse-stream,ollama,azure-openai-responses
+models.providers.<id>.baseUrl	string	-
+models.providers.<id>.apiKey	string	-
+models.providers.<id>.models	array	-
+# 结构性约束 (非字段类型)
+!gateway.additionalProperties	false	-
+!plugins.properties	enabled,allow,deny,load,slots,entries,bundledDiscovery	-
