@@ -285,7 +285,24 @@ OC_SYNC_PORT="$port" OC_SYNC_BIND="$bind" OC_SYNC_TOKEN="$token" OC_SYNC_FILE="$
 const fs=require('fs');
 const f=process.env.OC_SYNC_FILE;
 let d={};
-try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){}
+// 配置存在但解析失败时必须中止，绝不能用 {} 继续往下写。
+// 否则本函数会把空对象连同下面的默认值一起落盘，用户的
+// models.providers(含 apiKey)、channels、plugins 全部丢失。
+// 本函数在每次 start_service 时自动执行，一旦退化影响面比手工操作大得多。
+let raw='';
+try{raw=fs.readFileSync(f,'utf8');}catch(e){raw='';}
+if(raw.trim()!==''){
+	try{
+		d=JSON.parse(raw);
+	}catch(e){
+		console.error('openclaw: 配置文件解析失败，已跳过 UCI 同步以避免覆盖: '+e.message);
+		process.exit(3);
+	}
+	if(d===null||typeof d!=='object'||Array.isArray(d)){
+		console.error('openclaw: 配置根节点不是对象，已跳过 UCI 同步');
+		process.exit(3);
+	}
+}
 if(!d.gateway)d.gateway={};
 d.gateway.port=parseInt(process.env.OC_SYNC_PORT)||18789;
 d.gateway.bind=process.env.OC_SYNC_BIND||'lan';
