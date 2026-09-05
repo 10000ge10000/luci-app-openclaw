@@ -1,17 +1,47 @@
 <%#
- luci-app-openclaw — 终端配置页面 (简洁版)
+ luci-app-openclaw — 终端配置页面 (增强兼容版)
 -%>
 <%+header%>
 
 <%
 local uci = require "luci.model.uci".cursor()
 local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
+local pty_token = uci:get("openclaw", "main", "pty_token") or ""
 %>
 
 <style type="text/css">
 .oc-page-header { margin: 0 0 16px 0; }
 .oc-page-header h2 { font-size: 18px; font-weight: 600; color: #333; margin: 0 0 6px 0; }
 .oc-page-header p { font-size: 13px; color: #666; margin: 0; line-height: 1.6; }
+
+.oc-console-info {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 10px 16px;
+	margin-bottom: 16px;
+	background: #f6f8fa;
+	border: 1px solid #e1e4e8;
+	border-radius: 6px;
+	font-size: 13px;
+	color: #555;
+	flex-wrap: wrap;
+}
+.oc-console-info .label { color: #888; }
+.oc-console-info .value { font-family: monospace; color: #333; font-weight: 500; }
+.oc-console-info .sep { color: #ddd; }
+.oc-console-info .btn-open {
+	margin-left: auto;
+	padding: 4px 14px;
+	background: #4a90d9;
+	color: #fff;
+	border: none;
+	border-radius: 4px;
+	font-size: 12px;
+	cursor: pointer;
+	text-decoration: none;
+}
+.oc-console-info .btn-open:hover { background: #357abd; }
 
 .oc-terminal-wrap {
 	border: 2px solid #2d333b;
@@ -20,17 +50,28 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 	background: #1a1b26;
 }
 
-#oc-terminal-iframe { width: 100%; height: 600px; border: none; display: block; }
+#oc-terminal-iframe { width: 100%; height: 650px; border: none; display: block; }
 
 .oc-terminal-loading {
 	display: flex; align-items: center; justify-content: center;
-	height: 200px; color: #7aa2f7; font-size: 14px; background: #1a1b26;
+	min-height: 250px; color: #7aa2f7; font-size: 14px; background: #1a1b26;
 }
 </style>
 
 <div class="oc-page-header">
-	<h2>⚙️ 终端配置</h2>
-	<p>通过内嵌的交互式终端 (oc-config) 进行 OpenClaw 的完整配置管理。支持 AI 模型配置、消息渠道设置（QQ、Telegram、Discord 等）、健康检查等。</p>
+	<h2>⚙️ 终端配置 (配置管理)</h2>
+	<p>通过交互式终端 (oc-config) 进行 OpenClaw 的完整配置管理。支持 AI 模型配置、消息渠道设置（QQ、Telegram、Discord 等）、健康检查等。</p>
+</div>
+
+<div class="oc-console-info">
+	<span class="label">终端服务：</span>
+	<span class="value" id="oc-term-addr">-</span>
+	<span class="sep">|</span>
+	<span class="label">状态：</span>
+	<span id="oc-term-status-text">检查中...</span>
+	<a id="oc-term-open-btn" class="btn-open" href="#" target="_blank" rel="noopener">
+		↗ 新窗口打开终端
+	</a>
 </div>
 
 <div class="oc-terminal-wrap">
@@ -45,63 +86,75 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 //<![CDATA[
 (function() {
 	var ptyPort = '<%=pty_port%>';
+	var ptyToken = '<%=pty_token%>';
 	var statusUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "status_api")%>';
-	var tokenUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "get_token")%>';
-	// get_token 返回凭据，已改为 post()，需带 CSRF token
-	var ocCsrfToken = '<%=token%>';
 	var container = document.getElementById('oc-terminal-container');
 	var loading = document.getElementById('oc-terminal-loading');
-	var ptyToken = '';
+	var addrEl = document.getElementById('oc-term-addr');
+	var statusTextEl = document.getElementById('oc-term-status-text');
+	var openBtn = document.getElementById('oc-term-open-btn');
+
+	var host = window.location.hostname;
+	addrEl.textContent = host + ':' + ptyPort;
+
+	var targetUrl = 'http://' + host + ':' + ptyPort + '/';
+	if (ptyToken) {
+		targetUrl += '?pty_token=' + encodeURIComponent(ptyToken);
+	}
+	openBtn.href = targetUrl;
 
 	function checkAndLoadTerminal() {
-		// 先获取 PTY token
-		(new XHR()).post(tokenUrl, { token: ocCsrfToken }, function(tx) {
+		(new XHR()).get(statusUrl, null, function(x) {
 			try {
-				var td = JSON.parse(tx.responseText);
-				ptyToken = td.pty_token || '';
-			} catch(e) {}
-
-			(new XHR()).get(statusUrl, null, function(x) {
-				try {
-					var d = JSON.parse(x.responseText);
-					if (d.pty_running) {
-						showIframe();
-					} else {
-						loading.innerHTML = '❌ 配置终端未运行<br/>' +
-							'<span style="font-size:12px;color:#999;">请先在「基本设置」中启用并启动服务。</span>';
-					}
-				} catch(e) {
-					loading.textContent = '检查终端状态失败';
+				var d = JSON.parse(x.responseText);
+				if (d.pty_running) {
+					statusTextEl.innerHTML = '<span style="color:#1a7f37;">● 终端服务运行中</span>';
+					loadTerminal();
+				} else {
+					statusTextEl.innerHTML = '<span style="color:#cf222e;">● 终端未运行</span>';
+					loading.innerHTML = '<div style="text-align:center;padding:24px;color:#cf222e;">❌ 配置终端未运行<br/>' +
+						'<span style="font-size:12px;color:#999;">请先在「基本设置」中启用并启动服务。</span></div>';
 				}
-			});
+			} catch(e) {
+				statusTextEl.textContent = '检测完成';
+				loadTerminal();
+			}
 		});
 	}
 
-	function showIframe() {
-		var proto = window.location.protocol;
-		var host = window.location.hostname;
-		var url = proto + '//' + host + ':' + ptyPort + '/';
-		if (ptyToken) url += '?pty_token=' + encodeURIComponent(ptyToken);
+	function loadTerminal() {
+		var isHttps = (window.location.protocol === 'https:');
+		if (isHttps) {
+			loading.innerHTML = '<div style="text-align:center;padding:40px 20px;color:#abb2bf;">' +
+				'<div style="font-size:40px;margin-bottom:12px;">↗</div>' +
+				'<div style="font-size:16px;margin-bottom:8px;color:#e5c07b;font-weight:600;">由于浏览器安全策略限制，无法在 HTTPS 页面中直接内嵌 HTTP 终端</div>' +
+				'<div style="font-size:13px;color:#828997;max-width:560px;margin:0 auto 20px;line-height:1.6;">' +
+				'终端服务已在端口 ' + ptyPort + ' 正常就绪。请点击下方按钮直接在新窗口打开交互式终端，已自动绑定认证 Token。' +
+				'</div>' +
+				'<a href="' + targetUrl + '" target="_blank" rel="noopener" style="display:inline-block;padding:9px 26px;background:#4a90d9;color:#fff;border-radius:6px;text-decoration:none;font-weight:500;font-size:14px;box-shadow:0 2px 6px rgba(0,0,0,0.3);">' +
+				'立即在新窗口打开终端' +
+				'</a>' +
+				'<div style="margin-top:20px;font-size:12px;color:#5c6370;">' +
+				'小贴士：您也可以通过 HTTP (http://' + host + ') 登录路由器后台，即可直接在此区域内嵌操作。' +
+				'</div>' +
+				'</div>';
+			return;
+		}
 
 		loading.style.display = 'none';
-
 		var iframe = document.createElement('iframe');
 		iframe.id = 'oc-terminal-iframe';
-		iframe.src = url;
+		iframe.src = targetUrl;
 		iframe.setAttribute('allowfullscreen', 'true');
 		iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
-		// 防止 LuCI 父页面键盘事件干扰 iframe 内的终端输入
 		iframe.addEventListener('load', function() {
 			try { iframe.contentWindow.focus(); } catch(e) {}
 		});
 		container.appendChild(iframe);
-		// 点击 iframe 区域时确保 focus 在 iframe 内
 		container.addEventListener('click', function() {
 			try { iframe.contentWindow.focus(); } catch(e) {}
 		});
 
-		// 当 iframe 获得焦点时，阻止 LuCI 父页面的键盘事件处理
-		// 防止按键（如 Enter/数字键）触发 LuCI 的导航或表单提交
 		var termWrap = document.querySelector('.oc-terminal-wrap');
 		if (termWrap) {
 			termWrap.addEventListener('keydown', function(e) { e.stopPropagation(); }, true);
@@ -109,8 +162,6 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 			termWrap.addEventListener('keyup', function(e) { e.stopPropagation(); }, true);
 		}
 
-		// 停止 LuCI 的 XHR.poll (如果存在)，防止 session 超时检测导致页面跳转
-		// LuCI 的 footer.htm 可能启动了 uci.changes 轮询
 		if (window.XHR && XHR.halt) {
 			try { XHR.halt(); } catch(e) {}
 		}
