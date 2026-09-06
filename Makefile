@@ -67,6 +67,7 @@ define Package/$(PKG_NAME)/install
 	$(INSTALL_BIN) ./root/usr/libexec/openclaw-paths.sh $(1)/usr/libexec/openclaw-paths.sh
 	$(INSTALL_BIN) ./root/usr/libexec/openclaw-node.sh $(1)/usr/libexec/openclaw-node.sh
 	$(INSTALL_BIN) ./root/usr/libexec/openclaw-permissions.sh $(1)/usr/libexec/openclaw-permissions.sh
+	$(INSTALL_BIN) ./root/usr/libexec/openclaw-upgrade-state.sh $(1)/usr/libexec/openclaw-upgrade-state.sh
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/controller
 	$(INSTALL_DATA) ./luasrc/controller/openclaw.lua $(1)/usr/lib/lua/luci/controller/openclaw.lua
 	$(INSTALL_DIR) $(1)/usr/lib/lua/openclaw
@@ -86,6 +87,7 @@ define Package/$(PKG_NAME)/install
 	$(INSTALL_DATA) ./root/usr/share/openclaw/web-pty.js $(1)/usr/share/openclaw/web-pty.js
 	$(INSTALL_BIN) ./root/usr/share/openclaw/oc-config-interactive.js $(1)/usr/share/openclaw/oc-config-interactive.js
 	$(INSTALL_DATA) ./root/usr/share/openclaw/oc-menu-engine.js $(1)/usr/share/openclaw/oc-menu-engine.js
+	$(INSTALL_BIN) ./root/usr/share/openclaw/openclaw-package-contract.js $(1)/usr/share/openclaw/openclaw-package-contract.js
 	$(INSTALL_DATA) ./root/usr/share/openclaw/model-presets.json $(1)/usr/share/openclaw/model-presets.json
 	$(INSTALL_DIR) $(1)/usr/share/openclaw/ui
 	$(CP) ./root/usr/share/openclaw/ui/* $(1)/usr/share/openclaw/ui/

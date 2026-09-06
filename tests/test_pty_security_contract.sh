@@ -75,4 +75,12 @@ grep -Fq 'history.replaceState' "$PAGE" \
 grep -Fq "searchParams.delete('pty_token')" "$PAGE" \
 	|| fail "page must remove the pty_token query parameter"
 
+# ── 重启会话与断线重连保护 ──
+grep -Fq 'restartSession' "$PAGE" \
+	|| fail "page must define restartSession to retain auth tokens"
+grep -Fq 'ws = null;' "$PAGE" \
+	|| fail "page must reset ws reference on close to avoid stale socket state"
+grep -Fq 'oc_pty_token' "$PTY" \
+	|| fail "web-pty.js must support oc_pty_token cookie fallback for seamless page reloads"
+
 echo "ok"

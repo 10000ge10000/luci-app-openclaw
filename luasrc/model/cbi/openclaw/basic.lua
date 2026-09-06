@@ -54,16 +54,18 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '<h3 style="margin:0 0 16px 0;font-size:16px;color:#333;">📦 选择安装版本</h3>'
 	html[#html+1] = '<div style="display:flex;flex-direction:column;gap:12px;">'
 	-- 稳定版选项
+	local default_tested_ver = luci.sys.exec("sed -n 's/^OC_TESTED_VERSION=\"\\(.*\\)\"/\\1/p' /usr/bin/openclaw-env 2>/dev/null"):gsub("%s+", "")
+	if default_tested_ver == "" then default_tested_ver = "2026.9.1" end
 	html[#html+1] = '<label style="display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border:2px solid #4a90d9;border-radius:8px;cursor:pointer;background:#f0f7ff;" id="oc-opt-stable">'
 	html[#html+1] = '<input type="radio" name="oc-ver-choice" value="stable" checked style="margin-top:2px;">'
 	html[#html+1] = '<div><strong style="color:#333;">✅ 稳定版 (推荐)</strong>'
-	html[#html+1] = '<div style="font-size:12px;color:#666;margin-top:4px;">版本 v' .. luci.sys.exec("sed -n 's/^OC_TESTED_VERSION=\"\\(.*\\)\"/\\1/p' /usr/bin/openclaw-env 2>/dev/null"):gsub("%s+", "") .. '，已经过完整测试，兼容性良好。</div>'
+	html[#html+1] = '<div style="font-size:12px;color:#666;margin-top:4px;">版本 v' .. default_tested_ver .. ' (已验证版)，已经过完整测试，兼容性良好。</div>'
 	html[#html+1] = '</div></label>'
 	-- 最新版选项
 	html[#html+1] = '<label style="display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border:2px solid #e0e0e0;border-radius:8px;cursor:pointer;background:#fff;" id="oc-opt-latest">'
 	html[#html+1] = '<input type="radio" name="oc-ver-choice" value="latest" style="margin-top:2px;">'
-	html[#html+1] = '<div><strong style="color:#333;">🆕 最新版</strong>'
-	html[#html+1] = '<div style="font-size:12px;color:#e36209;margin-top:4px;">⚠️ 安装 npm 上的最新发布版本，可能存在未经验证的兼容性问题。</div>'
+	html[#html+1] = '<div><strong style="color:#333;">🆕 最新版 (未经验证)</strong>'
+	html[#html+1] = '<div style="font-size:12px;color:#e36209;margin-top:4px;">⚠️ 安装 npm 上的最新发布版本 (未经验证)，可能存在未经验证的兼容性问题。</div>'
 	html[#html+1] = '</div></label>'
 	html[#html+1] = '</div>'
 	-- 自定义安装路径

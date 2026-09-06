@@ -11,11 +11,10 @@ fail() {
 }
 
 grep -Fq "var url = 'http://' + host + ':' + gwPort + '/'" "$CONSOLE_VIEW" || fail "console view should force HTTP gateway URL"
-grep -Fq '请点击上方「新窗口打开」访问控制台。' "$CONSOLE_VIEW" || fail "console view should direct users to a new window"
-
-if grep -Fq "document.createElement('iframe')" "$CONSOLE_VIEW"; then
-	fail "console view should not embed the OpenClaw UI in an iframe"
-fi
+grep -Fq "document.createElement('iframe')" "$CONSOLE_VIEW" || fail "console view should embed the OpenClaw UI in an iframe"
+grep -Fq "oc-console-iframe" "$CONSOLE_VIEW" || fail "console view should define oc-console-iframe"
+grep -Fq "allowfullscreen" "$CONSOLE_VIEW" || fail "console view should support fullscreen"
+grep -Fq "microphone" "$CONSOLE_VIEW" || fail "console view should allow media permissions"
 
 if grep -Fq 'window.location.protocol' "$CONSOLE_VIEW"; then
 	fail "console view should not reuse the LuCI page protocol for the gateway URL"

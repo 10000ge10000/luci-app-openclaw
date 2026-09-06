@@ -27,9 +27,14 @@
 
 | 组件 | 默认版本 | 说明 |
 |------|----------|------|
-| OpenClaw | `2026.7.1-2` | npm `latest` 稳定标签 |
-| Node.js | `22.23.0` | Alpine musl LTS 包；OpenClaw 2026.7.x 要求 `>=22.22.3`，安装后会按 `engines.node` 做强校验 |
-| 微信插件 | `@tencent-weixin/openclaw-weixin@2.4.6` | CLI 使用 `@tencent-weixin/openclaw-weixin-cli@2.1.4` |
+| OpenClaw | `2026.9.1` | npm `latest` 稳定标签（Phase 0 锁定已测试版本；安装时阻断未知脚本，仅运行已校验 lifecycle） |
+| Node.js | `22.23.2` | x86_64 与 aarch64 均优先从 unofficial-builds 及镜像源获取，自托管资产作为兜底；严格验证 `engines.node`，失败关闭 |
+| 微信插件 | `@tencent-weixin/openclaw-weixin@2.4.8` | CLI 使用 `@tencent-weixin/openclaw-weixin-cli@2.1.4` |
+
+### 运行时与架构说明
+
+- **x86_64 / aarch64 (musl)**：Node.js v22.23.2 预编译运行时优先通过上游 [unofficial-builds](https://unofficial-builds.nodejs.org/) 及 npmmirror 镜像源获取，安装时自动下载并强校验 `SHASUMS256.txt`。同时在 `.github/workflows/build-node-musl.yml` 中保留基于 Alpine LTS 的自托管构建打包流程作为兜底源。
+
 
 ## 📦 安装
 

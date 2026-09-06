@@ -1,0 +1,17 @@
+{
+  "name": "openclaw",
+  "version": "2026.9.1",
+  "bin": {
+    "openclaw": "openclaw.mjs"
+  },
+  "scripts": {
+    "preinstall": "node scripts/preinstall-package-manager-warning.mjs",
+    "postinstall": "node scripts/postinstall-bundled-plugins.mjs"
+  },
+  "optionalDependencies": {
+    "sqlite-vec": "0.1.9"
+  },
+  "engines": {
+    "node": ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"
+  }
+}

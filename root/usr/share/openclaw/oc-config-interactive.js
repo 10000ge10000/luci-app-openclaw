@@ -15,7 +15,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const { spawn, execSync, execFileSync } = require('child_process');
+const { spawn, spawnSync, execSync, execFileSync } = require('child_process');
 const menu = require('./oc-menu-engine');
 const { C, select, input, confirm, spinner, resetRenderCount } = menu;
 
@@ -51,36 +51,105 @@ const MODEL_DISCOVERY_TIMEOUT_MS = 6000;
 
 /**
  * 执行命令并返回结果
+ * options.interactive: 若为 true，使用 stdio: 'inherit' 直通终端（用于向导/全屏交互），保证 child.stdout.isTTY 为 true
+ * options.capture: 若为 true，静默收集 stdout/stderr 并返回，不输出到终端
  */
 function runCommand(cmd, args = [], options = {}) {
   return new Promise((resolve, reject) => {
+    const isInteractive = options.interactive === true || options.stdio === 'inherit';
+    const isCapture = options.capture === true;
+
+    // 交互模式下使用同步直通 (spawnSync inherit)，使子进程独占控制终端 TTY，
+    // 避免父子进程竞争读取 stdin，执行完毕后排空残留按键并恢复终端模式
+    if (isInteractive) {
+      menu.setRawMode(false);
+      process.stdout.write(C.show);
+      if (process.stdin.pause) {
+        try { process.stdin.pause(); } catch {}
+      }
+      try {
+        const res = spawnSync(cmd, args, {
+          stdio: 'inherit',
+          shell: false,
+          cwd: options.cwd,
+          env: { ...process.env, ...options.env },
+        });
+        try {
+          if (process.stdin.isTTY) process.stdin.setRawMode(false);
+          while (process.stdin.read() !== null) {}
+        } catch {}
+        if (process.stdin.resume) {
+          try { process.stdin.resume(); } catch {}
+        }
+        if (res.error) {
+          return reject(res.error);
+        }
+        if (res.status === 0) {
+          return resolve({ stdout: '', stderr: '', code: 0 });
+        } else {
+          return reject(new Error(`Command failed with code ${res.status}: ${res.signal || ''}`));
+        }
+      } catch (err) {
+        return reject(err);
+      }
+    }
+
     const child = spawn(cmd, args, {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      shell: true,
+      stdio: isCapture ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
+      shell: !options.noShell,
       env: { ...process.env, ...options.env },
     });
 
     let stdout = '';
     let stderr = '';
 
-    child.stdout.on('data', (data) => {
-      stdout += data;
-      process.stdout.write(data);
-    });
+    if (child.stdout) {
+      child.stdout.on('data', (data) => {
+        stdout += data;
+        if (!isCapture) process.stdout.write(data);
+      });
+    }
 
-    child.stderr.on('data', (data) => {
-      stderr += data;
-      process.stderr.write(data);
-    });
+    if (child.stderr) {
+      child.stderr.on('data', (data) => {
+        stderr += data;
+        if (!isCapture) process.stderr.write(data);
+      });
+    }
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       if (code === 0) {
         resolve({ stdout, stderr, code });
       } else {
-        reject(new Error(`Command failed with code ${code}: ${stderr}`));
+        reject(new Error(`Command failed with code ${code ?? signal}: ${stderr}`));
       }
     });
+
+    child.on('error', (err) => {
+      reject(err);
+    });
   });
+}
+
+/**
+ * 清理过时插件配置并启用有效认证插件 (与 oc-config.sh 的 enable_auth_plugins 对应)
+ */
+function enableAuthPlugins() {
+  if (!fs.existsSync(CONFIG_FILE)) return;
+  try {
+    const config = readConfig();
+    if (!config.plugins) config.plugins = {};
+    if (!config.plugins.entries) config.plugins.entries = {};
+    const e = config.plugins.entries;
+    ['copilot-proxy'].forEach(p => {
+      if (!e[p]) e[p] = {};
+      e[p].enabled = true;
+    });
+    delete e['qwen-portal-auth'];
+    delete e['google-gemini-cli-auth'];
+    delete e['minimax-portal-auth'];
+    writeConfig(config);
+  } catch {}
 }
 
 /**
@@ -91,7 +160,9 @@ function fixStatePermissions() {
     execFileSync(PERMISSIONS_HELPER, ['fix-state', OC_STATE_DIR], { stdio: 'ignore', timeout: 10000 });
   } catch {
     try {
-      execSync(`find "${OC_STATE_DIR}" -user root ! -path "*/extensions*" ! -path "*/archived-extensions*" ! -path "*/npm/projects*" -exec chown openclaw:openclaw {} + 2>/dev/null || true`, { stdio: 'ignore' });
+      execSync(`find "${OC_STATE_DIR}" -user root ! -path "*/archived-extensions*" ! -path "*/npm/projects*" -exec chown openclaw:openclaw {} + 2>/dev/null || true`, { stdio: 'ignore' });
+      execSync(`[ -d "${OC_STATE_DIR}/extensions" ] && chown -R openclaw:openclaw "${OC_STATE_DIR}/extensions" && chmod -R 755 "${OC_STATE_DIR}/extensions" 2>/dev/null || true`, { stdio: 'ignore' });
+      execSync(`[ -d "${OC_STATE_DIR}/archived-extensions" ] && chown -R root:root "${OC_STATE_DIR}/archived-extensions" && chmod -R 755 "${OC_STATE_DIR}/archived-extensions" 2>/dev/null || true`, { stdio: 'ignore' });
     } catch {}
   }
 }
@@ -303,18 +374,38 @@ function findOpenClawEntry() {
 
 /**
  * 执行 OpenClaw CLI 命令 (对应 oc_cmd)
+ * 交互式向导（configure / models auth login 等）以 interactive: true 运行，直通 stdio 保证 TTY 正常交互；
+ * 命令执行后在 finally 中自动修复状态文件属主。
  */
 async function ocCmd(...args) {
   const ocEntry = findOpenClawEntry();
   if (!ocEntry) throw new Error('OpenClaw 未安装');
-  return runCommand(NODE_BIN, [ocEntry, ...args], {
-    env: {
-      OPENCLAW_HOME: OC_DATA,
-      OPENCLAW_CONFIG_PATH: CONFIG_FILE,
-      OPENCLAW_STATE_DIR: OC_STATE_DIR,
-      HOME: OC_DATA,
-    }
-  });
+
+  const isJson = args.includes('--json');
+  const isInteractive = !isJson && (
+    args[0] === 'configure' ||
+    (args[0] === 'models' && args[1] === 'auth')
+  );
+
+  try {
+    const res = await runCommand(NODE_BIN, [ocEntry, ...args], {
+      interactive: isInteractive,
+      capture: isJson,
+      env: {
+        OPENCLAW_HOME: OC_DATA,
+        OPENCLAW_CONFIG_PATH: CONFIG_FILE,
+        OPENCLAW_STATE_DIR: OC_STATE_DIR,
+        HOME: OC_DATA,
+      }
+    });
+    return res;
+  } finally {
+    try {
+      execSync(`chown openclaw:openclaw "${CONFIG_FILE}" 2>/dev/null || true`, { stdio: 'ignore' });
+      execSync(`chown openclaw:openclaw "${CONFIG_FILE}.bak" 2>/dev/null || true`, { stdio: 'ignore' });
+      fixStatePermissions();
+    } catch {}
+  }
 }
 
 /**
@@ -743,12 +834,13 @@ async function showMainMenu() {
       { key: '4', label: '健康检查与状态', desc: '', value: 'health' },
       { key: '5', label: '查看日志', desc: '', value: 'logs' },
       { key: '6', label: '重启 Gateway', desc: '', value: 'restart' },
+      { key: '7', label: '设备配对管理', desc: '审批 Control UI 浏览器配对', value: 'devices' },
 
       { label: `${C.dim}━━━ 高级选项 ━━━${C.reset}`, disabled: true },
-      { key: '7', label: '高级配置', desc: '', value: 'advanced' },
-      { key: '8', label: '重置配置', desc: '', value: 'reset' },
-      { key: '9', label: '显示当前配置概览', desc: '', value: 'show-config' },
-      { key: '10', label: '备份/还原配置', desc: '', value: 'backup' },
+      { key: '8', label: '高级配置', desc: '', value: 'advanced' },
+      { key: '9', label: '重置配置', desc: '', value: 'reset' },
+      { key: '10', label: '显示当前配置概览', desc: '', value: 'show-config' },
+      { key: '11', label: '备份/还原配置', desc: '', value: 'backup' },
 
       { label: '', disabled: true },
       { key: '0', label: '退出', desc: '', value: 'quit' },
@@ -765,25 +857,25 @@ async function showMainMenu() {
 async function showModelMenu() {
   const result = await select({
     title: '配置 AI 模型和提供商',
-    showSearch: true,
+    showSearch: false,
     items: [
       { label: `${C.green}${C.bold}── 推荐 ──${C.reset}`, disabled: true },
       { key: 'w', label: '官方完整模型配置向导', desc: `${C.green}(推荐，支持所有提供商)${C.reset}`, value: 'wizard' },
 
       { label: `${C.bold}── 国外模型提供商 ──${C.reset}`, disabled: true },
-      { key: 'a', label: 'OpenAI', desc: 'GPT-5.2, GPT-5 mini, GPT-4.1', value: 'openai' },
-      { key: 'b', label: 'Anthropic', desc: 'Claude Sonnet 4, Opus 4, Haiku', value: 'anthropic' },
-      { key: 'c', label: 'Google Gemini', desc: 'Gemini 2.5 Pro/Flash, Gemini 3', value: 'google' },
+      { key: 'a', label: 'OpenAI', desc: '', value: 'openai' },
+      { key: 'b', label: 'Anthropic', desc: '', value: 'anthropic' },
+      { key: 'c', label: 'Google Gemini', desc: '', value: 'google' },
       { key: 'd', label: 'OpenRouter', desc: '聚合多家模型', value: 'openrouter' },
       { key: 'e', label: 'GitHub Copilot', desc: '需要 Copilot 订阅', value: 'copilot' },
-      { key: 'f', label: 'xAI Grok', desc: 'Grok-4/3', value: 'xai' },
+      { key: 'f', label: 'xAI Grok', desc: '', value: 'xai' },
 
       { label: `${C.bold}── 国内模型提供商 ──${C.reset}`, disabled: true },
-      { key: 'g', label: '阿里云通义千问 Qwen', desc: 'Portal/API/Coding Plan', value: 'qwen' },
+      { key: 'g', label: '阿里云通义千问 Qwen', desc: '', value: 'qwen' },
       { key: 'h', label: '硅基流动 SiliconFlow', desc: '', value: 'siliconflow' },
-      { key: 'i', label: '腾讯云 Coding Plan', desc: 'HY T1/TurboS/GLM-5/Kimi', value: 'tencent' },
-      { key: 'j', label: '百度千帆', desc: 'ERNIE-4.0, ERNIE-3.5', value: 'baidu' },
-      { key: 'k', label: '智谱 GLM / Z.AI', desc: 'GLM-5.1, GLM-5, GLM-4.7', value: 'zhipu' },
+      { key: 'i', label: '腾讯云 Coding Plan', desc: '', value: 'tencent' },
+      { key: 'j', label: '百度千帆', desc: '', value: 'baidu' },
+      { key: 'k', label: '智谱 GLM / Z.AI', desc: '', value: 'zhipu' },
 
       { label: `${C.bold}── 本地模型 / 自定义 API ──${C.reset}`, disabled: true },
       { key: 'l', label: 'Ollama', desc: '本地模型，无需 API Key', value: 'ollama' },
@@ -853,6 +945,7 @@ async function showAdvancedMenu() {
       { key: '8', label: '编辑配置文件', desc: 'vi / nano', value: 'edit' },
       { key: '9', label: '导出配置备份', desc: '', value: 'backup' },
       { key: '10', label: '导入配置', desc: '', value: 'import' },
+      { key: '11', label: '设备配对管理', desc: '审批 Control UI 配对', value: 'devices' },
       { label: '', disabled: true },
       { key: '0', label: '返回', desc: '', value: 'back' },
     ],
@@ -1041,10 +1134,14 @@ async function configureQwen() {
   if (modeChoice.value === 'portal') {
     console.log(`\n${C.cyan}启动 Qwen OAuth 授权...${C.reset}\n`);
     try {
+      enableAuthPlugins();
       await ocCmd('models', 'auth', 'login', '--provider', 'qwen-portal', '--set-default');
-    } catch {}
-    console.log(`\n${C.yellow}OAuth 授权已退出${C.reset}\n`);
-    return true;
+      console.log(`\n${C.green}✅ Qwen OAuth 授权完成${C.reset}\n`);
+      return true;
+    } catch {
+      console.log(`\n${C.yellow}OAuth 授权已退出${C.reset}\n`);
+      return false;
+    }
   }
 
   if (modeChoice.value === 'bailian') {
@@ -1452,9 +1549,12 @@ async function launchWizard() {
   console.log(`\n${C.cyan}启动官方完整模型配置向导...${C.reset}\n`);
   console.log(`${C.yellow}提示: ↑↓ 移动, Tab/空格 选中, 回车 确认${C.reset}\n`);
   try {
+    enableAuthPlugins();
     await ocCmd('configure', '--section', 'model');
+    return true;
   } catch (e) {
     console.log(`${C.yellow}配置向导已退出${C.reset}\n`);
+    return false;
   }
 }
 
@@ -1471,7 +1571,11 @@ async function handleModelConfig() {
     let configured = false;
 
     switch (choice.value) {
-      case 'wizard': await launchWizard(); break;
+      case 'wizard': {
+        const ok = await launchWizard();
+        if (ok) await askRestart();
+        break;
+      }
       case 'openai': configured = await configureOpenAI(); break;
       case 'anthropic': configured = await configureAnthropic(); break;
       case 'google': configured = await configureGoogle(); break;
@@ -1656,7 +1760,12 @@ async function handleChannels() {
 
         console.log(`\n${C.cyan}正在启动飞书安装向导...${C.reset}\n`);
         try {
-          await runCommand('npx', ['-y', '@larksuite/openclaw-lark-tools', 'install'], { env: { HOME: OC_DATA } });
+          const npxBin = fs.existsSync(`${NODE_BASE}/bin/npx`) ? `${NODE_BASE}/bin/npx` : 'npx';
+          await runCommand(npxBin, ['-y', '@larksuite/openclaw-lark-tools', 'install'], {
+            interactive: true,
+            cwd: OC_DATA,
+            env: { HOME: OC_DATA, PATH: `${NODE_BASE}/bin:${process.env.PATH || ''}` }
+          });
         } catch (e) {
           console.log(`${C.yellow}安装向导已退出${C.reset}\n`);
         }
@@ -1786,10 +1895,18 @@ async function handleChannels() {
         break;
       }
       case 'wizard': {
+        resetRenderCount();
         console.log(`\n${C.cyan}启动官方渠道配置向导...${C.reset}\n`);
+        console.log(`${C.yellow}提示: ↑↓ 移动, Tab/空格 选中, 回车 确认${C.reset}\n`);
+        let ok = false;
         try {
+          enableAuthPlugins();
           await ocCmd('configure', '--section', 'channels');
-        } catch (e) {}
+          ok = true;
+        } catch (e) {
+          console.log(`${C.yellow}配置向导已退出${C.reset}\n`);
+        }
+        if (ok) await askRestart();
         break;
       }
     }
@@ -1889,6 +2006,170 @@ async function handleShowConfig() {
   console.log(`${C.green}└──────────────────────────────────────────────────────────┘${C.reset}\n`);
 
   await input({ prompt: '按回车继续', defaultValue: '' });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 设备配对管理 (Control UI / 浏览器配对审批)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function manageDevicePairing() {
+  while (true) {
+    resetRenderCount();
+    console.log(`\n${C.bold}📱 设备配对管理 (Control UI / 浏览器配对审批)${C.reset}\n`);
+    console.log(`${C.yellow}⚠️  风险提示：${C.reset}`);
+    console.log(`${C.yellow}   批准设备配对后，该浏览器/客户端将获得 OpenClaw 网关的完全控制权限。${C.reset}`);
+    console.log(`${C.yellow}   请确保在受信任的局域网环境，并仅在您本人正在连接时批准！${C.reset}\n`);
+
+    const listed = ocCmdCapture('devices', 'list', '--json');
+    let pending = [];
+    let paired = [];
+    try {
+      const data = JSON.parse(listed.stdout);
+      if (Array.isArray(data.pending)) pending = data.pending;
+      if (Array.isArray(data.paired)) paired = data.paired;
+    } catch (e) {
+      const m = (listed.stdout || '').match(/(\{[\s\S]*"pending"[\s\S]*\})/);
+      if (m) {
+        try {
+          const d = JSON.parse(m[1]);
+          if (Array.isArray(d.pending)) pending = d.pending;
+          if (Array.isArray(d.paired)) paired = d.paired;
+        } catch (_) {}
+      }
+    }
+
+    function renderPairedDevices(list) {
+      console.log(`\n${C.bold}📋 已配对设备 (${list.length})${C.reset}\n`);
+      if (list.length === 0) {
+        console.log(`  ${C.dim}暂无已配对设备记录${C.reset}`);
+      } else {
+        list.forEach((d, idx) => {
+          console.log(`  ${C.cyan}[${idx + 1}]${C.reset} 设备 ID: ${d.deviceId || ''}`);
+          console.log(`      平台: ${d.platform || '未知'} | 客户端: ${d.clientId || ''} | IP: ${d.remoteIp || ''}`);
+        });
+      }
+      console.log('');
+    }
+
+    if (pending.length > 0) {
+      console.log(`${C.green}🔔 当前检测到 ${pending.length} 个待配对请求：${C.reset}\n`);
+      pending.forEach((item, idx) => {
+        const rid = item.requestId || '未知ID';
+        const ip = item.remoteIp || item.ip || '未知IP';
+        const client = item.clientId || item.clientMode || 'webchat';
+        const plat = item.platform || '';
+        const role = item.role || (item.roles && item.roles.join(',')) || 'operator';
+        console.log(`  ${C.cyan}[${idx + 1}]${C.reset} 请求 ID: ${C.bold}${rid}${C.reset}`);
+        console.log(`      来源 IP: ${C.green}${ip}${C.reset} | 客户端: ${client}${plat ? ' (' + plat + ')' : ''} | 角色: ${role}`);
+      });
+      console.log('');
+
+      const choice = await select({
+        title: '请选择操作',
+        showSearch: false,
+        items: [
+          { key: '1', label: '一键批准所有待配对请求', desc: `共 ${pending.length} 个待审批`, value: 'approve-all' },
+          { key: '2', label: '选择指定请求批准', desc: '', value: 'approve-select' },
+          { key: '3', label: '刷新待配对列表', desc: '', value: 'refresh' },
+          { key: '4', label: '查看已配对设备列表', desc: `当前已配对 ${paired.length} 台设备`, value: 'view-paired' },
+          { label: '', disabled: true },
+          { key: '0', label: '返回上级菜单', desc: '', value: 'back' },
+        ],
+      });
+
+      if (!choice || choice.value === 'back') break;
+      if (choice.value === 'refresh') continue;
+      if (choice.value === 'view-paired') {
+        renderPairedDevices(paired);
+        await input({ prompt: '按回车继续', defaultValue: '' });
+        continue;
+      }
+
+      if (choice.value === 'approve-all') {
+        const ok = await confirm({
+          message: `${C.yellow}确认一键批准全部 ${pending.length} 个设备配对请求吗？${C.reset}`,
+          defaultValue: true,
+        });
+        if (ok) {
+          console.log(`\n${C.cyan}正在批准设备配对...${C.reset}`);
+          let success = 0;
+          for (const item of pending) {
+            const res = ocCmdCapture('devices', 'approve', item.requestId);
+            if (res.ok || /approved|success/i.test(res.stdout)) {
+              console.log(`${C.green}✅ 已批准: ${item.requestId} (${item.remoteIp || ''})${C.reset}`);
+              success++;
+            } else {
+              console.log(`${C.red}❌ 批准失败: ${item.requestId} — ${res.stdout || res.stderr}${C.reset}`);
+            }
+          }
+          fixStatePermissions();
+          console.log(`\n${C.green}操作完成：成功 ${success}/${pending.length} 个${C.reset}`);
+          await input({ prompt: '按回车继续', defaultValue: '' });
+        }
+      } else if (choice.value === 'approve-select') {
+        const selectItems = pending.map((item, idx) => ({
+          key: String(idx + 1),
+          label: `批准: ${item.remoteIp || '设备'} (${(item.requestId || '').slice(0, 8)}...)`,
+          desc: `IP: ${item.remoteIp || ''} | ${item.platform || ''}`,
+          value: item.requestId,
+        }));
+        selectItems.push({ label: '', disabled: true });
+        selectItems.push({ key: '0', label: '取消', desc: '', value: 'cancel' });
+
+        const picked = await select({
+          title: '请选择要批准的设备请求',
+          showSearch: false,
+          items: selectItems,
+        });
+
+        if (picked && picked.value !== 'cancel') {
+          const res = ocCmdCapture('devices', 'approve', picked.value);
+          if (res.ok || /approved|success/i.test(res.stdout)) {
+            fixStatePermissions();
+            console.log(`\n${C.green}✅ 成功批准设备请求: ${picked.value}${C.reset}`);
+          } else {
+            console.log(`\n${C.red}❌ 批准失败: ${res.stdout || res.stderr}${C.reset}`);
+          }
+          await input({ prompt: '按回车继续', defaultValue: '' });
+        }
+      }
+    } else {
+      console.log(`${C.dim}当前无待配对设备请求。${C.reset}`);
+      console.log(`${C.dim}(在浏览器访问 OpenClaw Web 控制台时若提示「需要设备配对」，在此处刷新即可发现)${C.reset}\n`);
+
+      const choice = await select({
+        title: '设备配对管理',
+        showSearch: false,
+        items: [
+          { key: '1', label: '刷新待配对列表', desc: '', value: 'refresh' },
+          { key: '2', label: '手动输入 Request ID 批准', desc: '', value: 'manual' },
+          { key: '3', label: '查看已配对设备列表', desc: `当前已配对 ${paired.length} 台设备`, value: 'view-paired' },
+          { label: '', disabled: true },
+          { key: '0', label: '返回上级菜单', desc: '', value: 'back' },
+        ],
+      });
+
+      if (!choice || choice.value === 'back') break;
+      if (choice.value === 'refresh') continue;
+
+      if (choice.value === 'manual') {
+        const reqId = await input({ prompt: '请输入待批准的 Request ID', defaultValue: '' });
+        if (reqId && reqId.trim()) {
+          const res = ocCmdCapture('devices', 'approve', reqId.trim());
+          if (res.ok || /approved|success/i.test(res.stdout)) {
+            fixStatePermissions();
+            console.log(`\n${C.green}✅ 成功批准设备请求: ${reqId.trim()}${C.reset}`);
+          } else {
+            console.log(`\n${C.red}❌ 批准失败: ${res.stdout || res.stderr}${C.reset}`);
+          }
+          await input({ prompt: '按回车继续', defaultValue: '' });
+        }
+      } else if (choice.value === 'view-paired') {
+        renderPairedDevices(paired);
+        await input({ prompt: '按回车继续', defaultValue: '' });
+      }
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2007,12 +2288,21 @@ async function handleAdvancedConfig() {
         }
         break;
       }
-      case 'wizard':
+      case 'wizard': {
+        resetRenderCount();
         console.log(`\n${C.cyan}启动官方配置向导...${C.reset}\n`);
+        console.log(`${C.yellow}提示: ↑↓ 移动, Tab/空格 选中, 回车 确认${C.reset}\n`);
+        let ok = false;
         try {
+          enableAuthPlugins();
           await ocCmd('configure');
-        } catch (e) {}
+          ok = true;
+        } catch (e) {
+          console.log(`${C.yellow}配置向导已退出${C.reset}\n`);
+        }
+        if (ok) await askRestart();
         break;
+      }
       case 'view-json':
         console.log(`\n${C.cyan}配置文件路径: ${CONFIG_FILE}${C.reset}\n`);
         try {
@@ -2039,6 +2329,8 @@ async function handleAdvancedConfig() {
         if (importPath && fs.existsSync(importPath)) {
           try {
             fs.copyFileSync(importPath, CONFIG_FILE);
+            execSync(`chown openclaw:openclaw "${CONFIG_FILE}" 2>/dev/null || true`, { stdio: 'ignore' });
+            fixStatePermissions();
             console.log(`\n${C.green}✅ 配置已导入${C.reset}\n`);
             await askRestart();
           } catch (e) {
@@ -2049,6 +2341,9 @@ async function handleAdvancedConfig() {
         }
         break;
       }
+      case 'devices':
+        await manageDevicePairing();
+        break;
     }
   }
 }
@@ -2074,7 +2369,6 @@ async function handleReset() {
           jsonSet('gateway.bind', 'lan');
           jsonSet('gateway.mode', 'local');
           jsonSet('gateway.controlUi.allowInsecureAuth', true);
-          jsonSet('gateway.controlUi.dangerouslyDisableDeviceAuth', true);
           jsonSet('gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback', true);
           jsonSet('gateway.tailscale.mode', 'off');
           console.log(`\n${C.green}✅ 网关设置已恢复默认${C.reset}\n`);
@@ -2154,7 +2448,6 @@ async function handleReset() {
         jsonSet('gateway.auth.mode', 'token');
         jsonSet('gateway.auth.token', newToken);
         jsonSet('gateway.controlUi.allowInsecureAuth', true);
-        jsonSet('gateway.controlUi.dangerouslyDisableDeviceAuth', true);
         jsonSet('gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback', true);
         jsonSet('gateway.tailscale.mode', 'off');
         jsonSet('acp.dispatch.enabled', false);
@@ -2329,6 +2622,9 @@ async function main() {
       case 'restart':
         resetRenderCount();
         await restartGateway();
+        break;
+      case 'devices':
+        await manageDevicePairing();
         break;
       case 'advanced':
         await handleAdvancedConfig();

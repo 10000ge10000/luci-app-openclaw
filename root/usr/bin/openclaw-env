@@ -7,20 +7,18 @@
 #   openclaw-env upgrade   — 升级 OpenClaw 到最新版
 #   openclaw-env node      — 仅下载/更新 Node.js
 # 环境变量:
-#   OC_VERSION  — 指定 OpenClaw 版本 (如 2026.7.1-2)，不设置则安装已测试稳定版
+#   OC_VERSION  — 指定 OpenClaw 版本 (如 2026.9.1)，不设置则安装已测试稳定版
 # ============================================================================
 set -e
 
-# ── Node.js 版本策略 (双版本兼容) ──
-# V2: 当前推荐版本，用于 OpenClaw v2026.7.1-2+ (要求 >= 22.22.3，使用 Alpine musl LTS 包确保可运行)
-# V1: 旧版兼容，用于 OpenClaw v2026.3.8 及更早版本
-NODE_VERSION_V2="22.23.0"
-NODE_VERSION_V1="22.15.1"
+# ── Node.js 版本策略 ──
+# 推荐版本: 用于 OpenClaw v2026.9.1+ (要求 >= 22.22.3，使用 musl 预编译包)
+NODE_VERSION_V2="22.23.2"
 # 默认使用 V2 版本 (可通过 NODE_VERSION 环境变量覆盖)
 NODE_VERSION="${NODE_VERSION:-${NODE_VERSION_V2}}"
 # 经过验证的 OpenClaw 稳定版本 (更新此值需同步测试)
-OC_TESTED_VERSION="2026.7.1-2"
-# OpenClaw 2026.7.x package.json engines.node 的最低要求。
+OC_TESTED_VERSION="2026.9.1"
+# OpenClaw 2026.9.x package.json engines.node 的最低要求。
 # 如果未来上游提高要求，安装成功后还会从 package.json 再做一次强校验。
 OC_NODE_MIN_VERSION="${OC_NODE_MIN_VERSION:-22.22.3}"
 # 用户可通过 OC_VERSION 环境变量覆盖安装版本
@@ -50,6 +48,9 @@ else
 	OC_DATA="${OC_INSTALL_PATH}/data"
 	CONFIG_FILE="${OC_DATA}/.openclaw/openclaw.json"
 fi
+OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-${OC_DATA}/.openclaw}"
+OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-${CONFIG_FILE}}"
+export OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH
 
 # ── OverlayFS 兼容性修复 ──
 # iStoreOS/OpenWrt 上 Docker 的 bind mount (/overlay/upper/opt/docker)
@@ -79,13 +80,22 @@ NODE_BIN="${NODE_BASE}/bin/node"
 NPM_BIN="${NODE_BASE}/bin/npm"
 PNPM_BIN="${OC_GLOBAL}/bin/pnpm"
 
-# Node.js 官方镜像 + musl 非官方构建
-# Node.js 官方镜像 + musl 非官方构建
+# Node.js 官方镜像 + musl 非官方构建与自托管兜底
 NODE_MIRROR="${NODE_MIRROR:-https://nodejs.org/dist}"
 NODE_MIRROR_CN="https://npmmirror.com/mirrors/node"
 NODE_MUSL_MIRROR="https://unofficial-builds.nodejs.org/download/release"
-# 项目自托管 ARM64 musl Node.js (unofficial-builds 仅提供 x64 musl)
+# 项目自托管 musl Node.js 兜底资产
 NODE_SELF_HOST="https://github.com/10000ge10000/luci-app-openclaw/releases/download/node-bins"
+
+OC_PACKAGE_CONTRACT="/usr/share/openclaw/openclaw-package-contract.js"
+if [ ! -f "$OC_PACKAGE_CONTRACT" ]; then
+	_script_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+	if [ -f "${_script_dir}/../share/openclaw/openclaw-package-contract.js" ]; then
+		OC_PACKAGE_CONTRACT="${_script_dir}/../share/openclaw/openclaw-package-contract.js"
+	elif [ -f "./root/usr/share/openclaw/openclaw-package-contract.js" ]; then
+		OC_PACKAGE_CONTRACT="./root/usr/share/openclaw/openclaw-package-contract.js"
+	fi
+fi
 
 export PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:$PATH"
 export NODE_ICU_DATA="${NODE_BASE}/share/icu"
@@ -144,6 +154,7 @@ probe_install_root() {
 }
 
 cleanup_partial_install() {
+	[ -n "${OC_STAGE_DIR:-}" ] && rm -rf "$OC_STAGE_DIR" 2>/dev/null || true
 	# 只在确认目标是规范化后的 openclaw 运行根目录时清理，避免误删用户目录。
 	if command -v oc_safe_openclaw_root >/dev/null 2>&1 && oc_safe_openclaw_root "$OC_INSTALL_PATH"; then
 		if [ "${OC_SETUP_FRESH_ROOT:-0}" = "1" ]; then
@@ -172,12 +183,13 @@ detect_libc() {
 # 在所有可能的位置查找 openclaw 入口文件
 # pnpm 全局安装路径形如: $OC_GLOBAL/5/node_modules/openclaw
 find_oc_entry() {
-	local search_dirs="${OC_GLOBAL}/lib/node_modules/openclaw
-${OC_GLOBAL}/node_modules/openclaw
+	local base_global="${1:-$OC_GLOBAL}"
+	local search_dirs="${base_global}/lib/node_modules/openclaw
+${base_global}/node_modules/openclaw
 ${NODE_BASE}/lib/node_modules/openclaw"
 
-	# 添加 pnpm 版本化目录 (如 $OC_GLOBAL/5/node_modules/openclaw)
-	for ver_dir in "${OC_GLOBAL}"/*/node_modules/openclaw; do
+	# 添加 pnpm 版本化目录 (如 $base_global/5/node_modules/openclaw)
+	for ver_dir in "${base_global}"/*/node_modules/openclaw; do
 		[ -d "$ver_dir" ] 2>/dev/null && search_dirs="$search_dirs
 $ver_dir"
 	done
@@ -228,6 +240,32 @@ assert_node_runtime() {
 
 	if command -v oc_assert_node_min_version >/dev/null 2>&1; then
 		oc_assert_node_min_version "$NODE_BIN" "$required" || exit 1
+	fi
+
+	# 契约校验 helper 与 Node 运行时必须可用，缺失时直接失败关闭
+	if [ ! -f "$OC_PACKAGE_CONTRACT" ]; then
+		log_error "契约校验 helper 缺失 ($OC_PACKAGE_CONTRACT)，运行时强校验失败关闭"
+		exit 1
+	fi
+	if [ ! -x "$NODE_BIN" ]; then
+		log_error "Node.js 运行时未就绪 ($NODE_BIN)，强校验失败关闭"
+		exit 1
+	fi
+
+	local engine_spec=">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"
+	local oc_entry pkg_json
+	oc_entry=$(find_oc_entry 2>/dev/null || true)
+	if [ -n "$oc_entry" ]; then
+		pkg_json="$(dirname "$oc_entry")/package.json"
+		if [ -f "$pkg_json" ]; then
+			local detected_spec
+			detected_spec=$("$NODE_BIN" -e "try{const p=require(process.argv[1]);process.stdout.write((p.engines&&p.engines.node)||'')}catch(e){}" "$pkg_json" 2>/dev/null || true)
+			[ -n "$detected_spec" ] && engine_spec="$detected_spec"
+		fi
+	fi
+	if ! "$NODE_BIN" "$OC_PACKAGE_CONTRACT" validate-runtime "$NODE_BIN" "$engine_spec"; then
+		log_error "Node.js 运行时未满足 engines.node 契约 (${engine_spec})，强校验失败关闭"
+		exit 1
 	fi
 
 	# OpenClaw CLI 依赖 Unicode property escapes（例如 \p{Extended_Pictographic}）。
@@ -303,39 +341,51 @@ oc_sum256() {
 
 # 校验 Node tarball 完整性:
 # - 官方 / unofficial-builds / npmmirror 镜像: 拉取同目录 SHASUMS256.txt 比对
-# - 自托管 node-bins: 优先下载同名 .sha256 边车文件; 旧资产没有哈希时降级为体积检查
-# - 哈希源本身不可用时仅告警不阻断 (离线/镜像异常场景仍可继续)
+# - 自托管 node-bins: 下载同名 .sha256 边车文件比对
+# - 缺失、版本不符、哈希不可验证明确失败 (fail-closed)，不得忽略校验
 verify_node_tarball() {
 	local file="$1" mirror_url="$2" filename
 	filename=$(basename "$mirror_url")
 	local actual
-	actual=$(oc_sum256 "$file") || { log_warn "无可用 sha256 工具，跳过完整性校验"; return 0; }
+	actual=$(oc_sum256 "$file") || { log_error "无可用 sha256 工具，无法校验文件哈希"; return 1; }
 
 	local expected=""
 	if [ "${mirror_url#*node-bins}" != "$mirror_url" ]; then
-		# 自托管 Release 资产: 尝试 .sha256 边车文件
-		if curl -fsSL --connect-timeout 10 --max-time 30 -o "${file}.sha256" "${mirror_url}.sha256" 2>/dev/null; then
+		# 自托管 Release 资产: 下载 .sha256 边车文件
+		local fetch_sidecar=0
+		if command -v curl >/dev/null 2>&1; then
+			curl -fsSL --connect-timeout 10 --max-time 30 -o "${file}.sha256" "${mirror_url}.sha256" 2>/dev/null && fetch_sidecar=1 || true
+		elif command -v wget >/dev/null 2>&1; then
+			wget -q --timeout=10 -O "${file}.sha256" "${mirror_url}.sha256" 2>/dev/null && fetch_sidecar=1 || true
+		fi
+		if [ "$fetch_sidecar" -eq 1 ] && [ -s "${file}.sha256" ]; then
 			expected=$(awk '{print $1}' "${file}.sha256" 2>/dev/null)
 			rm -f "${file}.sha256"
 		fi
 	else
 		# 官方系镜像: 同版本目录下的 SHASUMS256.txt
 		local shasum_url="${mirror_url%/*}/SHASUMS256.txt"
-		if curl -fsSL --connect-timeout 10 --max-time 30 -o "${file}.sums" "$shasum_url" 2>/dev/null; then
+		local fetch_sums=0
+		if command -v curl >/dev/null 2>&1; then
+			curl -fsSL --connect-timeout 10 --max-time 30 -o "${file}.sums" "$shasum_url" 2>/dev/null && fetch_sums=1 || true
+		elif command -v wget >/dev/null 2>&1; then
+			wget -q --timeout=10 -O "${file}.sums" "$shasum_url" 2>/dev/null && fetch_sums=1 || true
+		fi
+		if [ "$fetch_sums" -eq 1 ] && [ -s "${file}.sums" ]; then
 			expected=$(awk -v f="$filename" '$2 == f {print $1}' "${file}.sums" 2>/dev/null)
 			rm -f "${file}.sums"
 		fi
 	fi
 
 	if [ -z "$expected" ]; then
-		log_warn "未获取到 ${filename} 的官方哈希，跳过强校验 (仅体积检查)"
-		return 0
+		log_error "未获取到 ${filename} 的有效 SHA256 校验和，哈希不可验证"
+		return 1
 	fi
 	if [ "$actual" = "$expected" ]; then
 		log_info "SHA256 校验通过"
 		return 0
 	fi
-	log_error "SHA256 校验失败: ${filename}"
+	log_error "SHA256 校验失败: ${filename} (实际: ${actual}, 期望: ${expected})"
 	return 1
 }
 
@@ -363,7 +413,7 @@ download_node() {
 		log_warn "当前 Node.js v${current_ver}, 将更新到 v${node_ver}"
 	fi
 
-	# ── 构建下载 URL 列表 (按优先级排列，支持双版本回退) ──
+	# ── 构建下载 URL 列表 (musl 资产名精确固定) ──
 	local mirror_list=""
 	local musl_tarball="node-v${node_ver}-${node_arch}-musl.tar.xz"
 	local glibc_tarball="node-v${node_ver}-${node_arch}.tar.xz"
@@ -372,19 +422,10 @@ download_node() {
 		echo ""
 		echo "=== 下载 Node.js v${node_ver} (${node_arch}, musl libc) ==="
 
-		if [ "$node_arch" = "linux-arm64" ]; then
-			# ARM64 musl: unofficial-builds 不提供，从项目自托管下载
-			# 1) 项目自托管 ARM64 musl 构建 (当前版本)
-			mirror_list="${NODE_SELF_HOST}/${musl_tarball}"
-			# 2) unofficial-builds (留作将来可能支持)
-			mirror_list="$mirror_list ${NODE_MUSL_MIRROR}/v${node_ver}/${musl_tarball}"
-		else
-			# x64 musl: unofficial-builds 提供
-			# 1) unofficial-builds
-			mirror_list="${NODE_MUSL_MIRROR}/v${node_ver}/${musl_tarball}"
-			# 2) npmmirror 镜像
-			mirror_list="$mirror_list ${NODE_MIRROR_CN}/v${node_ver}/${musl_tarball}"
-		fi
+		# x64 与 arm64 musl 均优先官方/社区 unofficial-builds，其次 npmmirror，最后 fallback 到项目自托管资产
+		mirror_list="${NODE_MUSL_MIRROR}/v${node_ver}/${musl_tarball}"
+		mirror_list="$mirror_list ${NODE_MIRROR_CN}/v${node_ver}/${musl_tarball}"
+		mirror_list="$mirror_list ${NODE_SELF_HOST}/${musl_tarball}"
 	else
 		echo ""
 		echo "=== 下载 Node.js v${node_ver} (${node_arch}, glibc) ==="
@@ -395,58 +436,95 @@ download_node() {
 
 	# ── 逐个尝试下载 ──
 	local downloaded=0
-	local tmp_file="/tmp/node-v${node_ver}.tar.xz"
+	local dl_tmp_dir
+	dl_tmp_dir=$(mktemp -d /tmp/openclaw-node-XXXXXX 2>/dev/null || mktemp -d 2>/dev/null || echo "/tmp/openclaw-node-$$-${RANDOM:-0}")
+	ensure_mkdir "$dl_tmp_dir"
+	local tmp_file="${dl_tmp_dir}/node-v${node_ver}.tar.xz"
 	local attempt=0
-	local total=$(echo "$mirror_list" | wc -w)
+	local total=0
+	for _ in $mirror_list; do total=$((total + 1)); done
 
 	for mirror_url in $mirror_list; do
 		attempt=$((attempt + 1))
 		echo "  正在从 ${mirror_url} 下载... (${attempt}/${total})"
-		if curl -fSL --connect-timeout 15 --max-time 300 -o "$tmp_file" "$mirror_url" 2>/dev/null || \
-		   wget -q --timeout=15 -O "$tmp_file" "$mirror_url" 2>/dev/null; then
-			# 校验文件大小 (Node.js xz 压缩包至少 5MB; Alpine 精简包约 12MB, 官方完整包约 30MB)
-			local fsize=$(wc -c < "$tmp_file" 2>/dev/null || echo 0)
-			if [ "$fsize" -gt 5000000 ] 2>/dev/null; then
-				if verify_node_tarball "$tmp_file" "$mirror_url"; then
-					downloaded=1
-					break
-				else
-					rm -f "$tmp_file"
-				fi
-			else
-				log_warn "文件大小异常 (${fsize} bytes), 跳过"
-				rm -f "$tmp_file"
+		rm -f "$tmp_file"
+
+		local dl_ok=0
+		if command -v curl >/dev/null 2>&1; then
+			if curl -fSL --connect-timeout 15 --max-time 300 -o "$tmp_file" "$mirror_url" 2>/dev/null; then
+				dl_ok=1
+			fi
+		elif command -v wget >/dev/null 2>&1; then
+			if wget -q --timeout=15 -O "$tmp_file" "$mirror_url" 2>/dev/null; then
+				dl_ok=1
 			fi
 		fi
-		log_warn "下载失败, 尝试备用镜像..."
+
+		if [ "$dl_ok" -eq 0 ] || [ ! -f "$tmp_file" ]; then
+			log_warn "从 ${mirror_url} 下载失败 (网络错误或 HTTP 404)，尝试备用镜像..."
+			rm -f "$tmp_file"
+			continue
+		fi
+
+		# 校验文件大小 (Node.js xz 压缩包至少 5MB; Alpine 精简包约 12MB, 官方完整包约 30MB)
+		local fsize
+		fsize=$(wc -c < "$tmp_file" 2>/dev/null || echo 0)
+		if [ "$fsize" -le 5000000 ]; then
+			log_warn "下载文件大小异常 (${fsize} bytes)，当前镜像产物不完整，淘汰当前源"
+			rm -f "$tmp_file"
+			continue
+		fi
+
+		if ! verify_node_tarball "$tmp_file" "$mirror_url"; then
+			log_warn "文件 SHA256 校验失败或校验清单缺失，淘汰当前镜像源: ${mirror_url}"
+			rm -f "$tmp_file"
+			continue
+		fi
+
+		downloaded=1
+		break
 	done
 
-	if [ "$downloaded" -eq 0 ]; then
-		log_error "所有镜像均下载失败"
-		rm -f "$tmp_file"
-		exit 1
+	if [ "$downloaded" -ne 1 ]; then
+		log_error "Node.js 运行时所有候选镜像源均下载或校验失败 (候选源已耗尽)"
+		if [ "$libc_type" = "musl" ]; then
+			log_error "当前设备为 ${node_arch} musl 架构，候选源均下载或校验失败"
+			log_error "候选镜像包括 unofficial-builds、npmmirror 以及自托管 assets"
+		fi
+		rm -rf "$dl_tmp_dir" 2>/dev/null || true
+		return 1 2>/dev/null || exit 1
 	fi
 
 	# 解压
 	echo "  正在解压到 ${NODE_BASE}..."
 	# 先解压到临时目录并确认完整，再替换 NODE_BASE。
 	# 这样即使 tar/xz 缺失或压缩包损坏，也不会删除已有 Node.js。
-	local tmp_extract="/tmp/node-extract-$$"
+	local tmp_extract="${dl_tmp_dir}/extract"
 	rm -rf "$tmp_extract" 2>/dev/null
 	ensure_mkdir "$tmp_extract"
 	if ! tar xf "$tmp_file" -C "$tmp_extract" 2>/dev/null; then
 		log_error "Node.js 解压失败，请确认已安装 GNU tar（opkg install tar）且下载文件完整"
-		rm -rf "$tmp_extract"
-		exit 1
+		rm -rf "$dl_tmp_dir" 2>/dev/null || true
+		return 1 2>/dev/null || exit 1
 	fi
 	# 找顶层目录 (node-vX.X.X-linux-xxx)
 	local top_dir
 	top_dir=$(ls "$tmp_extract" 2>/dev/null | head -1)
 	if [ -z "$top_dir" ] || [ ! -d "$tmp_extract/$top_dir" ]; then
 		log_error "解压后未找到顶层目录，安装失败"
-		rm -rf "$tmp_extract"
-		exit 1
+		rm -rf "$dl_tmp_dir" 2>/dev/null || true
+		return 1 2>/dev/null || exit 1
 	fi
+
+	# 校验解压出的产物名称是否与请求版本及架构精确一致
+	local expected_top="node-v${node_ver}-${node_arch}"
+	[ "$libc_type" = "musl" ] && expected_top="node-v${node_ver}-${node_arch}-musl"
+	if [ "$top_dir" != "$expected_top" ]; then
+		log_error "构建产物顶层目录名称不符: 期望 ${expected_top}, 实际 ${top_dir}"
+		rm -rf "$dl_tmp_dir" 2>/dev/null || true
+		return 1 2>/dev/null || exit 1
+	fi
+
 	# OverlayFS 兼容: rm -rf 后可能因 whiteout 导致 mkdir 失败
 	# 只有在临时目录已解压成功后才替换正式 Node 目录。
 	rm -rf "$NODE_BASE" 2>/dev/null
@@ -455,18 +533,31 @@ download_node() {
 	fi
 	ensure_mkdir "$NODE_BASE"
 	cp -a "$tmp_extract/$top_dir/." "$NODE_BASE/"
-	rm -rf "$tmp_extract"
-	rm -f "$tmp_file"
+	rm -rf "$dl_tmp_dir" 2>/dev/null || true
 
 	# 验证
 	if [ -x "$NODE_BIN" ]; then
 		local installed_ver
-		installed_ver=$("$NODE_BIN" --version 2>/dev/null || echo "unknown")
-		log_info "Node.js ${installed_ver} 安装成功"
+		installed_ver=$("$NODE_BIN" --version 2>/dev/null | sed 's/^v//' || echo "unknown")
+		if [ "$installed_ver" != "$node_ver" ]; then
+			log_error "Node.js 安装版本不匹配: 期望 v${node_ver}, 实际 v${installed_ver}"
+			return 1 2>/dev/null || exit 1
+		fi
+
+		local installed_arch
+		installed_arch=$("$NODE_BIN" -p "process.arch" 2>/dev/null || echo "unknown")
+		local expected_arch="x64"
+		[ "$node_arch" = "linux-arm64" ] && expected_arch="arm64"
+		if [ "$installed_arch" != "$expected_arch" ]; then
+			log_error "Node.js 架构不匹配: 期望 ${expected_arch}, 实际 ${installed_arch}"
+			return 1 2>/dev/null || exit 1
+		fi
+
+		log_info "Node.js v${installed_ver} (${installed_arch}) 安装成功"
 		assert_node_runtime
 	else
-		log_error "Node.js 安装验证失败"
-		exit 1
+		log_error "Node.js 安装验证失败: ${NODE_BIN} 不可执行"
+		return 1 2>/dev/null || exit 1
 	fi
 }
 
@@ -494,32 +585,143 @@ install_pnpm() {
 	fi
 }
 
+validate_openclaw_manifest() {
+	local pkg_target="$1" target_ver="$2"
+	local pkg_json=""
+	local pkg_dir=""
+
+	if [ -d "$pkg_target" ]; then
+		pkg_dir="$pkg_target"
+		pkg_json="${pkg_dir}/package.json"
+	else
+		pkg_json="$pkg_target"
+		pkg_dir="$(dirname "$pkg_json")"
+	fi
+
+	if [ ! -f "$pkg_json" ]; then
+		log_error "未找到 OpenClaw package.json: $pkg_json"
+		return 1
+	fi
+
+	# 校验 helper 和 Node 运行时必须可用，缺失直接失败关闭
+	if [ ! -f "$OC_PACKAGE_CONTRACT" ]; then
+		log_error "契约校验 helper 缺失 ($OC_PACKAGE_CONTRACT)，无法验证包清单"
+		return 1
+	fi
+	if [ ! -x "$NODE_BIN" ]; then
+		log_error "Node.js 运行时未就绪 ($NODE_BIN)，无法执行契约校验"
+		return 1
+	fi
+
+	echo "  正在校验 OpenClaw 包清单不可变契约 (静态预检)..."
+	if ! "$NODE_BIN" "$OC_PACKAGE_CONTRACT" validate-manifest "$pkg_json" "$target_ver"; then
+		log_error "OpenClaw 包清单契约静态校验失败"
+		return 1
+	fi
+
+	# 仅对锁定稳定版 2026.9.1 静态校验脚本文件物理存在性 (零执行预检)
+	if [ "$target_ver" = "2026.9.1" ] || [ -z "$target_ver" ] || [ "$target_ver" = "stable" ]; then
+		local preinstall_script="${pkg_dir}/scripts/preinstall-package-manager-warning.mjs"
+		local postinstall_script="${pkg_dir}/scripts/postinstall-bundled-plugins.mjs"
+
+		if [ ! -f "$preinstall_script" ]; then
+			log_error "白名单 preinstall 脚本文件不存在: $preinstall_script"
+			return 1
+		fi
+		if [ ! -f "$postinstall_script" ]; then
+			log_error "白名单 postinstall 脚本文件不存在: $postinstall_script"
+			return 1
+		fi
+	fi
+
+	return 0
+}
+
+execute_openclaw_lifecycle() {
+	local pkg_dir="$1" target_ver="$2"
+	local pkg_json="${pkg_dir}/package.json"
+
+	if [ ! -f "$pkg_json" ]; then
+		log_error "未找到 OpenClaw package.json: $pkg_json"
+		return 1
+	fi
+
+	# 校验 helper 和 Node 运行时必须可用，缺失直接失败关闭
+	if [ ! -f "$OC_PACKAGE_CONTRACT" ]; then
+		log_error "契约校验 helper 缺失 ($OC_PACKAGE_CONTRACT)，无法验证包清单"
+		return 1
+	fi
+	if [ ! -x "$NODE_BIN" ]; then
+		log_error "Node.js 运行时未就绪 ($NODE_BIN)，无法执行契约校验"
+		return 1
+	fi
+
+	if command -v validate_openclaw_manifest >/dev/null 2>&1; then
+		if ! validate_openclaw_manifest "$pkg_dir" "$target_ver"; then
+			return 1
+		fi
+	else
+		echo "  正在校验 OpenClaw 包清单不可变契约..."
+		if ! "$NODE_BIN" "$OC_PACKAGE_CONTRACT" validate-manifest "$pkg_json" "$target_ver"; then
+			log_error "OpenClaw 包清单契约校验失败，终止安装"
+			return 1
+		fi
+	fi
+
+	# 仅对锁定稳定版 2026.9.1 显式执行两个必要 lifecycle (受控环境: cwd=pkg_dir, npm_config_ignore_scripts=true)
+	if [ "$target_ver" = "2026.9.1" ] || [ -z "$target_ver" ] || [ "$target_ver" = "stable" ]; then
+		local preinstall_script="${pkg_dir}/scripts/preinstall-package-manager-warning.mjs"
+		local postinstall_script="${pkg_dir}/scripts/postinstall-bundled-plugins.mjs"
+
+		if [ ! -f "$preinstall_script" ]; then
+			log_error "白名单 preinstall 脚本文件不存在: $preinstall_script"
+			return 1
+		fi
+		if [ ! -f "$postinstall_script" ]; then
+			log_error "白名单 postinstall 脚本文件不存在: $postinstall_script"
+			return 1
+		fi
+
+		log_info "显式执行已校验的 OpenClaw preinstall 脚本 (受控环境)..."
+		if ! ( cd "$pkg_dir" && npm_config_ignore_scripts=true "$NODE_BIN" scripts/preinstall-package-manager-warning.mjs ); then
+			log_error "OpenClaw preinstall 脚本执行失败 (退出码非零)"
+			return 1
+		fi
+
+		log_info "显式执行已校验的 OpenClaw postinstall 脚本 (锁定 npm_config_ignore_scripts=true)..."
+		if ! ( cd "$pkg_dir" && npm_config_ignore_scripts=true "$NODE_BIN" scripts/postinstall-bundled-plugins.mjs ); then
+			log_error "OpenClaw postinstall 脚本执行失败 (退出码非零)"
+			return 1
+		fi
+		log_info "OpenClaw 已校验 lifecycle 脚本执行完成"
+	else
+		# latest/自定义版本不复用 2026.9.1 白名单: 存在 lifecycle 已在 validate-manifest 中 fail-closed；
+		# 无 lifecycle 时明确标记未验证，不能宣称完成受支持安装，严禁执行脚本
+		log_warn "当前安装版本为自定义/未验证版本 (${target_ver})，已严格阻断所有未验证的 lifecycle 脚本"
+		log_warn "该版本未列入已验证兼容测试矩阵，不属于受支持的稳定配置"
+	fi
+	return 0
+}
+
 install_openclaw() {
 	echo ""
 	echo "=== 安装 OpenClaw ==="
 
 	# 确定安装版本
+	local target_ver=""
 	local oc_pkg="openclaw"
 	if [ -z "$OC_VERSION" ] || [ "$OC_VERSION" = "stable" ]; then
+		target_ver="${OC_TESTED_VERSION}"
 		oc_pkg="openclaw@${OC_TESTED_VERSION}"
 		log_info "默认稳定版: v${OC_TESTED_VERSION}"
 	elif [ "$OC_VERSION" = "latest" ]; then
+		target_ver="latest"
 		oc_pkg="openclaw@latest"
 		log_info "安装 npm latest 稳定标签版本"
 	else
+		target_ver="${OC_VERSION}"
 		oc_pkg="openclaw@${OC_VERSION}"
 		log_info "指定版本: v${OC_VERSION}"
-	fi
-
-	local libc_type
-	libc_type=$(detect_libc)
-
-	# musl 系统使用 npm + --ignore-scripts 避免 node-llama-cpp 编译失败
-	# glibc 系统正常安装
-	local install_flags=""
-	if [ "$libc_type" = "musl" ]; then
-		log_warn "检测到 musl libc，将跳过本地编译依赖 (不影响核心功能)"
-		install_flags="--ignore-scripts"
 	fi
 
 	# 检查 git 是否可用 (openclaw 部分依赖可能使用 git:// 协议)
@@ -534,41 +736,203 @@ install_openclaw() {
 		fi
 	fi
 
-	# 优先用 npm 安装 (pnpm 在 musl 上全局安装可能有路径问题)
-	local npm_ok=0
-	if [ -x "$NPM_BIN" ]; then
-		ensure_mkdir "$OC_GLOBAL"
-		"$NPM_BIN" install -g "$oc_pkg" --prefix="$OC_GLOBAL" $install_flags 2>&1 | tail -10
-		# 检查是否安装成功
-		if [ -n "$(find_oc_entry)" ]; then
-			npm_ok=1
-		else
-			log_warn "首次安装未成功，尝试 --no-optional 模式重试..."
-			"$NPM_BIN" install -g "$oc_pkg" --prefix="$OC_GLOBAL" $install_flags --no-optional 2>&1 | tail -10
-			[ -n "$(find_oc_entry)" ] && npm_ok=1
-		fi
-	elif [ -x "$PNPM_BIN" ]; then
-		ensure_mkdir "$OC_GLOBAL"
-		"$PNPM_BIN" install -g "$oc_pkg" --prefix="$OC_GLOBAL" 2>&1 | tail -5
-	else
-		log_error "npm 和 pnpm 均不可用"
+	# 必须要求 helper 和 npm 可用
+	if [ ! -x "$NPM_BIN" ]; then
+		log_error "npm 可执行文件不可用 ($NPM_BIN)，无法安装 OpenClaw"
+		exit 1
+	fi
+	if [ ! -x "$NODE_BIN" ]; then
+		log_error "Node.js 可执行文件不可用 ($NODE_BIN)，无法安装 OpenClaw"
+		exit 1
+	fi
+	if [ ! -f "$OC_PACKAGE_CONTRACT" ]; then
+		log_error "契约校验 helper 缺失 ($OC_PACKAGE_CONTRACT)，安装终止 (失败关闭)"
 		exit 1
 	fi
 
-	# 验证
-	local oc_ver=""
+	local stage_dir
+	stage_dir=$(mktemp -d /tmp/openclaw-stage-XXXXXX 2>/dev/null || mktemp -d 2>/dev/null || echo "/tmp/openclaw-stage-$$-${RANDOM:-0}")
+	mkdir -p "$stage_dir"
+	OC_STAGE_DIR="$stage_dir"
+	OC_CANDIDATE_PREFIX=""
+	OC_BACKUP_PREFIX=""
+	trap 'rc=$?; [ -n "${OC_STAGE_DIR:-}" ] && rm -rf "$OC_STAGE_DIR" 2>/dev/null || true; [ -n "${OC_CANDIDATE_PREFIX:-}" ] && rm -rf "$OC_CANDIDATE_PREFIX" 2>/dev/null || true; if [ -n "${OC_BACKUP_PREFIX:-}" ] && [ -d "${OC_BACKUP_PREFIX:-}" ] && [ ! -d "$OC_GLOBAL" ]; then mv "$OC_BACKUP_PREFIX" "$OC_GLOBAL" 2>/dev/null || true; fi; [ -n "${OC_BACKUP_PREFIX:-}" ] && rm -rf "$OC_BACKUP_PREFIX" 2>/dev/null || true; if [ "${OC_SETUP_CLEANUP:-0}" = "1" ] && [ $rc -ne 0 ]; then cleanup_partial_install; fi; exit $rc' EXIT INT TERM
+
+	local pack_log="${stage_dir}/npm-pack.log"
+	local pack_rc=0
+	echo "  正在下载并打包预检 OpenClaw (${oc_pkg})..."
+	( cd "$stage_dir" && "$NPM_BIN" pack "$oc_pkg" ) > "$pack_log" 2>&1 || pack_rc=$?
+
+	if [ "$pack_rc" -ne 0 ]; then
+		cat "$pack_log" 2>/dev/null || true
+		log_error "npm pack 下载失败 (退出码: ${pack_rc})"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		exit "$pack_rc"
+	fi
+
+	local tarball
+	tarball=$(ls "$stage_dir"/*.tgz 2>/dev/null | head -1)
+	if [ -z "$tarball" ] || [ ! -f "$tarball" ]; then
+		log_error "npm pack 未生成有效 tarball 产物"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		exit 1
+	fi
+
+	local unpack_dir="${stage_dir}/unpacked"
+	ensure_mkdir "$unpack_dir"
+	if ! tar xzf "$tarball" -C "$unpack_dir" 2>/dev/null; then
+		log_error "解压预检 tarball 失败: $tarball"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		exit 1
+	fi
+
+	local staged_pkg_dir="${unpack_dir}/package"
+	if [ ! -f "${staged_pkg_dir}/package.json" ]; then
+		staged_pkg_dir=$(find "$unpack_dir" -maxdepth 2 -name "package.json" 2>/dev/null | head -1)
+		[ -n "$staged_pkg_dir" ] && staged_pkg_dir=$(dirname "$staged_pkg_dir")
+	fi
+	if [ -z "$staged_pkg_dir" ] || [ ! -f "${staged_pkg_dir}/package.json" ]; then
+		log_error "预检解包产物中未找到 package.json"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		exit 1
+	fi
+
+	echo "  正在执行解包清单与运行时预检 (零执行静态预检)..."
+	if ! validate_openclaw_manifest "$staged_pkg_dir" "$target_ver"; then
+		log_error "OpenClaw 预检校验失败，终止安装 (未修改现有安装)"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		exit 1
+	fi
+
+	local global_parent
+	global_parent="$(dirname "$OC_GLOBAL")"
+	ensure_mkdir "$global_parent"
+	local candidate_prefix
+	candidate_prefix=$(mktemp -d "${global_parent}/.global-candidate-XXXXXX" 2>/dev/null || echo "${global_parent}/.global-candidate-$$-${RANDOM:-0}")
+	ensure_mkdir "$candidate_prefix"
+	chmod 755 "$candidate_prefix" 2>/dev/null || true
+	OC_CANDIDATE_PREFIX="$candidate_prefix"
+
+	local npm_log="${stage_dir}/npm-install.log"
+	local npm_rc=0
+
+	echo "  正在执行 npm 临时前缀安装 (${tarball} --ignore-scripts --omit=optional)..."
+	"$NPM_BIN" install -g "$tarball" --prefix="$candidate_prefix" --ignore-scripts --omit=optional > "$npm_log" 2>&1 || npm_rc=$?
+
+	if [ "$npm_rc" -ne 0 ]; then
+		cat "$npm_log" 2>/dev/null || true
+		log_error "npm 安装失败 (退出码: ${npm_rc})"
+		rm -rf "$candidate_prefix" 2>/dev/null || true
+		OC_CANDIDATE_PREFIX=""
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		exit "$npm_rc"
+	fi
+
+	tail -10 "$npm_log" 2>/dev/null || true
+
+	# 检查候选入口文件
+	local cand_entry
+	cand_entry=$(find_oc_entry "$candidate_prefix")
+	if [ -z "$cand_entry" ] || [ ! -f "$cand_entry" ]; then
+		log_error "候选安装未找到 OpenClaw 入口文件，安装中止"
+		rm -rf "$candidate_prefix" 2>/dev/null || true
+		OC_CANDIDATE_PREFIX=""
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		exit 1
+	fi
+
+	# 校验包清单并在候选依赖树上下文中执行白名单 lifecycle 各一次
+	local cand_pkg_dir
+	cand_pkg_dir="$(dirname "$cand_entry")"
+	echo "  正在候选依赖树上下文中执行已验证 lifecycle..."
+	if ! execute_openclaw_lifecycle "$cand_pkg_dir" "$target_ver"; then
+		log_error "OpenClaw 契约校验或 lifecycle 脚本执行失败，安装中止 (未修改现有安装)"
+		rm -rf "$candidate_prefix" 2>/dev/null || true
+		OC_CANDIDATE_PREFIX=""
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		exit 1
+	fi
+
+	# 候选安装与 lifecycle 全部成功后，事务式替换 OC_GLOBAL
+	echo "  候选验证通过，正在原子切换 OC_GLOBAL..."
+	local backup_prefix="${global_parent}/.global-backup-$$-${RANDOM:-0}"
+	local has_existing_global=0
+	if [ -e "$OC_GLOBAL" ]; then
+		has_existing_global=1
+		if ! mv "$OC_GLOBAL" "$backup_prefix" 2>/dev/null; then
+			log_error "无法备份现有 OC_GLOBAL 目录，安装中止"
+			rm -rf "$candidate_prefix" 2>/dev/null || true
+			OC_CANDIDATE_PREFIX=""
+			rm -rf "$stage_dir" 2>/dev/null || true
+			OC_STAGE_DIR=""
+			exit 1
+		fi
+		OC_BACKUP_PREFIX="$backup_prefix"
+	fi
+
+	local switch_ok=0
+	chmod 755 "$candidate_prefix" 2>/dev/null || true
+	chmod -R a+rX "$candidate_prefix" 2>/dev/null || true
+	if mv "$candidate_prefix" "$OC_GLOBAL" 2>/dev/null; then
+		OC_CANDIDATE_PREFIX=""
+		local final_entry
+		final_entry=$(find_oc_entry)
+		if [ -n "$final_entry" ] && [ -f "$final_entry" ] && install_openclaw_cli_wrapper; then
+			switch_ok=1
+		fi
+	fi
+
+	if [ "$switch_ok" -eq 1 ]; then
+		if [ "$has_existing_global" -eq 1 ]; then
+			rm -rf "$backup_prefix" 2>/dev/null || true
+			OC_BACKUP_PREFIX=""
+		fi
+	else
+		log_error "替换 OC_GLOBAL 或 wrapper 验证失败，正在回滚原有版本..."
+		rm -rf "$OC_GLOBAL" 2>/dev/null || true
+		[ -e "$candidate_prefix" ] && rm -rf "$candidate_prefix" 2>/dev/null || true
+		OC_CANDIDATE_PREFIX=""
+		if [ "$has_existing_global" -eq 1 ]; then
+			mv "$backup_prefix" "$OC_GLOBAL" 2>/dev/null || true
+			OC_BACKUP_PREFIX=""
+			install_openclaw_cli_wrapper 2>/dev/null || true
+		fi
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		exit 1
+	fi
+
+	rm -rf "$stage_dir" 2>/dev/null || true
+	OC_STAGE_DIR=""
+	if [ "${OC_SETUP_CLEANUP:-0}" != "1" ]; then
+		trap - EXIT INT TERM
+	fi
+
+	# 验证 CLI wrapper 与运行时
+	if ! install_openclaw_cli_wrapper; then
+		log_error "OpenClaw CLI wrapper 安装失败"
+		exit 1
+	fi
+
 	local oc_found
 	oc_found=$(find_oc_entry)
+	local oc_ver=""
 	if [ -n "$oc_found" ]; then
 		oc_ver=$("$NODE_BIN" "$oc_found" --version 2>/dev/null | tr -d '[:space:]')
 	fi
-
 	if [ -n "$oc_ver" ]; then
-		install_openclaw_cli_wrapper || true
 		log_info "OpenClaw v${oc_ver} 安装成功"
 		assert_node_runtime
 	else
-		log_error "OpenClaw 安装验证失败"
+		log_error "OpenClaw 安装验证失败，无法读取版本号"
 		exit 1
 	fi
 }
@@ -608,8 +972,10 @@ do_setup() {
 		local oc_ver=""
 		local oc_entry="$(find_oc_entry)"
 		local oc_pkg_dir="$(dirname "$oc_entry")"
-		[ -f "$oc_pkg_dir/package.json" ] && \
-			oc_ver=$("$NODE_BIN" -e "try{console.log(require('$oc_pkg_dir/package.json').version)}catch(e){}" 2>/dev/null) || true
+		if [ -f "$oc_pkg_dir/package.json" ]; then
+			oc_ver=$("$NODE_BIN" -e "try{console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).version)}catch(e){}" "$oc_pkg_dir/package.json" 2>/dev/null || true)
+			[ -z "$oc_ver" ] && oc_ver=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$oc_pkg_dir/package.json" 2>/dev/null | head -1)
+		fi
 		echo "╔══════════════════════════════════════════════════════════════╗"
 		echo "║          ⚠️  OpenClaw 运行环境已安装，无需重复安装          ║"
 		echo "╚══════════════════════════════════════════════════════════════╝"
@@ -648,7 +1014,7 @@ do_setup() {
 	OC_SETUP_CLEANUP=1
 	trap 'rc=$?; if [ $rc -ne 0 ] && [ "${OC_SETUP_CLEANUP:-0}" = "1" ]; then cleanup_partial_install; fi; exit $rc' EXIT
 
-	download_node "$node_ver"
+	download_node "$node_ver" || exit 1
 	install_pnpm
 	install_openclaw
 	init_openclaw
@@ -710,14 +1076,57 @@ do_check() {
 	echo "  C库:      $(detect_libc)"
 }
 
-do_upgrade() {
+upgrade_openclaw() {
 	echo "╔══════════════════════════════════════════════════════════════╗"
 	echo "║            一万AI分享  OpenClaw 升级                         ║"
 	echo "╚══════════════════════════════════════════════════════════════╝"
 	echo ""
 
+	local rep_result="failed"
+	local rep_backup="skipped"
+	local rep_doctor="skipped"
+	local rep_gateway="skipped"
+	local rep_rollback="none"
+	local rep_verified=""
+
+	record_verified_cmd() {
+		local name="$1"
+		local code="$2"
+		if [ -z "$rep_verified" ]; then
+			rep_verified="[${name} rc=${code}]"
+		else
+			rep_verified="${rep_verified} [${name} rc=${code}]"
+		fi
+	}
+
+	print_upgrade_report() {
+		echo ""
+		echo "============================================================"
+		echo "OpenClaw Upgrade Transaction Report"
+		echo "============================================================"
+		echo "RESULT: ${rep_result}"
+		echo "BACKUP: ${rep_backup}"
+		echo "DOCTOR: ${rep_doctor}"
+		echo "GATEWAY: ${rep_gateway}"
+		echo "ROLLBACK: ${rep_rollback}"
+		echo "VERIFIED: ${rep_verified}"
+		echo "============================================================"
+		echo ""
+	}
+
 	if [ ! -x "$NODE_BIN" ]; then
 		log_error "Node.js 未安装, 请先运行: openclaw-env setup"
+		print_upgrade_report
+		exit 1
+	fi
+	if [ ! -x "$NPM_BIN" ]; then
+		log_error "npm 可执行文件不可用 ($NPM_BIN)，无法升级 OpenClaw"
+		print_upgrade_report
+		exit 1
+	fi
+	if [ ! -f "$OC_PACKAGE_CONTRACT" ]; then
+		log_error "契约校验 helper 缺失 ($OC_PACKAGE_CONTRACT)，升级终止 (失败关闭)"
+		print_upgrade_report
 		exit 1
 	fi
 
@@ -728,39 +1137,426 @@ do_upgrade() {
 	if [ -n "$oc_entry" ]; then
 		local oc_pkg_dir="$(dirname "$oc_entry")"
 		[ -f "$oc_pkg_dir/package.json" ] && \
-			current_ver=$("$NODE_BIN" -e "try{console.log(require('$oc_pkg_dir/package.json').version)}catch(e){}" 2>/dev/null) || true
+			current_ver=$("$NODE_BIN" -e "try{console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).version)}catch(e){}" "$oc_pkg_dir/package.json" 2>/dev/null || true)
+		[ -z "$current_ver" ] && [ -f "$oc_pkg_dir/package.json" ] && \
+			current_ver=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$oc_pkg_dir/package.json" 2>/dev/null | head -1)
 	fi
 
 	echo "  Node.js:     $($NODE_BIN --version 2>/dev/null)"
 	[ -n "$current_ver" ] && echo "  当前版本:    v${current_ver}"
 	echo ""
 
-	local libc_type
-	libc_type=$(detect_libc)
-	local install_flags=""
-	[ "$libc_type" = "musl" ] && install_flags="--ignore-scripts"
-
 	echo "=== 正在升级 OpenClaw ==="
 	echo ""
+	local target_ver="${OC_TESTED_VERSION}"
 	local target_pkg="openclaw@${OC_TESTED_VERSION}"
-	[ "$OC_VERSION" = "latest" ] && target_pkg="openclaw@latest"
-	[ -n "$OC_VERSION" ] && [ "$OC_VERSION" != "latest" ] && [ "$OC_VERSION" != "stable" ] && target_pkg="openclaw@${OC_VERSION}"
-	echo "目标版本: ${target_pkg#openclaw@}"
-	"$NPM_BIN" install -g "$target_pkg" --prefix="$OC_GLOBAL" $install_flags 2>&1
-
-	# 验证升级结果
-	local new_ver=""
-	local new_entry=""
-	new_entry=$(find_oc_entry)
-	if [ -n "$new_entry" ]; then
-		local new_pkg_dir="$(dirname "$new_entry")"
-		[ -f "$new_pkg_dir/package.json" ] && \
-			new_ver=$("$NODE_BIN" -e "try{console.log(require('$new_pkg_dir/package.json').version)}catch(e){}" 2>/dev/null) || true
+	if [ "$OC_VERSION" = "latest" ]; then
+		target_ver="latest"
+		target_pkg="openclaw@latest"
+	elif [ -n "$OC_VERSION" ] && [ "$OC_VERSION" != "stable" ]; then
+		target_ver="${OC_VERSION}"
+		target_pkg="openclaw@${OC_VERSION}"
 	fi
+	echo "目标版本: ${target_pkg#openclaw@}"
+
+	local stage_dir
+	stage_dir=$(mktemp -d /tmp/openclaw-stage-XXXXXX 2>/dev/null || mktemp -d 2>/dev/null || echo "/tmp/openclaw-stage-$$-${RANDOM:-0}")
+	mkdir -p "$stage_dir"
+	OC_STAGE_DIR="$stage_dir"
+	OC_CANDIDATE_PREFIX=""
+	OC_BACKUP_PREFIX=""
+	trap 'rc=$?; [ -n "${OC_STAGE_DIR:-}" ] && rm -rf "$OC_STAGE_DIR" 2>/dev/null || true; [ -n "${OC_CANDIDATE_PREFIX:-}" ] && rm -rf "$OC_CANDIDATE_PREFIX" 2>/dev/null || true; if [ -n "${OC_BACKUP_PREFIX:-}" ] && [ -d "${OC_BACKUP_PREFIX:-}" ] && [ ! -d "$OC_GLOBAL" ]; then mv "$OC_BACKUP_PREFIX" "$OC_GLOBAL" 2>/dev/null || true; fi; [ -n "${OC_BACKUP_PREFIX:-}" ] && rm -rf "$OC_BACKUP_PREFIX" 2>/dev/null || true; exit $rc' EXIT INT TERM
+
+	local pack_log="${stage_dir}/npm-pack.log"
+	local pack_rc=0
+	echo "  正在下载并打包预检 OpenClaw (${target_pkg})..."
+	( cd "$stage_dir" && "$NPM_BIN" pack "$target_pkg" ) > "$pack_log" 2>&1 || pack_rc=$?
+	record_verified_cmd "npm-pack" "$pack_rc"
+
+	if [ "$pack_rc" -ne 0 ]; then
+		cat "$pack_log" 2>/dev/null || true
+		log_error "npm pack 升级下载失败 (退出码: ${pack_rc})"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		rep_result="failed"
+		print_upgrade_report
+		exit "$pack_rc"
+	fi
+
+	local tarball
+	tarball=$(ls "$stage_dir"/*.tgz 2>/dev/null | head -1)
+	if [ -z "$tarball" ] || [ ! -f "$tarball" ]; then
+		log_error "npm pack 未生成有效 tarball 产物"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		rep_result="failed"
+		print_upgrade_report
+		exit 1
+	fi
+
+	local unpack_dir="${stage_dir}/unpacked"
+	ensure_mkdir "$unpack_dir"
+	if ! tar xzf "$tarball" -C "$unpack_dir" 2>/dev/null; then
+		log_error "解压预检 tarball 失败: $tarball"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		rep_result="failed"
+		print_upgrade_report
+		exit 1
+	fi
+
+	local staged_pkg_dir="${unpack_dir}/package"
+	if [ ! -f "${staged_pkg_dir}/package.json" ]; then
+		staged_pkg_dir=$(find "$unpack_dir" -maxdepth 2 -name "package.json" 2>/dev/null | head -1)
+		[ -n "$staged_pkg_dir" ] && staged_pkg_dir=$(dirname "$staged_pkg_dir")
+	fi
+	if [ -z "$staged_pkg_dir" ] || [ ! -f "${staged_pkg_dir}/package.json" ]; then
+		log_error "预检解包产物中未找到 package.json"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		rep_result="failed"
+		print_upgrade_report
+		exit 1
+	fi
+
+	echo "  正在执行解包清单与运行时预检 (零执行静态预检)..."
+	local manifest_rc=0
+	if ! validate_openclaw_manifest "$staged_pkg_dir" "$target_ver"; then
+		manifest_rc=1
+	fi
+	record_verified_cmd "validate-manifest" "$manifest_rc"
+
+	if [ "$manifest_rc" -ne 0 ]; then
+		log_error "OpenClaw 升级预检校验失败，终止升级 (原有安装保持不变)"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		rep_result="failed"
+		print_upgrade_report
+		exit 1
+	fi
+
+	local global_parent
+	global_parent="$(dirname "$OC_GLOBAL")"
+	ensure_mkdir "$global_parent"
+	local candidate_prefix
+	candidate_prefix=$(mktemp -d "${global_parent}/.global-candidate-XXXXXX" 2>/dev/null || echo "${global_parent}/.global-candidate-$$-${RANDOM:-0}")
+	ensure_mkdir "$candidate_prefix"
+	chmod 755 "$candidate_prefix" 2>/dev/null || true
+	OC_CANDIDATE_PREFIX="$candidate_prefix"
+
+	# 升级一律先以 --ignore-scripts --omit=optional 阻断全部未知脚本，捕获真实退出码
+	local npm_log="${stage_dir}/npm-upgrade.log"
+	local npm_rc=0
+
+	echo "  正在执行 npm 升级安装 (${tarball} --ignore-scripts --omit=optional)..."
+	"$NPM_BIN" install -g "$tarball" --prefix="$candidate_prefix" --ignore-scripts --omit=optional > "$npm_log" 2>&1 || npm_rc=$?
+	record_verified_cmd "candidate-install" "$npm_rc"
+	if [ "$npm_rc" -ne 0 ]; then
+		cat "$npm_log" 2>/dev/null || true
+		log_error "npm 升级失败 (退出码: ${npm_rc})"
+		rm -rf "$candidate_prefix" 2>/dev/null || true
+		OC_CANDIDATE_PREFIX=""
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		rep_result="failed"
+		print_upgrade_report
+		exit "$npm_rc"
+	fi
+	tail -10 "$npm_log" 2>/dev/null || true
+
+	# 验证升级候选入口文件
+	local new_entry
+	new_entry=$(find_oc_entry "$candidate_prefix")
+	if [ -z "$new_entry" ] || [ ! -f "$new_entry" ]; then
+		log_error "升级验证失败，候选 OpenClaw 入口文件未找到"
+		rm -rf "$candidate_prefix" 2>/dev/null || true
+		OC_CANDIDATE_PREFIX=""
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		rep_result="failed"
+		print_upgrade_report
+		exit 1
+	fi
+
+	local new_pkg_dir
+	new_pkg_dir="$(dirname "$new_entry")"
+	echo "  正在候选依赖树上下文中执行已验证 lifecycle..."
+	local lc_rc=0
+	if ! execute_openclaw_lifecycle "$new_pkg_dir" "$target_ver"; then
+		lc_rc=1
+	fi
+	record_verified_cmd "lifecycle" "$lc_rc"
+	if [ "$lc_rc" -ne 0 ]; then
+		log_error "OpenClaw 升级契约校验或 lifecycle 脚本执行失败，升级中止 (原有安装保持不变)"
+		rm -rf "$candidate_prefix" 2>/dev/null || true
+		OC_CANDIDATE_PREFIX=""
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		rep_result="failed"
+		print_upgrade_report
+		exit 1
+	fi
+
+	# ── 状态管理事务 (备份创建与校验) ──
+	local _script_dir
+	_script_dir="$(CDPATH= cd -- "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
+	local state_dir="${OPENCLAW_STATE_DIR:-${OC_DATA:+$OC_DATA/.openclaw}}"
+	local state_helper="/usr/libexec/openclaw-upgrade-state.sh"
+	[ -x "$state_helper" ] || state_helper="${_script_dir}/../libexec/openclaw-upgrade-state.sh"
+	[ -x "$state_helper" ] || state_helper="./root/usr/libexec/openclaw-upgrade-state.sh"
+
+	local state_managed=0
+	local bk_archive=""
+	if [ -n "$state_dir" ] && [ -d "$state_dir" ] && [ -x "$state_helper" ]; then
+		state_managed=1
+
+		# 0. 初始化升级事务
+		"$state_helper" init-transaction "$target_ver" "$state_dir" 2>/dev/null || true
+
+		# 1. 停止 Gateway，保证 SQLite 静态一致性
+		local stop_gw_rc=0
+		if [ -x /etc/init.d/openclaw ]; then
+			/etc/init.d/openclaw stop >/dev/null 2>&1 || stop_gw_rc=$?
+		elif command -v openclaw-initd >/dev/null 2>&1; then
+			openclaw-initd stop >/dev/null 2>&1 || stop_gw_rc=$?
+		fi
+		record_verified_cmd "gateway-stop" "$stop_gw_rc"
+
+		# 2. 状态备份创建 (位于 State 目录之外，以 openclaw 用户执行)
+		"$state_helper" set-phase backing_up "$state_dir" 0 "" 2>/dev/null || true
+		local backup_dir="${OPENCLAW_BACKUP_DIR:-${OC_DATA:+$OC_DATA/backups}}"
+		[ -z "$backup_dir" ] && backup_dir="$(dirname "$state_dir")/openclaw-backups"
+		local bk_create_rc=0
+		local bk_out=""
+		bk_out=$("$state_helper" backup-create "$backup_dir" "$state_dir" 2>&1) || bk_create_rc=$?
+		record_verified_cmd "backup-create" "$bk_create_rc"
+		if [ "$bk_create_rc" -ne 0 ]; then
+			log_error "升级安全事务中止: 创建完整状态备份失败"
+			rm -rf "$candidate_prefix" 2>/dev/null || true
+			OC_CANDIDATE_PREFIX=""
+			rm -rf "$stage_dir" 2>/dev/null || true
+			OC_STAGE_DIR=""
+			rep_result="failed"
+			rep_backup="failed (exit=${bk_create_rc})"
+			rep_rollback="none"
+			"$state_helper" set-phase failed "$state_dir" "$bk_create_rc" "Backup create failed" "" 2>/dev/null || true
+			if [ -x /etc/init.d/openclaw ]; then
+				/etc/init.d/openclaw start >/dev/null 2>&1 || true
+			elif command -v openclaw-initd >/dev/null 2>&1; then
+				openclaw-initd start >/dev/null 2>&1 || true
+			fi
+			print_upgrade_report
+			exit "$bk_create_rc"
+		fi
+		bk_archive=$(printf '%s\n' "$bk_out" | tail -1)
+		rep_backup="created (${bk_archive})"
+
+		# 3. 官方 backup verify 与完整覆盖清单校验
+		local bk_verify_rc=0
+		"$state_helper" backup-verify "$bk_archive" "$state_dir" >/dev/null 2>&1 || bk_verify_rc=$?
+		record_verified_cmd "backup-verify" "$bk_verify_rc"
+		if [ "$bk_verify_rc" -ne 0 ]; then
+			log_error "升级安全事务中止: 备份归档官方验证或覆盖清单校验失败"
+			rm -rf "$candidate_prefix" 2>/dev/null || true
+			OC_CANDIDATE_PREFIX=""
+			rm -rf "$stage_dir" 2>/dev/null || true
+			OC_STAGE_DIR=""
+			rep_result="failed"
+			rep_backup="failed (verify exit=${bk_verify_rc})"
+			rep_rollback="none"
+			"$state_helper" set-phase failed "$state_dir" "$bk_verify_rc" "Backup verify failed" "$bk_archive" 2>/dev/null || true
+			if [ -x /etc/init.d/openclaw ]; then
+				/etc/init.d/openclaw start >/dev/null 2>&1 || true
+			elif command -v openclaw-initd >/dev/null 2>&1; then
+				openclaw-initd start >/dev/null 2>&1 || true
+			fi
+			print_upgrade_report
+			exit "$bk_verify_rc"
+		fi
+		rep_backup="verified (${bk_archive})"
+		"$state_helper" set-phase backup_verified "$state_dir" 0 "" "$bk_archive" 2>/dev/null || true
+
+		# 4. 数据库前向迁移预检 (在 candidate 完成后、code switch 之前)
+		local db_pre_rc=0
+		"$state_helper" database-preflight "$bk_archive" "$state_dir" >/dev/null 2>&1 || db_pre_rc=$?
+		record_verified_cmd "database-preflight" "$db_pre_rc"
+		if [ "$db_pre_rc" -ne 0 ]; then
+			log_error "升级安全事务中止: 数据库前向迁移预检未通过"
+			rm -rf "$candidate_prefix" 2>/dev/null || true
+			OC_CANDIDATE_PREFIX=""
+			rm -rf "$stage_dir" 2>/dev/null || true
+			OC_STAGE_DIR=""
+			rep_result="failed"
+			rep_rollback="none"
+			"$state_helper" set-phase failed "$state_dir" "$db_pre_rc" "Database preflight failed" "$bk_archive" 2>/dev/null || true
+			if [ -x /etc/init.d/openclaw ]; then
+				/etc/init.d/openclaw start >/dev/null 2>&1 || true
+			elif command -v openclaw-initd >/dev/null 2>&1; then
+				openclaw-initd start >/dev/null 2>&1 || true
+			fi
+			print_upgrade_report
+			exit "$db_pre_rc"
+		fi
+	fi
+
+	# ── 原子切换 OC_GLOBAL 代码 (旧代码保留至迁移与健康检查完成) ──
+	echo "  候选验证通过，正在原子切换 OC_GLOBAL..."
+	local backup_prefix="${global_parent}/.global-backup-$$-${RANDOM:-0}"
+	local has_existing_global=0
+	if [ -e "$OC_GLOBAL" ]; then
+		has_existing_global=1
+		if ! mv "$OC_GLOBAL" "$backup_prefix" 2>/dev/null; then
+			log_error "无法备份现有 OC_GLOBAL 目录，升级中止"
+			rm -rf "$candidate_prefix" 2>/dev/null || true
+			OC_CANDIDATE_PREFIX=""
+			rm -rf "$stage_dir" 2>/dev/null || true
+			OC_STAGE_DIR=""
+			record_verified_cmd "code-switch" 1
+			rep_result="failed"
+			rep_rollback="none"
+			print_upgrade_report
+			exit 1
+		fi
+		OC_BACKUP_PREFIX="$backup_prefix"
+	fi
+
+	local switch_ok=0
+	chmod 755 "$candidate_prefix" 2>/dev/null || true
+	chmod -R a+rX "$candidate_prefix" 2>/dev/null || true
+	if mv "$candidate_prefix" "$OC_GLOBAL" 2>/dev/null; then
+		OC_CANDIDATE_PREFIX=""
+		local final_entry
+		final_entry=$(find_oc_entry)
+		if [ -n "$final_entry" ] && [ -f "$final_entry" ] && install_openclaw_cli_wrapper; then
+			switch_ok=1
+		fi
+	fi
+
+	if [ "$switch_ok" -eq 1 ]; then
+		record_verified_cmd "code-switch" 0
+	else
+		record_verified_cmd "code-switch" 1
+		log_error "替换 OC_GLOBAL 或 wrapper 验证失败，执行代码回滚 (迁移尚未开始)..."
+		rm -rf "$OC_GLOBAL" 2>/dev/null || true
+		[ -e "$candidate_prefix" ] && rm -rf "$candidate_prefix" 2>/dev/null || true
+		OC_CANDIDATE_PREFIX=""
+		local code_pre_rb_rc=0
+		if [ "$has_existing_global" -eq 1 ]; then
+			mv "$backup_prefix" "$OC_GLOBAL" 2>/dev/null || code_pre_rb_rc=$?
+			OC_BACKUP_PREFIX=""
+			install_openclaw_cli_wrapper 2>/dev/null || true
+		fi
+		record_verified_cmd "code-rollback" "$code_pre_rb_rc"
+		[ "$state_managed" -eq 1 ] && "$state_helper" set-phase failed "$state_dir" 1 "Code switch failed" "$bk_archive" 2>/dev/null || true
+		if [ -x /etc/init.d/openclaw ]; then
+			/etc/init.d/openclaw start >/dev/null 2>&1 || true
+		elif command -v openclaw-initd >/dev/null 2>&1; then
+			openclaw-initd start >/dev/null 2>&1 || true
+		fi
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		rep_result="failed"
+		rep_rollback="code: ok, state: none"
+		print_upgrade_report
+		exit 1
+	fi
+
+	# ── 迁移开始阶段: 任何失败必须保留 2026.9.1 与失败状态，进入 recovery 状态 ──
+	# 严禁在迁移开始后将旧代码放回已迁移状态，完整回滚必须显式执行
+	if [ "$state_managed" -eq 1 ]; then
+		"$state_helper" set-phase migrating "$state_dir" 0 "" "$bk_archive" 2>/dev/null || true
+
+		# 1. 幂等 Doctor migration、配置验证及 Token 对账
+		local doc_rc=0
+		"$state_helper" doctor-migration "$state_dir" "$target_ver" >/dev/null 2>&1 || doc_rc=$?
+		record_verified_cmd "doctor" "$doc_rc"
+		if [ "$doc_rc" -ne 0 ]; then
+			log_error "Doctor migration 失败，系统已进入 recovery 恢复模式 (保留 2026.9.1 及状态，需显式回滚)..."
+			rep_doctor="failed (exit=${doc_rc})"
+
+			"$state_helper" set-phase recovery "$state_dir" "$doc_rc" "Doctor migration failed" "$bk_archive" 2>/dev/null || true
+
+			rm -rf "$stage_dir" 2>/dev/null || true
+			OC_STAGE_DIR=""
+			rep_result="failed"
+			rep_rollback="recovery_required (manual explicit rollback needed; new state & 2026.9.1 preserved)"
+			print_upgrade_report
+			exit "$doc_rc"
+		fi
+		rep_doctor="passed"
+		"$state_helper" set-phase migrated "$state_dir" 0 "" "$bk_archive" 2>/dev/null || true
+
+		# 2. 插件收敛事务 (registry refresh / doctor --post-upgrade)
+		local plug_rc=0
+		"$state_helper" plugin-convergence "$state_dir" >/dev/null 2>&1 || plug_rc=$?
+		record_verified_cmd "plugin-convergence" "$plug_rc"
+
+		# 3. 启动 Gateway
+		local gw_start_rc=0
+		if [ -x /etc/init.d/openclaw ]; then
+			/etc/init.d/openclaw start >/dev/null 2>&1 || gw_start_rc=$?
+		elif command -v openclaw-initd >/dev/null 2>&1; then
+			openclaw-initd start >/dev/null 2>&1 || gw_start_rc=$?
+		fi
+		record_verified_cmd "gateway-start" "$gw_start_rc"
+
+		# 3. Gateway 健康验证
+		"$state_helper" set-phase gateway_verifying "$state_dir" 0 "" "$bk_archive" 2>/dev/null || true
+		local gw_health_rc=0
+		"$state_helper" gateway-verify "" "$state_dir" >/dev/null 2>&1 || gw_health_rc=$?
+		record_verified_cmd "gateway-health" "$gw_health_rc"
+		if [ "$gw_health_rc" -ne 0 ]; then
+			log_error "Gateway 健康检查未通过，系统已进入 recovery 恢复模式 (需显式回滚)..."
+			rep_gateway="failed (exit=${gw_health_rc})"
+
+			if [ -x /etc/init.d/openclaw ]; then
+				/etc/init.d/openclaw stop >/dev/null 2>&1 || true
+			elif command -v openclaw-initd >/dev/null 2>&1; then
+				openclaw-initd stop >/dev/null 2>&1 || true
+			fi
+
+			"$state_helper" set-phase recovery "$state_dir" "$gw_health_rc" "Gateway health verify failed" "$bk_archive" 2>/dev/null || true
+
+			rm -rf "$stage_dir" 2>/dev/null || true
+			OC_STAGE_DIR=""
+			rep_result="failed"
+			rep_rollback="recovery_required (manual explicit rollback needed; new state & 2026.9.1 preserved)"
+			print_upgrade_report
+			exit "$gw_health_rc"
+		fi
+		rep_gateway="healthy"
+		"$state_helper" set-phase completed "$state_dir" 0 "" "$bk_archive" 2>/dev/null || true
+	fi
+
+	# 迁移与 Gateway 验证全部成功，清理代码备份 (备份归档持续保留)
+	if [ "$has_existing_global" -eq 1 ] && [ -n "$backup_prefix" ] && [ -d "$backup_prefix" ]; then
+		rm -rf "$backup_prefix" 2>/dev/null || true
+		OC_BACKUP_PREFIX=""
+	fi
+
+	rm -rf "$stage_dir" 2>/dev/null || true
+	OC_STAGE_DIR=""
+	trap - EXIT INT TERM
+
+	local final_installed_entry
+	final_installed_entry=$(find_oc_entry)
+	local final_pkg_dir
+	final_pkg_dir="$(dirname "$final_installed_entry")"
+	local new_ver=""
+	if [ -f "$final_pkg_dir/package.json" ]; then
+		new_ver=$("$NODE_BIN" -e "try{console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).version)}catch(e){}" "$final_pkg_dir/package.json" 2>/dev/null || true)
+		[ -z "$new_ver" ] && new_ver=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$final_pkg_dir/package.json" 2>/dev/null | head -1)
+	fi
+	if [ -z "$new_ver" ] && [ -n "$final_installed_entry" ]; then
+		new_ver=$("$NODE_BIN" "$final_installed_entry" --version 2>/dev/null | tr -d '[:space:]' || true)
+	fi
+
+	rep_result="success"
+	rep_rollback="none"
+	print_upgrade_report
 
 	echo ""
 	if [ -n "$new_ver" ]; then
-		install_openclaw_cli_wrapper || true
 		assert_node_runtime
 		if [ "$current_ver" = "$new_ver" ]; then
 			log_info "当前已是最新版本 v${new_ver}"
@@ -772,9 +1568,13 @@ do_upgrade() {
 		echo "║  ✅ 升级完成！                                               ║"
 		echo "╚══════════════════════════════════════════════════════════════╝"
 	else
-		log_error "升级验证失败，OpenClaw 入口文件未找到"
+		log_error "升级验证失败，无法读取新版本号"
 		exit 1
 	fi
+}
+
+do_upgrade() {
+	upgrade_openclaw "$@"
 }
 
 # ── 恢复出厂设置 (非交互式) ──
@@ -825,7 +1625,7 @@ do_factory_reset() {
 		local new_token
 		new_token=$(head -c 24 /dev/urandom | hexdump -e '24/1 "%02x"' 2>/dev/null || dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 48)
 		_JS_KEY="gateway.port" _JS_VAL="18789" "$NODE_BIN" -e "const fs=require('fs');let d={};try{d=JSON.parse(fs.readFileSync('${config_file}','utf8'));}catch(e){}const ks=process.env._JS_KEY.split('.');let o=d;for(let i=0;i<ks.length-1;i++){if(!o[ks[i]]||typeof o[ks[i]]!=='object')o[ks[i]]={};o=o[ks[i]];}let v=process.env._JS_VAL;try{v=JSON.parse(v);}catch(e){}o[ks[ks.length-1]]=v;fs.writeFileSync('${config_file}',JSON.stringify(d,null,2));" 2>/dev/null
-		for kv in "gateway.bind=lan" "gateway.mode=local" "gateway.auth.mode=token" "gateway.auth.token=${new_token}" "gateway.controlUi.allowInsecureAuth=true" "gateway.controlUi.dangerouslyDisableDeviceAuth=true" "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true" "gateway.tailscale.mode=off" "acp.dispatch.enabled=false" "tools.profile=coding"; do
+		for kv in "gateway.bind=lan" "gateway.mode=local" "gateway.auth.mode=token" "gateway.auth.token=${new_token}" "gateway.controlUi.allowInsecureAuth=true" "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true" "gateway.tailscale.mode=off" "acp.dispatch.enabled=false" "tools.profile=coding"; do
 			local k="${kv%%=*}" v="${kv#*=}"
 			_JS_KEY="$k" _JS_VAL="$v" "$NODE_BIN" -e "const fs=require('fs');let d={};try{d=JSON.parse(fs.readFileSync('${config_file}','utf8'));}catch(e){}const ks=process.env._JS_KEY.split('.');let o=d;for(let i=0;i<ks.length-1;i++){if(!o[ks[i]]||typeof o[ks[i]]!=='object')o[ks[i]]={};o=o[ks[i]];}let v=process.env._JS_VAL;try{v=JSON.parse(v);}catch(e){}o[ks[ks.length-1]]=v;fs.writeFileSync('${config_file}',JSON.stringify(d,null,2));" 2>/dev/null
 		done
@@ -922,8 +1722,16 @@ do_setup_offline() {
 
 		local oc_entry=$(find_oc_entry)
 		if [ -n "$oc_entry" ]; then
+			local oc_pkg_dir="$(dirname "$oc_entry")"
+			if ! execute_openclaw_lifecycle "$oc_pkg_dir" "${OC_TESTED_VERSION}"; then
+				log_error "OpenClaw 离线包契约校验或 lifecycle 脚本执行失败"
+				exit 1
+			fi
 			local oc_ver=$("$NODE_BIN" "$oc_entry" --version 2>/dev/null | tr -d '[:space:]')
-			install_openclaw_cli_wrapper || true
+			if ! install_openclaw_cli_wrapper; then
+				log_error "OpenClaw CLI wrapper 安装失败"
+				exit 1
+			fi
 			log_info "OpenClaw v${oc_ver} 安装成功"
 			assert_node_runtime
 		else
@@ -961,7 +1769,7 @@ case "${1:-}" in
 		do_upgrade
 		;;
 	node)
-		download_node "$NODE_VERSION"
+		download_node "$NODE_VERSION" || exit 1
 		;;
 	factory-reset)
 		do_factory_reset

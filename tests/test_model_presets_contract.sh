@@ -69,6 +69,16 @@ for id in $STALE_IDS; do
 	fi
 done
 
+# ── 菜单项模型简化契约：顶级模型提供商菜单不得罗列过时具体模型名称 ──
+for name in "GPT-5.2" "GPT-4.1" "GPT-5 mini" "Sonnet 4" "Opus 4" "Gemini 2.5" "Gemini 3" "Grok-4" "HY T1" "ERNIE-4.0" "GLM-5.1"; do
+	if grep -F -- "$name" "$SH_CONFIG" | grep -v '^[[:space:]]*#' | grep -q .; then
+		fail "oc-config.sh model menu still lists stale model name: $name"
+	fi
+	if grep -F -- "$name" "$JS_CONFIG" | grep -v '^[[:space:]]*//' | grep -v '^[[:space:]]*\*' | grep -q .; then
+		fail "oc-config-interactive.js model menu still lists stale model name: $name"
+	fi
+done
+
 # ── 预设文件自身校验 (需要 node) ──
 NODE_BIN=""
 for cand in node nodejs /opt/openclaw/node/bin/node; do

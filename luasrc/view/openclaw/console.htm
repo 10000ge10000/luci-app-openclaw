@@ -30,8 +30,28 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 .oc-console-info .label { color: #888; }
 .oc-console-info .value { font-family: monospace; color: #333; font-weight: 500; }
 .oc-console-info .sep { color: #ddd; }
-.oc-console-info .btn-open {
+.oc-console-actions {
 	margin-left: auto;
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+.oc-console-actions .btn-action {
+	padding: 4px 12px;
+	background: #f0f2f5;
+	color: #333;
+	border: 1px solid #d0d7de;
+	border-radius: 4px;
+	font-size: 12px;
+	cursor: pointer;
+	text-decoration: none;
+	transition: background 0.2s;
+}
+.oc-console-actions .btn-action:hover {
+	background: #e1e4e8;
+	text-decoration: none;
+}
+.oc-console-actions .btn-open {
 	padding: 4px 14px;
 	background: #4a90d9;
 	color: #fff;
@@ -41,7 +61,10 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 	cursor: pointer;
 	text-decoration: none;
 }
-.oc-console-info .btn-open:hover { background: #357abd; }
+.oc-console-actions .btn-open:hover {
+	background: #357abd;
+	text-decoration: none;
+}
 
 .oc-console-wrap {
 	border: 2px solid #e0e0e0;
@@ -49,11 +72,36 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 	overflow: hidden;
 	background: #fff;
 	box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+	position: relative;
+	min-height: 720px;
+}
+.oc-console-wrap:fullscreen {
+	border: none;
+	border-radius: 0;
+	height: 100vh;
+	width: 100vw;
+}
+.oc-console-wrap:-webkit-full-screen {
+	border: none;
+	border-radius: 0;
+	height: 100vh;
+	width: 100vw;
+}
+
+#oc-console-iframe {
+	width: 100%;
+	height: 760px;
+	border: none;
+	display: block;
+}
+.oc-console-wrap:fullscreen #oc-console-iframe,
+.oc-console-wrap:-webkit-full-screen #oc-console-iframe {
+	height: 100vh;
 }
 
 .oc-console-loading {
 	display: flex; flex-direction: column; align-items: center; justify-content: center;
-	height: 300px; color: #666; font-size: 14px; background: #fafafa;
+	height: 360px; color: #666; font-size: 14px; background: #fafafa;
 }
 .oc-console-loading .spinner {
 	width: 32px; height: 32px; border: 3px solid #e0e0e0; border-top: 3px solid #4a90d9;
@@ -76,12 +124,48 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 	<span class="sep">|</span>
 	<span class="label">状态：</span>
 	<span id="oc-console-status-text">检查中...</span>
-	<a id="oc-console-open-btn" class="btn-open" href="#" target="_blank" rel="noopener" style="display:none;">
-		↗ 新窗口打开
-	</a>
+	<div class="oc-console-actions" id="oc-console-actions" style="display:none;">
+		<button type="button" id="oc-console-pairing-toggle-btn" class="btn-action" title="管理/批准设备配对请求">📱 设备配对 <span id="oc-console-pairing-nav-badge" style="display:none; background:#ff4d4f; color:#fff; padding:0 6px; border-radius:10px; font-size:11px; font-weight:600; margin-left:2px;">0</span></button>
+		<button type="button" id="oc-console-refresh-btn" class="btn-action" title="重新载入当前会话">🔄 刷新</button>
+		<button type="button" id="oc-console-fullscreen-btn" class="btn-action" title="全屏查看">⛶ 全屏</button>
+		<a id="oc-console-open-btn" class="btn-open" href="#" target="_blank" rel="noopener">
+			↗ 新窗口打开
+		</a>
+	</div>
 </div>
 
-<div class="oc-console-wrap">
+<div id="oc-pairing-banner" style="display:none; padding:12px 16px; margin-bottom:14px; background:#fffbe6; border:1px solid #ffe58f; border-left:4px solid #faad14; border-radius:6px;">
+	<div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+		<div style="flex:1; min-width:280px;">
+			<div style="font-weight:600; color:#d48806; font-size:14px; margin-bottom:4px; display:flex; align-items:center; gap:8px;">
+				<span>🔔 检测到待配对设备请求</span>
+				<span id="oc-pairing-badge" style="background:#faad14; color:#fff; padding:1px 7px; border-radius:10px; font-size:11px;">0</span>
+			</div>
+			<div style="font-size:13px; color:#555; line-height:1.5; margin-bottom:6px;">
+				首次访问 Control UI 时网关需要主机批准该浏览器。点击「一键批准配对」即可完成授权并进入控制台。
+			</div>
+			<div style="font-size:12px; color:#cf1322; background:#fff1f0; border:1px solid #ffa39e; padding:6px 10px; border-radius:4px; line-height:1.4; margin-bottom:6px;">
+				⚠️ <strong>风险提示</strong>：批准设备配对后，该浏览器将获得 OpenClaw 网关的完全控制权限。请确保在受信任的局域网环境，并仅在您本人正在连接时批准。
+			</div>
+			<div id="oc-pairing-items" style="font-size:12px; font-family:monospace; color:#333; line-height:1.6;"></div>
+		</div>
+		<div style="display:flex; gap:8px; align-items:center; margin-top:4px;">
+			<button type="button" id="oc-pairing-approve-all-btn" class="btn-open" style="background:#52c41a; font-weight:600; padding:6px 14px;">
+				⚡ 一键批准配对
+			</button>
+			<button type="button" id="oc-pairing-refresh-btn" class="btn-action" style="padding:6px 10px;">
+				🔄 刷新
+			</button>
+		</div>
+	</div>
+	<div id="oc-pairing-msg" style="display:none; margin-top:8px; font-size:13px; font-weight:500;"></div>
+</div>
+
+<div id="oc-console-https-hint" style="display:none; padding:10px 14px; margin-bottom:14px; background:#fffbe6; border:1px solid #ffe58f; border-radius:6px; font-size:13px; color:#d48806; line-height:1.6;">
+	⚠️ <strong>浏览器安全提示</strong>：当前正在通过 HTTPS 访问 LuCI。由于 OpenClaw 网关为 HTTP 服务，浏览器可能会拦截跨协议内嵌页面（Mixed Content）。若下方界面显示空白，请点击右上角「<strong>↗ 新窗口打开</strong>」直接访问会话，或改用 HTTP 协议访问 LuCI。
+</div>
+
+<div class="oc-console-wrap" id="oc-console-wrap">
 	<div id="oc-console-container">
 		<div class="oc-console-loading" id="oc-console-loading">
 			<div class="spinner"></div>
@@ -97,27 +181,54 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 	var gwToken = '';
 	var statusUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "status_api")%>';
 	var tokenUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "get_token")%>';
-	// get_token 返回凭据，已改为 post()，需带 CSRF token
 	var ocCsrfToken = '<%=token%>';
 	var container = document.getElementById('oc-console-container');
 	var loading = document.getElementById('oc-console-loading');
 	var addrEl = document.getElementById('oc-console-addr');
 	var modelEl = document.getElementById('oc-console-model');
 	var statusTextEl = document.getElementById('oc-console-status-text');
+	var actionsEl = document.getElementById('oc-console-actions');
 	var openBtn = document.getElementById('oc-console-open-btn');
+	var refreshBtn = document.getElementById('oc-console-refresh-btn');
+	var fullscreenBtn = document.getElementById('oc-console-fullscreen-btn');
+	var wrapEl = document.getElementById('oc-console-wrap');
+	var iframeEl = null;
 
 	function getConsoleUrl() {
 		var host = window.location.hostname;
-		// OpenClaw Gateway 当前只监听 HTTP；LuCI 使用 HTTPS 时也必须强制走 http，避免浏览器误连 HTTPS 端口。
 		var url = 'http://' + host + ':' + gwPort + '/';
 		if (gwToken) url += '#token=' + encodeURIComponent(gwToken);
 		return url;
 	}
 
+	function toggleFullScreen() {
+		if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+			if (wrapEl.requestFullscreen) {
+				wrapEl.requestFullscreen();
+			} else if (wrapEl.webkitRequestFullscreen) {
+				wrapEl.webkitRequestFullscreen();
+			}
+		} else {
+			if (document.exitFullscreen) {
+				document.exitFullscreen();
+			} else if (document.webkitExitFullscreen) {
+				document.webkitExitFullscreen();
+			}
+		}
+	}
+
+	var retryTimer = null;
+	function scheduleCheck(ms) {
+		if (retryTimer) clearTimeout(retryTimer);
+		retryTimer = setTimeout(function() {
+			retryTimer = null;
+			checkAndLoad();
+		}, ms || 3000);
+	}
+
 	function checkAndLoad() {
 		addrEl.textContent = window.location.hostname + ':' + gwPort;
 
-		// 先获取 token，再检查状态
 		(new XHR()).post(tokenUrl, { token: ocCsrfToken }, function(tx) {
 			try {
 				var td = JSON.parse(tx.responseText);
@@ -132,13 +243,22 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 						modelEl.textContent = d.active_model;
 					}
 					if (d.gateway_running) {
+						if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
 						statusTextEl.innerHTML = '<span style="color:#1a7f37;">● 网关运行中</span>';
 						openBtn.href = url;
-						openBtn.style.display = '';
-						showLaunch(url);
+						actionsEl.style.display = 'flex';
+						if (location.protocol === 'https:') {
+							var hintEl = document.getElementById('oc-console-https-hint');
+							if (hintEl) hintEl.style.display = 'block';
+						}
+						showIframe(url);
+						checkDevices(false);
+						setTimeout(function() { checkDevices(false); }, 2500);
+						setTimeout(function() { checkDevices(false); }, 6000);
 					} else if (d.gateway_failed) {
+						if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
 						statusTextEl.innerHTML = '<span style="color:#cf222e;">● 网关启动失败</span>';
-						openBtn.style.display = 'none';
+						actionsEl.style.display = 'none';
 						loading.style.display = '';
 						loading.innerHTML = '<div style="text-align:center;color:#666;">' +
 							'<div style="font-size:40px;margin-bottom:12px;">×</div>' +
@@ -147,36 +267,182 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 							'</div>';
 					} else if (d.gateway_starting) {
 						statusTextEl.innerHTML = '<span style="color:#9a6700;">⏳ 网关正在启动</span>';
-						openBtn.style.display = 'none';
+						actionsEl.style.display = 'none';
+						loading.style.display = '';
 						loading.innerHTML = '<div style="text-align:center;color:#666;">' +
 							'<div style="font-size:40px;margin-bottom:12px;">⏳</div>' +
 							'<div style="font-size:15px;margin-bottom:6px;">OpenClaw 网关正在启动中...</div>' +
 							'<div style="font-size:12px;color:#999;">通常 20~40 秒；首次安装或路由器负载较高时会更久，页面会自动刷新。</div>' +
 							'</div>';
+						scheduleCheck(3000);
 					} else {
 						statusTextEl.innerHTML = '<span style="color:#cf222e;">● 网关未运行</span>';
-						openBtn.style.display = 'none';
+						actionsEl.style.display = 'none';
+						loading.style.display = '';
 						loading.innerHTML = '<div style="text-align:center;color:#666;">' +
 							'<div style="font-size:40px;margin-bottom:12px;">🧠</div>' +
 							'<div style="font-size:15px;margin-bottom:6px;">OpenClaw 网关未运行</div>' +
 							'<div style="font-size:12px;color:#999;">请先在「基本设置」页面启用服务并启动。</div>' +
 							'</div>';
+						scheduleCheck(5000);
 					}
 				} catch(e) {
 					statusTextEl.textContent = '查询失败';
+					scheduleCheck(5000);
 				}
 			});
 		});
 	}
 
-	function showLaunch(url) {
+	function showIframe(url) {
 		loading.style.display = 'none';
-		container.innerHTML = '<div class="oc-console-loading" style="height:220px;">' +
-			'<div style="font-size:40px;margin-bottom:12px;">↗</div>' +
-			'<div style="font-size:15px;margin-bottom:6px;">OpenClaw 控制台已就绪</div>' +
-			'<div style="font-size:12px;color:#999;">请点击上方「新窗口打开」访问控制台。</div>' +
-			'</div>';
+		if (!iframeEl) {
+			iframeEl = document.createElement('iframe');
+			iframeEl.id = 'oc-console-iframe';
+			iframeEl.setAttribute('allowfullscreen', 'true');
+			iframeEl.setAttribute('allow', 'clipboard-read; clipboard-write; microphone; camera; display-capture');
+			container.appendChild(iframeEl);
+		}
+		if (iframeEl.src !== url) {
+			iframeEl.src = url;
+		}
 	}
+
+	function escapeHtml(str) {
+		return String(str || '')
+			.replace(/&/g, '&amp;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;')
+			.replace(/"/g, '&quot;')
+			.replace(/'/g, '&#39;');
+	}
+
+	var devicesListUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "devices_list")%>';
+	var devicesApproveUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "devices_approve")%>';
+	var pairingBanner = document.getElementById('oc-pairing-banner');
+	var pairingBadge = document.getElementById('oc-pairing-badge');
+	var pairingItems = document.getElementById('oc-pairing-items');
+	var pairingMsg = document.getElementById('oc-pairing-msg');
+	var pairingApproveAllBtn = document.getElementById('oc-pairing-approve-all-btn');
+	var pairingRefreshBtn = document.getElementById('oc-pairing-refresh-btn');
+	var pairingToggleBtn = document.getElementById('oc-console-pairing-toggle-btn');
+
+	function checkDevices(manualOpen) {
+		(new XHR()).get(devicesListUrl, null, function(x) {
+			try {
+				var data = JSON.parse(x.responseText);
+				var pending = (data && data.pending) || [];
+				if (pairingBadge) pairingBadge.textContent = pending.length;
+				var navBadge = document.getElementById('oc-console-pairing-nav-badge');
+				if (navBadge) {
+					if (pending.length > 0) {
+						navBadge.textContent = pending.length;
+						navBadge.style.display = 'inline';
+					} else {
+						navBadge.style.display = 'none';
+					}
+				}
+				if (pending.length > 0) {
+					var html = '';
+					for (var i = 0; i < pending.length; i++) {
+						var item = pending[i];
+						var ip = escapeHtml(item.remoteIp || item.ip || '未知IP');
+						var client = escapeHtml(item.clientId || item.clientMode || 'webchat');
+						var plat = escapeHtml(item.platform || '');
+						var rid = escapeHtml(item.requestId || '');
+						html += '<div style="background:#fff; border:1px solid #e1e4e8; border-radius:4px; padding:6px 10px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">' +
+							'<div><strong>IP:</strong> ' + ip + ' | <strong>客户端:</strong> ' + client + (plat ? ' (' + plat + ')' : '') + ' <br/><span style="color:#888; font-size:11px;">ID: ' + rid + '</span></div>' +
+							'<button type="button" class="btn-action btn-approve-single" data-rid="' + rid + '" style="font-size:12px; padding:3px 10px; background:#f6ffed; border-color:#b7eb8f; color:#389e0d; cursor:pointer;">批准配对</button>' +
+							'</div>';
+					}
+					pairingItems.innerHTML = html;
+					pairingBanner.style.display = 'block';
+
+					var singleBtns = pairingItems.querySelectorAll('.btn-approve-single');
+					for (var j = 0; j < singleBtns.length; j++) {
+						singleBtns[j].addEventListener('click', function(ev) {
+							var rid = this.getAttribute('data-rid');
+							approveDevice(rid);
+						});
+					}
+				} else {
+					pairingItems.innerHTML = '<div style="color:#666; font-size:12px; padding:4px 0;">当前无待配对设备请求。当浏览器连接控制台提示「需要设备配对」时，在此刷新即可显示并批准。</div>';
+					if (manualOpen) {
+						pairingBanner.style.display = 'block';
+					} else {
+						pairingBanner.style.display = 'none';
+					}
+				}
+			} catch(e) {
+				if (manualOpen) {
+					pairingItems.innerHTML = '<div style="color:#cf222e; font-size:12px;">查询设备列表失败</div>';
+					pairingBanner.style.display = 'block';
+				}
+			}
+		});
+	}
+
+	function approveDevice(rid) {
+		pairingMsg.style.display = 'block';
+		pairingMsg.style.color = '#1890ff';
+		pairingMsg.textContent = '⏳ 正在批准设备配对...';
+		var postData = { token: ocCsrfToken };
+		if (rid) {
+			postData.request_id = rid;
+		} else {
+			postData.all = '1';
+		}
+		(new XHR()).post(devicesApproveUrl, postData, function(x) {
+			try {
+				var res = JSON.parse(x.responseText);
+				if (res.status === 'ok') {
+					pairingMsg.style.color = '#52c41a';
+					pairingMsg.innerHTML = '✅ ' + (res.message || '批准成功！') + ' 正在重新载入控制台...';
+					setTimeout(function() {
+						checkDevices(false);
+						if (iframeEl) {
+							iframeEl.src = getConsoleUrl();
+						}
+					}, 1500);
+				} else {
+					pairingMsg.style.color = '#cf222e';
+					pairingMsg.innerHTML = '❌ ' + (res.message || '批准失败');
+				}
+			} catch(e) {
+				pairingMsg.style.color = '#cf222e';
+				pairingMsg.textContent = '❌ 批准失败：请求异常';
+			}
+		});
+	}
+
+	if (pairingApproveAllBtn) {
+		pairingApproveAllBtn.addEventListener('click', function() {
+			approveDevice(null);
+		});
+	}
+	if (pairingRefreshBtn) {
+		pairingRefreshBtn.addEventListener('click', function() {
+			checkDevices(true);
+		});
+	}
+	if (pairingToggleBtn) {
+		pairingToggleBtn.addEventListener('click', function() {
+			if (pairingBanner.style.display === 'none') {
+				checkDevices(true);
+			} else {
+				pairingBanner.style.display = 'none';
+			}
+		});
+	}
+
+	refreshBtn.addEventListener('click', function() {
+		if (iframeEl) {
+			var url = getConsoleUrl();
+			iframeEl.src = url;
+		}
+	});
+
+	fullscreenBtn.addEventListener('click', toggleFullScreen);
 
 	checkAndLoad();
 })();

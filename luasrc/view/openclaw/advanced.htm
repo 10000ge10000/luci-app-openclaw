@@ -33,6 +33,33 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 	<p>通过内嵌的交互式终端 (oc-config) 进行 OpenClaw 的完整配置管理。支持 AI 模型配置、消息渠道设置（QQ、Telegram、Discord 等）、健康检查等。</p>
 </div>
 
+<div id="oc-adv-pairing-banner" style="display:none; padding:12px 16px; margin-bottom:14px; background:#fffbe6; border:1px solid #ffe58f; border-left:4px solid #faad14; border-radius:6px;">
+	<div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+		<div style="flex:1; min-width:280px;">
+			<div style="font-weight:600; color:#d48806; font-size:14px; margin-bottom:4px; display:flex; align-items:center; gap:8px;">
+				<span>🔔 检测到待配对设备请求</span>
+				<span id="oc-adv-pairing-badge" style="background:#faad14; color:#fff; padding:1px 7px; border-radius:10px; font-size:11px;">0</span>
+			</div>
+			<div style="font-size:13px; color:#555; line-height:1.5; margin-bottom:6px;">
+				Control UI 浏览器连接时触发了安全配对策略，您可直接在此一键批准，无需在下方终端中手动查找与输入 Request ID。
+			</div>
+			<div style="font-size:12px; color:#cf1322; background:#fff1f0; border:1px solid #ffa39e; padding:6px 10px; border-radius:4px; line-height:1.4; margin-bottom:6px;">
+				⚠️ <strong>风险提示</strong>：批准设备配对后，该浏览器将获得 OpenClaw 网关的完全控制权限。请确保在受信任的局域网环境，并仅在您本人正在连接时批准。
+			</div>
+			<div id="oc-adv-pairing-items" style="font-size:12px; font-family:monospace; color:#333; line-height:1.6;"></div>
+		</div>
+		<div style="display:flex; gap:8px; align-items:center; margin-top:4px;">
+			<button type="button" id="oc-adv-pairing-approve-all-btn" style="padding:6px 14px; background:#52c41a; color:#fff; border:none; border-radius:4px; font-weight:600; font-size:12px; cursor:pointer;">
+				⚡ 一键批准配对
+			</button>
+			<button type="button" id="oc-adv-pairing-refresh-btn" style="padding:6px 10px; background:#f0f2f5; color:#333; border:1px solid #d0d7de; border-radius:4px; font-size:12px; cursor:pointer;">
+				🔄 刷新
+			</button>
+		</div>
+	</div>
+	<div id="oc-adv-pairing-msg" style="display:none; margin-top:8px; font-size:13px; font-weight:500;"></div>
+</div>
+
 <div class="oc-terminal-wrap">
 	<div id="oc-terminal-container">
 		<div class="oc-terminal-loading" id="oc-terminal-loading">
@@ -53,7 +80,104 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 	var loading = document.getElementById('oc-terminal-loading');
 	var ptyToken = '';
 
+	var devicesListUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "devices_list")%>';
+	var devicesApproveUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "devices_approve")%>';
+	var advPairingBanner = document.getElementById('oc-adv-pairing-banner');
+	var advPairingBadge = document.getElementById('oc-adv-pairing-badge');
+	var advPairingItems = document.getElementById('oc-adv-pairing-items');
+	var advPairingMsg = document.getElementById('oc-adv-pairing-msg');
+	var advPairingApproveAllBtn = document.getElementById('oc-adv-pairing-approve-all-btn');
+	var advPairingRefreshBtn = document.getElementById('oc-adv-pairing-refresh-btn');
+
+	function escapeHtml(str) {
+		return String(str || '')
+			.replace(/&/g, '&amp;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;')
+			.replace(/"/g, '&quot;')
+			.replace(/'/g, '&#39;');
+	}
+
+	function checkAdvDevices() {
+		(new XHR()).get(devicesListUrl, null, function(x) {
+			try {
+				var data = JSON.parse(x.responseText);
+				var pending = (data && data.pending) || [];
+				if (advPairingBadge) advPairingBadge.textContent = pending.length;
+				if (pending.length > 0) {
+					var html = '';
+					for (var i = 0; i < pending.length; i++) {
+						var item = pending[i];
+						var ip = escapeHtml(item.remoteIp || item.ip || '未知IP');
+						var client = escapeHtml(item.clientId || item.clientMode || 'webchat');
+						var plat = escapeHtml(item.platform || '');
+						var rid = escapeHtml(item.requestId || '');
+						html += '<div style="background:#fff; border:1px solid #e1e4e8; border-radius:4px; padding:6px 10px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">' +
+							'<div><strong>IP:</strong> ' + ip + ' | <strong>客户端:</strong> ' + client + (plat ? ' (' + plat + ')' : '') + ' <br/><span style="color:#888; font-size:11px;">ID: ' + rid + '</span></div>' +
+							'<button type="button" class="btn-adv-approve-single" data-rid="' + rid + '" style="font-size:12px; padding:3px 10px; background:#f6ffed; border:1px solid #b7eb8f; color:#389e0d; border-radius:4px; cursor:pointer;">批准配对</button>' +
+							'</div>';
+					}
+					advPairingItems.innerHTML = html;
+					advPairingBanner.style.display = 'block';
+
+					var singleBtns = advPairingItems.querySelectorAll('.btn-adv-approve-single');
+					for (var j = 0; j < singleBtns.length; j++) {
+						singleBtns[j].addEventListener('click', function(ev) {
+							var rid = this.getAttribute('data-rid');
+							approveAdvDevice(rid);
+						});
+					}
+				} else {
+					advPairingBanner.style.display = 'none';
+				}
+			} catch(e) {}
+		});
+	}
+
+	function approveAdvDevice(rid) {
+		advPairingMsg.style.display = 'block';
+		advPairingMsg.style.color = '#1890ff';
+		advPairingMsg.textContent = '⏳ 正在批准设备配对...';
+		var postData = { token: ocCsrfToken };
+		if (rid) {
+			postData.request_id = rid;
+		} else {
+			postData.all = '1';
+		}
+		(new XHR()).post(devicesApproveUrl, postData, function(x) {
+			try {
+				var res = JSON.parse(x.responseText);
+				if (res.status === 'ok') {
+					advPairingMsg.style.color = '#52c41a';
+					advPairingMsg.innerHTML = '✅ ' + (res.message || '批准成功！');
+					setTimeout(function() {
+						checkAdvDevices();
+					}, 1500);
+				} else {
+					advPairingMsg.style.color = '#cf222e';
+					advPairingMsg.innerHTML = '❌ ' + (res.message || '批准失败');
+				}
+			} catch(e) {
+				advPairingMsg.style.color = '#cf222e';
+				advPairingMsg.textContent = '❌ 批准失败：请求异常';
+			}
+		});
+	}
+
+	if (advPairingApproveAllBtn) {
+		advPairingApproveAllBtn.addEventListener('click', function() {
+			approveAdvDevice(null);
+		});
+	}
+	if (advPairingRefreshBtn) {
+		advPairingRefreshBtn.addEventListener('click', function() {
+			checkAdvDevices();
+		});
+	}
+
 	function checkAndLoadTerminal() {
+		checkAdvDevices();
+		setTimeout(checkAdvDevices, 3000);
 		// 先获取 PTY token
 		(new XHR()).post(tokenUrl, { token: ocCsrfToken }, function(tx) {
 			try {
@@ -115,6 +239,28 @@ local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 			try { XHR.halt(); } catch(e) {}
 		}
 	}
+
+	// 监听 iframe 终端组件的 token 请求，支持重载后自动补充认证凭据
+	window.addEventListener('message', function(ev) {
+		if (ev.data && ev.data.type === 'openclaw_request_token') {
+			var srcWin = ev.source;
+			if (ptyToken) {
+				if (srcWin) {
+					try { srcWin.postMessage({ type: 'openclaw_token', pty_token: ptyToken }, '*'); } catch(e) {}
+				}
+			} else {
+				(new XHR()).post(tokenUrl, { token: ocCsrfToken }, function(tx) {
+					try {
+						var td = JSON.parse(tx.responseText);
+						ptyToken = td.pty_token || '';
+						if (ptyToken && srcWin) {
+							srcWin.postMessage({ type: 'openclaw_token', pty_token: ptyToken }, '*');
+						}
+					} catch(e) {}
+				});
+			}
+		}
+	});
 
 	checkAndLoadTerminal();
 })();

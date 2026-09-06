@@ -305,18 +305,24 @@ function handleRequest(req, res) {
   const fullPath = path.join(UI_DIR, fp);
   if (!fullPath.startsWith(UI_DIR)) { res.writeHead(403); return res.end('Forbidden'); }
 
+  // 如果请求 URL 带有 pty_token，写入 SameSite=Lax Cookie 以支持后续刷新/重启恢复
+  const queryPtyToken = url.searchParams.get('pty_token');
+  const cookieHeader = queryPtyToken
+    ? { 'Set-Cookie': `oc_pty_token=${encodeURIComponent(queryPtyToken)}; Path=/; SameSite=Lax; HttpOnly` }
+    : {};
+
   fs.readFile(fullPath, (err, data) => {
     if (err) {
       if (fp !== '/index.html') {
         fs.readFile(path.join(UI_DIR, 'index.html'), (e2, d2) => {
           if (e2) { res.writeHead(404); res.end('Not Found'); }
-          else { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...IFRAME_HEADERS }); res.end(d2); }
+          else { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...IFRAME_HEADERS, ...cookieHeader }); res.end(d2); }
         });
       } else { res.writeHead(404); res.end('Not Found'); }
       return;
     }
     const ext = path.extname(fullPath);
-    res.writeHead(200, { 'Content-Type': getMimeType(ext), 'Cache-Control': ext === '.html' ? 'no-cache' : 'max-age=3600', ...IFRAME_HEADERS });
+    res.writeHead(200, { 'Content-Type': getMimeType(ext), 'Cache-Control': ext === '.html' ? 'no-cache' : 'max-age=3600', ...IFRAME_HEADERS, ...cookieHeader });
     res.end(data);
   });
 }
@@ -326,12 +332,18 @@ function handleUpgrade(req, socket, head) {
   console.log(`[oc-config] WS upgrade: ${req.url} remote=${socket.remoteAddress}:${socket.remotePort}`);
   if (req.url !== '/ws' && !req.url.startsWith('/ws?')) { socket.destroy(); return; }
 
-  // 认证: 验证查询参数中的 token
+  // 认证: 验证查询参数或 Cookie 中的 token
   // 每次连接时实时读取 UCI token (安装/升级可能重新生成 token)
   const currentToken = loadAuthToken() || AUTH_TOKEN;
   const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (currentToken) {
-    const clientToken = urlObj.searchParams.get('token') || '';
+    let clientToken = urlObj.searchParams.get('token') || urlObj.searchParams.get('pty_token') || '';
+    if (!clientToken && req.headers.cookie) {
+      const match = req.headers.cookie.match(/(?:^|;\s*)oc_pty_token=([^;]+)/);
+      if (match) {
+        try { clientToken = decodeURIComponent(match[1]); } catch(e) { clientToken = match[1]; }
+      }
+    }
     if (clientToken !== currentToken) {
       console.log(`[oc-config] WS auth failed from ${socket.remoteAddress}`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');

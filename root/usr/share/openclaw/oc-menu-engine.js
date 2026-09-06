@@ -316,6 +316,12 @@ async function select(options = {}) {
   let done = false;
   let result = null;
 
+  // 确保初始选中的不是 disabled 分隔线/标题项
+  if (items[selected] && items[selected].disabled) {
+    const firstActive = items.findIndex(i => !i.disabled);
+    if (firstActive !== -1) selected = firstActive;
+  }
+
   // 保存终端状态
   setRawMode(true);
   process.stdout.write(C.hide);
@@ -336,30 +342,43 @@ async function select(options = {}) {
           done = true;
         }
       } else if (key.name === 'up') {
-        // 上移
-        if (selected > 0) {
-          selected--;
+        // 上移: 自动跳过 disabled 分隔项
+        let next = selected - 1;
+        while (next >= 0 && filteredItems[next].disabled) next--;
+        if (next >= 0) {
+          selected = next;
           filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
         }
       } else if (key.name === 'down') {
-        // 下移
-        if (selected < filteredItems.length - 1) {
-          selected++;
+        // 下移: 自动跳过 disabled 分隔项
+        let next = selected + 1;
+        while (next < filteredItems.length && filteredItems[next].disabled) next++;
+        if (next < filteredItems.length) {
+          selected = next;
           filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
         }
       } else if (key.name === 'pageup') {
         // 上翻页
-        selected = Math.max(0, selected - 10);
+        let target = Math.max(0, selected - 10);
+        while (target > 0 && filteredItems[target].disabled) target--;
+        if (filteredItems[target] && !filteredItems[target].disabled) selected = target;
         filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
       } else if (key.name === 'pagedown') {
         // 下翻页
-        selected = Math.min(filteredItems.length - 1, selected + 10);
+        let target = Math.min(filteredItems.length - 1, selected + 10);
+        while (target < filteredItems.length - 1 && filteredItems[target].disabled) target++;
+        if (filteredItems[target] && !filteredItems[target].disabled) selected = target;
         filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
       } else if (key.name === 'home') {
-        selected = 0;
+        let first = filteredItems.findIndex(i => !i.disabled);
+        if (first !== -1) selected = first;
         filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
       } else if (key.name === 'end') {
-        selected = filteredItems.length - 1;
+        let last = -1;
+        for (let i = filteredItems.length - 1; i >= 0; i--) {
+          if (!filteredItems[i].disabled) { last = i; break; }
+        }
+        if (last !== -1) selected = last;
         filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
       } else if (exitKeys.includes(key.name) && allowCancel) {
         // 取消/退出
@@ -382,7 +401,7 @@ async function select(options = {}) {
 
       // 直接按键选择 (如果菜单项有 key 属性)
       if (key.char && !showSearch) {
-        const matchByChar = items.find(item => (item.key || '').toLowerCase() === key.name);
+        const matchByChar = items.find(item => !item.disabled && (item.key || '').toLowerCase() === key.name);
         if (matchByChar) {
           result = matchByChar;
           done = true;

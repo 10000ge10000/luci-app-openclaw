@@ -50,7 +50,10 @@ fi
 NODE_BASE="${NODE_BASE:-${OC_INSTALL_PATH}/node}"
 OC_GLOBAL="${OC_GLOBAL:-${OC_INSTALL_PATH}/global}"
 OC_DATA="${OC_DATA:-${OC_INSTALL_PATH}/data}"
-NODE_BIN="${NODE_BASE}/bin/node"
+NODE_BIN="${NODE_BIN:-${NODE_BASE}/bin/node}"
+if [ ! -x "$NODE_BIN" ] && command -v node >/dev/null 2>&1; then
+	NODE_BIN="$(command -v node)"
+fi
 OC_STATE_DIR="${OC_DATA}/.openclaw"
 CONFIG_FILE="${OC_STATE_DIR}/openclaw.json"
 
@@ -89,7 +92,7 @@ fi
 
 oc_cmd() {
 	if [ -n "$OC_ENTRY" ] && [ -x "$NODE_BIN" ]; then
-		"$NODE_BIN" "$OC_ENTRY" "$@" 2>&1
+		"$NODE_BIN" "$OC_ENTRY" "$@"
 		local rc=$?
 		# 修复权限: oc_cmd 以 root 运行但配置文件应属于 openclaw 用户
 		fix_openclaw_state_permissions 2>/dev/null || true
@@ -116,13 +119,17 @@ oc_doctor_as_openclaw() {
 		oc_cmd doctor
 		return $?
 	fi
-	local _doc_cmd="HOME=\"${OC_DATA}\" OPENCLAW_HOME=\"${OC_DATA}\" OPENCLAW_STATE_DIR=\"${OC_DATA}/.openclaw\" OPENCLAW_CONFIG_PATH=\"${CONFIG_FILE}\" NODE_ICU_DATA=\"${NODE_BASE}/share/icu\" \"${NODE_BIN}\" \"${OC_ENTRY}\" doctor"
+	local _doc_cmd="cd \"${OC_DATA}\" && HOME=\"${OC_DATA}\" OPENCLAW_HOME=\"${OC_DATA}\" OPENCLAW_STATE_DIR=\"${OC_DATA}/.openclaw\" OPENCLAW_CONFIG_PATH=\"${CONFIG_FILE}\" NODE_ICU_DATA=\"${NODE_BASE}/share/icu\" \"${NODE_BIN}\" \"${OC_ENTRY}\" doctor"
 	if command -v su >/dev/null 2>&1; then
 		su -s /bin/sh openclaw -c "${_doc_cmd}" 2>&1
 	elif command -v runuser >/dev/null 2>&1; then
 		runuser -u openclaw -- sh -c "${_doc_cmd}" 2>&1
 	else
-		start-stop-daemon -S -m -p /tmp/openclaw-doctor-$$.pid -c openclaw:openclaw -x /bin/sh -- -c "${_doc_cmd}" 2>&1
+		local _doc_pid="/tmp/openclaw-doctor-$$.pid"
+		(cd "${OC_DATA}" 2>/dev/null || true; start-stop-daemon -S -m -p "$_doc_pid" -c openclaw:openclaw -x /bin/sh -- -c "${_doc_cmd}" 2>&1)
+		local rc=$?
+		rm -f "$_doc_pid" 2>/dev/null || true
+		return $rc
 	fi
 }
 
@@ -262,8 +269,6 @@ oc_schema_type_for_key() {
 			echo "boolean" ;;
 		gateway.controlUi.allowInsecureAuth)
 			echo "boolean" ;;
-		gateway.controlUi.dangerouslyDisableDeviceAuth)
-			echo "boolean" ;;
 		gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback)
 			echo "boolean" ;;
 		gateway.allowRealIpFallback)
@@ -291,7 +296,34 @@ oc_schema_enum_for_key() {
 json_set() {
 	local key="$1" value="$2"
 	local _js_err=""
-	
+
+	# 检查是否处于升级事务迁移期间，若是则暂停写入配置
+	local _sdir="${OC_STATE_DIR:-${OPENCLAW_STATE_DIR:-${OC_DATA:+$OC_DATA/.openclaw}}}"
+	local _pdir="$(dirname "$_sdir")"
+	local _rdir="$(dirname "$_pdir")"
+	local _status_file="" cand
+	for cand in \
+		"${_rdir}/.luci-openclaw-upgrade/status.json" \
+		"${_pdir}/.luci-openclaw-upgrade/status.json" \
+		"${_sdir}/.luci-openclaw-upgrade/status.json" \
+		"${OC_DATA:+$OC_DATA/.luci-openclaw-upgrade/status.json}" \
+		"${OC_BASE_PATH:-/opt}/openclaw/.luci-openclaw-upgrade/status.json"; do
+		if [ -n "$cand" ] && [ -f "$cand" ]; then
+			_status_file="$cand"
+			break
+		fi
+	done
+	if [ -n "$_status_file" ] && [ -f "$_status_file" ]; then
+		local _up_phase
+		_up_phase=$(grep -oE '"phase"[[:space:]]*:[[:space:]]*"[^"]+"' "$_status_file" 2>/dev/null | cut -d'"' -f4 || true)
+		case "$_up_phase" in
+			migrating|gateway_verifying|backing_up)
+				echo "WARN: 检测到系统正处于升级事务 (phase: $_up_phase)，暂停写入 openclaw.json" >&2
+				return 0
+				;;
+		esac
+	fi
+
 	# 步骤1: 确保配置文件存在
 	if [ ! -f "$CONFIG_FILE" ]; then
 		# 检查父目录是否可创建
@@ -928,50 +960,54 @@ show_current_config() {
 # 配置 AI 模型
 # ══════════════════════════════════════════════════════════════
 configure_model() {
-	echo ""
-	echo -e "  ${BOLD}🤖 配置 AI 模型和提供商${NC}"
-	echo ""
-	echo -e "  ${GREEN}${BOLD}🌟 ── 推荐 ──${NC}"
-	echo -e "  ${CYAN}w)${NC} 🌟 官方完整模型配置向导  ${GREEN}(推荐，支持所有提供商)${NC}"
-	echo ""
-	echo -e "  ${BOLD}🌍 ── 国外模型提供商 ──${NC}"
-	echo -e "  ${CYAN}a)${NC} OpenAI (GPT-5.2, GPT-5 mini, GPT-4.1)"
-	echo -e "  ${CYAN}b)${NC} Anthropic (Claude Sonnet 4, Opus 4, Haiku)"
-	echo -e "  ${CYAN}c)${NC} Google Gemini (Gemini 2.5 Pro/Flash, Gemini 3)"
-	echo -e "  ${CYAN}d)${NC} OpenRouter (聚合多家模型)"
-	echo -e "  ${CYAN}e)${NC} GitHub Copilot (需要 Copilot 订阅)"
-	echo -e "  ${CYAN}f)${NC} xAI Grok (Grok-4/3)"
-	echo ""
-	echo -e "  ${BOLD}🇨🇳 ── 国内模型提供商 ──${NC}"
-	echo -e "  ${CYAN}g)${NC} 阿里云通义千问 Qwen (Portal/API/Coding Plan)"
-	echo -e "  ${CYAN}h)${NC} 硅基流动 SiliconFlow"
-	echo -e "  ${CYAN}i)${NC} 腾讯云 Coding Plan (HY T1/TurboS/GLM-5/Kimi)"
-	echo -e "  ${CYAN}j)${NC} 百度千帆 (ERNIE-4.0, ERNIE-3.5)"
-	echo -e "  ${CYAN}k)${NC} 智谱 GLM / Z.AI (GLM-5.1, GLM-5)"
-	echo ""
-	echo -e "  ${BOLD}🏠 ── 本地模型 / 自定义 API ──${NC}"
-	echo -e "  ${CYAN}l)${NC} Ollama (本地模型，无需 API Key)"
-	echo -e "  ${CYAN}m)${NC} 自定义 OpenAI 兼容 API"
-	echo -e "  ${CYAN}n)${NC} 自定义 Anthropic 兼容 API"
-	echo -e "  ${CYAN}o)${NC} 一万AI分享 粉丝专享 API"
-	echo ""
-	echo -e "  ${CYAN}q)${NC} 返回"
-	echo ""
-	prompt_with_default "请选择" "w" choice
+	while true; do
+		local configured=0
+		echo ""
+		echo -e "  ${BOLD}🤖 配置 AI 模型和提供商${NC}"
+		echo ""
+		echo -e "  ${GREEN}${BOLD}🌟 ── 推荐 ──${NC}"
+		echo -e "  ${CYAN}w)${NC} 🌟 官方完整模型配置向导  ${GREEN}(推荐，支持所有提供商)${NC}"
+		echo ""
+		echo -e "  ${BOLD}🌍 ── 国外模型提供商 ──${NC}"
+		echo -e "  ${CYAN}a)${NC} OpenAI"
+		echo -e "  ${CYAN}b)${NC} Anthropic"
+		echo -e "  ${CYAN}c)${NC} Google Gemini"
+		echo -e "  ${CYAN}d)${NC} OpenRouter (聚合多家模型)"
+		echo -e "  ${CYAN}e)${NC} GitHub Copilot (需要 Copilot 订阅)"
+		echo -e "  ${CYAN}f)${NC} xAI Grok"
+		echo ""
+		echo -e "  ${BOLD}🇨🇳 ── 国内模型提供商 ──${NC}"
+		echo -e "  ${CYAN}g)${NC} 阿里云通义千问 Qwen"
+		echo -e "  ${CYAN}h)${NC} 硅基流动 SiliconFlow"
+		echo -e "  ${CYAN}i)${NC} 腾讯云 Coding Plan"
+		echo -e "  ${CYAN}j)${NC} 百度千帆"
+		echo -e "  ${CYAN}k)${NC} 智谱 GLM / Z.AI"
+		echo ""
+		echo -e "  ${BOLD}🏠 ── 本地模型 / 自定义 API ──${NC}"
+		echo -e "  ${CYAN}l)${NC} Ollama (本地模型，无需 API Key)"
+		echo -e "  ${CYAN}m)${NC} 自定义 OpenAI 兼容 API"
+		echo -e "  ${CYAN}n)${NC} 自定义 Anthropic 兼容 API"
+		echo -e "  ${CYAN}o)${NC} 一万AI分享 粉丝专享 API"
+		echo ""
+		echo -e "  ${CYAN}q)${NC} 返回"
+		echo ""
+		prompt_with_default "请选择" "w" choice
 
-	case "$choice" in
-		w)
-			echo ""
-			echo -e "  ${CYAN}启动官方完整模型配置向导...${NC}"
-			echo -e "  ${YELLOW}提示: ↑↓ 移动, Tab/空格 选中, 回车 确认${NC}"
-			echo ""
-			echo -e "  ${CYAN}清理过时插件配置...${NC}"
-			enable_auth_plugins
-			echo ""
-			(oc_cmd configure --section model) || echo -e "  ${YELLOW}配置向导已退出${NC}"
-			echo ""
-			ask_restart
-			;;
+		case "$choice" in
+			w)
+				echo ""
+				echo -e "  ${CYAN}启动官方完整模型配置向导...${NC}"
+				echo -e "  ${YELLOW}提示: ↑↓ 移动, Tab/空格 选中, 回车 确认${NC}"
+				echo ""
+				echo -e "  ${CYAN}清理过时插件配置...${NC}"
+				enable_auth_plugins
+				echo ""
+				if oc_cmd configure --section model; then
+					configured=1
+				else
+					echo -e "  ${YELLOW}配置向导已退出${NC}"
+				fi
+				;;
 		a)
 			echo ""
 			echo -e "  ${BOLD}OpenAI 配置${NC}"
@@ -987,6 +1023,7 @@ configure_model() {
 				model_name="$OC_PICKED_MODEL"
 				register_and_set_model "openai/${model_name}"
 				echo -e "  ${GREEN}✅ OpenAI 已配置，活跃模型: openai/${model_name}${NC}"
+				configured=1
 			fi
 			;;
 		b)
@@ -1004,6 +1041,7 @@ configure_model() {
 				model_name="$OC_PICKED_MODEL"
 				register_and_set_model "anthropic/${model_name}"
 				echo -e "  ${GREEN}✅ Anthropic 已配置，活跃模型: anthropic/${model_name}${NC}"
+				configured=1
 			fi
 			;;
 		c)
@@ -1021,6 +1059,7 @@ configure_model() {
 				model_name="$OC_PICKED_MODEL"
 				register_and_set_model "google/${model_name}"
 				echo -e "  ${GREEN}✅ Google Gemini 已配置，活跃模型: google/${model_name}${NC}"
+				configured=1
 			fi
 			;;
 		d)
@@ -1039,6 +1078,7 @@ configure_model() {
 				model_name="$OC_PICKED_MODEL"
 				register_and_set_model "openrouter/${model_name}"
 				echo -e "  ${GREEN}✅ OpenRouter 已配置，活跃模型: openrouter/${model_name}${NC}"
+				configured=1
 			fi
 			;;
 		e)
@@ -1062,6 +1102,7 @@ configure_model() {
 				model_name="github-copilot/$OC_PICKED_MODEL"
 				register_and_set_model "$model_name"
 				echo -e "  ${GREEN}✅ 活跃模型已设置: ${model_name}${NC}"
+				configured=1
 			else
 				echo -e "  ${YELLOW}OAuth 授权已退出或失败${NC}"
 			fi
@@ -1084,10 +1125,11 @@ configure_model() {
 					echo -e "  ${CYAN}启用 Qwen Portal Auth 插件...${NC}"
 					enable_auth_plugins
 					echo -e "  ${CYAN}启动 Qwen OAuth 授权...${NC}"
-					oc_cmd models auth login --provider qwen-portal --set-default || echo -e "  ${YELLOW}OAuth 授权已退出${NC}"
-					echo ""
-					ask_restart
-					return
+					if oc_cmd models auth login --provider qwen-portal --set-default; then
+						configured=1
+					else
+						echo -e "  ${YELLOW}OAuth 授权已退出${NC}"
+					fi
 					;;
 				b)
 					echo ""
@@ -1107,6 +1149,7 @@ configure_model() {
 						register_custom_provider dashscope "https://dashscope.aliyuncs.com/compatible-mode/v1" "$api_key" "$model_name" "$model_name"
 						register_and_set_model "dashscope/${model_name}"
 						echo -e "  ${GREEN}✅ 通义千问已配置 (按量付费)，活跃模型: dashscope/${model_name}${NC}"
+						configured=1
 					fi
 					;;
 				c|*)
@@ -1149,6 +1192,7 @@ configure_model() {
 						register_and_set_model "bailian/${model_name}"
 						echo -e "  ${GREEN}✅ Coding Plan 已配置，活跃模型: bailian/${model_name}${NC}"
 						echo -e "  ${DIM}提示: 套餐内全部模型已注册，可随时在 WebChat 中通过 /model 切换${NC}"
+						configured=1
 					fi
 					;;
 			esac
@@ -1168,6 +1212,7 @@ configure_model() {
 				auth_set_apikey xai "$api_key"
 				register_and_set_model "xai/${model_name}"
 				echo -e "  ${GREEN}✅ xAI Grok 已配置，活跃模型: xai/${model_name}${NC}"
+				configured=1
 			fi
 			;;
 		h)
@@ -1200,6 +1245,7 @@ configure_model() {
 				register_custom_provider siliconflow "https://api.siliconflow.cn/v1" "$api_key" "$model_name" "$model_name"
 				register_and_set_model "siliconflow/${model_name}"
 				echo -e "  ${GREEN}✅ SiliconFlow 已配置，活跃模型: siliconflow/${model_name}${NC}"
+				configured=1
 			fi
 			;;
 		l)
@@ -1315,6 +1361,7 @@ configure_model() {
 					register_and_set_model "ollama/${model_name}"
 					echo -e "  ${GREEN}✅ Ollama 已配置，活跃模型: ollama/${model_name}${NC}"
 					echo -e "  ${CYAN}   Ollama 地址: ${ollama_url}${NC}"
+					configured=1
 				fi
 			fi
 			;;
@@ -1342,6 +1389,7 @@ configure_model() {
 				register_and_set_model "lkeap/${model_name}"
 				echo -e "  ${GREEN}✅ 腾讯云 Coding Plan 已配置，活跃模型: lkeap/${model_name}${NC}"
 				echo -e "  ${DIM}提示: 套餐内全部模型已注册，可随时在 WebChat 中通过 /model 切换${NC}"
+				configured=1
 			fi
 			;;
 		j)
@@ -1365,6 +1413,7 @@ configure_model() {
 				register_custom_provider qianfan "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop" "$api_key" "$model_name" "$model_name"
 				register_and_set_model "qianfan/${model_name}"
 				echo -e "  ${GREEN}✅ 百度千帆已配置，活跃模型: qianfan/${model_name}${NC}"
+				configured=1
 			fi
 			;;
 		k)
@@ -1413,6 +1462,7 @@ configure_model() {
 				register_and_set_model "zai/${model_name}"
 				echo -e "  ${GREEN}✅ 智谱 GLM 已配置，活跃模型: zai/${model_name}${NC}"
 				echo -e "  ${DIM}   Base URL: ${zai_base_url}${NC}"
+				configured=1
 			fi
 			;;
 		m)
@@ -1428,6 +1478,7 @@ configure_model() {
 				register_custom_provider openai-compatible "$base_url" "$api_key" "$model_name" "$model_name"
 				register_and_set_model "openai-compatible/${model_name}"
 				echo -e "  ${GREEN}✅ 自定义模型已配置，活跃模型: openai-compatible/${model_name}${NC}"
+				configured=1
 			fi
 			;;
 		n)
@@ -1466,6 +1517,7 @@ configure_model() {
 				auth_set_apikey anthropic-compatible "$api_key" "anthropic-compatible:manual"
 				register_and_set_model "anthropic-compatible/${model_name}"
 				echo -e "  ${GREEN}✅ 自定义 Anthropic API 已配置，活跃模型: anthropic-compatible/${model_name}${NC}"
+				configured=1
 			fi
 			;;
 		o)
@@ -1492,15 +1544,18 @@ configure_model() {
 				chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 				register_and_set_model "yiwanai/gpt-5.5"
 				echo -e "  ${GREEN}✅ 一万AI分享粉丝专享 API 已配置，活跃模型: yiwanai/gpt-5.5${NC}"
+				configured=1
 			fi
 			;;
 		q) return ;;
+		*) echo -e "  ${YELLOW}无效选择${NC}" ;;
 	esac
 
-	if [ "$choice" != "0" ] && [ "$choice" != "1" ]; then
+	if [ "$configured" -eq 1 ]; then
 		echo ""
 		ask_restart
 	fi
+done
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -1601,7 +1656,7 @@ configure_qq() {
 				plugin_blocked=1
 				echo -e "  ${YELLOW}⚠️  qqbot 插件已安装但未能正常加载${NC}"
 				echo -e "  ${CYAN}正在修复插件目录权限...${NC}"
-				chown -R root:root "$qqbot_ext_dir" 2>/dev/null
+				chown -R openclaw:openclaw "$qqbot_ext_dir" 2>/dev/null
 				chmod -R 755 "$qqbot_ext_dir" 2>/dev/null
 				echo -e "  ${GREEN}✅ 权限已修复，重启 Gateway 后生效${NC}"
 				plugin_installed=1
@@ -1610,7 +1665,7 @@ configure_qq() {
 			# 目录存在、有 plugin.json 但未出现在插件列表 — 修复权限
 			echo -e "  ${YELLOW}⚠️  qqbot 插件目录存在但未能加载${NC}"
 			echo -e "  ${CYAN}正在修复插件目录权限...${NC}"
-			chown -R root:root "$qqbot_ext_dir" 2>/dev/null
+			chown -R openclaw:openclaw "$qqbot_ext_dir" 2>/dev/null
 			chmod -R 755 "$qqbot_ext_dir" 2>/dev/null
 			echo -e "  ${GREEN}✅ 权限已修复${NC}"
 			plugin_installed=1
@@ -1629,10 +1684,10 @@ configure_qq() {
 			install_out=$(oc_cmd plugins install @tencent-connect/openclaw-qqbot@latest 2>&1)
 			local install_rc=$?
 
-			# 关键: 安装后立即修复插件目录权限为 root (OpenClaw 安全策略要求)
+			# 关键: 保持插件目录权限为 openclaw:openclaw (755)，符合 OpenClaw 上游 discovery 安全校验规则
 			# 同时修复权限模式为 755，确保 Gateway 可读取插件
 			if [ -d "$qqbot_ext_dir" ]; then
-				chown -R root:root "$qqbot_ext_dir" 2>/dev/null
+				chown -R openclaw:openclaw "$qqbot_ext_dir" 2>/dev/null
 				chmod -R 755 "$qqbot_ext_dir" 2>/dev/null
 			fi
 
@@ -2093,7 +2148,15 @@ configure_channels() {
 			8)
 				echo ""
 				echo -e "  ${CYAN}启动官方渠道配置向导...${NC}"
-				(oc_cmd configure --section channels) || echo -e "  ${YELLOW}配置向导已退出${NC}"
+				echo -e "  ${YELLOW}提示: ↑↓ 移动, Tab/空格 选中, 回车 确认${NC}"
+				echo ""
+				enable_auth_plugins
+				if oc_cmd configure --section channels; then
+					echo ""
+					ask_restart
+				else
+					echo -e "  ${YELLOW}配置向导已退出${NC}"
+				fi
 				;;
 			0) return ;;
 			*) echo -e "  ${YELLOW}无效选择${NC}" ;;
@@ -2242,7 +2305,6 @@ reset_to_defaults() {
 				json_set gateway.bind lan 2>&1
 				json_set gateway.mode local 2>&1
 				json_set gateway.controlUi.allowInsecureAuth true 2>&1
-				json_set gateway.controlUi.dangerouslyDisableDeviceAuth true 2>&1
 				json_set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true 2>&1
 				json_set gateway.tailscale.mode off 2>&1
 				echo -e "  ${GREEN}✅ 网关设置已恢复默认${NC}"
@@ -2423,7 +2485,6 @@ reset_to_defaults() {
 				json_set gateway.auth.mode token
 				json_set gateway.auth.token "$new_token"
 				json_set gateway.controlUi.allowInsecureAuth true
-				json_set gateway.controlUi.dangerouslyDisableDeviceAuth true
 				json_set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true
 				json_set gateway.tailscale.mode off
 				json_set acp.dispatch.enabled false
@@ -2484,9 +2545,13 @@ backup_restore_menu() {
 	echo ""
 	prompt_with_default "请选择" "1" backup_choice
 
-	# 备份目录 (openclaw backup create 输出到 CWD)
-	local backup_dir="${OC_STATE_DIR}/backups"
+	# 备份目录 (必须位于 State 目录之外，避免归档递归)
+	local backup_dir="${OPENCLAW_BACKUP_DIR:-${OC_DATA}/backups}"
 	mkdir -p "$backup_dir" 2>/dev/null
+
+	local state_helper="/usr/libexec/openclaw-upgrade-state.sh"
+	[ -x "$state_helper" ] || state_helper="${_script_dir}/../libexec/openclaw-upgrade-state.sh"
+	[ -x "$state_helper" ] || state_helper="./root/usr/libexec/openclaw-upgrade-state.sh"
 
 	case "$backup_choice" in
 		1)
@@ -2505,14 +2570,16 @@ backup_restore_menu() {
 		2)
 			echo -e "  ${CYAN}正在创建完整备份...${NC}"
 			echo -e "  ${DIM}(包含配置和状态数据，可能需要较长时间)${NC}"
-			local out
-			out=$(cd "$backup_dir" && HOME="$backup_dir" oc_cmd backup create --no-include-workspace 2>&1)
-			local rc=$?
+			local out rc=0
+			if [ -x "$state_helper" ]; then
+				out=$("$state_helper" backup-create "$backup_dir" "$OC_STATE_DIR" 2>&1) || rc=$?
+			else
+				out=$(cd "$backup_dir" && HOME="$backup_dir" oc_cmd backup create --no-include-workspace 2>&1) || rc=$?
+				for f in "${OC_DATA}"/*-openclaw-backup.tar.gz; do
+					[ -f "$f" ] && mv "$f" "$backup_dir/" 2>/dev/null
+				done
+			fi
 			echo "$out"
-			# 完整备份可能输出到 HOME，尝试移动到 backup_dir
-			for f in "${OC_DATA}"/*-openclaw-backup.tar.gz; do
-				[ -f "$f" ] && mv "$f" "$backup_dir/" 2>/dev/null
-			done
 			if [ $rc -eq 0 ] && echo "$out" | grep -q "\.tar\.gz"; then
 				echo -e "  ${GREEN}✅ 完整备份已创建${NC}"
 			else
@@ -2521,25 +2588,29 @@ backup_restore_menu() {
 			fi
 			;;
 		3)
-			local latest=$(ls -t "${backup_dir}"/*-openclaw-backup.tar.gz 2>/dev/null | head -1)
+			local latest=$(ls -t "${backup_dir}"/*-openclaw-backup.tar.gz "${backup_dir}"/*.tar.gz 2>/dev/null | head -1)
 			if [ -z "$latest" ]; then
 				# 也检查旧位置
-				latest=$(ls -t "${OC_STATE_DIR}"/*-openclaw-backup.tar.gz "${OC_DATA}"/*-openclaw-backup.tar.gz 2>/dev/null | head -1)
+				latest=$(ls -t "${OC_STATE_DIR}/backups"/*-openclaw-backup.tar.gz "${OC_STATE_DIR}"/*-openclaw-backup.tar.gz "${OC_DATA}"/*-openclaw-backup.tar.gz 2>/dev/null | head -1)
 			fi
 			if [ -z "$latest" ]; then
 				echo -e "  ${YELLOW}未找到备份文件，请先创建备份${NC}"
 			else
 				echo -e "  ${CYAN}验证备份: ${latest}${NC}"
-				oc_cmd backup verify "$latest" 2>&1
+				if [ -x "$state_helper" ]; then
+					"$state_helper" backup-verify "$latest" "$OC_STATE_DIR" 2>&1
+				else
+					oc_cmd backup verify "$latest" 2>&1
+				fi
 			fi
 			;;
 		4)
 			echo ""
 			if [ -d "$backup_dir" ]; then
-				local count=$(ls "${backup_dir}"/*-openclaw-backup.tar.gz 2>/dev/null | wc -l)
+				local count=$(ls "${backup_dir}"/*-openclaw-backup.tar.gz "${backup_dir}"/*.tar.gz 2>/dev/null | wc -l)
 				if [ "$count" -gt 0 ] 2>/dev/null; then
 					echo -e "  ${BOLD}备份文件列表:${NC}"
-					ls -lh "${backup_dir}"/*-openclaw-backup.tar.gz 2>/dev/null | while read line; do
+					ls -lh "${backup_dir}"/*-openclaw-backup.tar.gz "${backup_dir}"/*.tar.gz 2>/dev/null | while read line; do
 						echo -e "  ${DIM}${line}${NC}"
 					done
 				else
@@ -2552,7 +2623,7 @@ backup_restore_menu() {
 			echo -e "  ${DIM}备份目录: ${backup_dir}${NC}"
 			;;
 		5)
-			local latest=$(ls -t "${backup_dir}"/*-openclaw-backup.tar.gz 2>/dev/null | head -1)
+			local latest=$(ls -t "${backup_dir}"/*-openclaw-backup.tar.gz "${backup_dir}"/*.tar.gz 2>/dev/null | head -1)
 			if [ -z "$latest" ]; then
 				echo -e "  ${YELLOW}未找到备份文件，请先创建备份${NC}"
 			else
@@ -2562,36 +2633,31 @@ backup_restore_menu() {
 				echo -e "  ${YELLOW}⚠️  这会还原备份中的所有配置和数据文件到原路径！${NC}"
 				prompt_with_default "确认恢复? (y/N)" "N" confirm_restore
 				if [ "$confirm_restore" = "y" ] || [ "$confirm_restore" = "Y" ]; then
-					# 验证备份中 openclaw.json 有效
-					local tmp_json="/tmp/oc-restore-check.json"
-					tar -xzf "$latest" --wildcards '*/openclaw.json' -O > "$tmp_json" 2>/dev/null
-					if [ ! -s "$tmp_json" ] || ! "$NODE_BIN" -e "JSON.parse(require('fs').readFileSync('${tmp_json}','utf8'))" 2>/dev/null; then
-						rm -f "$tmp_json"
-						echo -e "  ${RED}❌ 备份中的配置文件无效，恢复已取消${NC}"
-					else
-						rm -f "$tmp_json"
-						# 备份当前配置
-						cp -f "$CONFIG_FILE" "${CONFIG_FILE}.pre-restore" 2>/dev/null
-						# 获取备份名前缀
-						local backup_name=$(tar -tzf "$latest" 2>/dev/null | head -1 | cut -d/ -f1)
-						if [ -z "$backup_name" ]; then
-							echo -e "  ${RED}❌ 备份文件格式无法识别${NC}"
-						else
-							echo -e "  ${DIM}正在还原文件...${NC}"
-							# 停止服务
-							/etc/init.d/openclaw stop >/dev/null 2>&1
-							sleep 2
-							# 提取 payload 到根目录 (还原到原始绝对路径)
-							tar -xzf "$latest" --strip-components=3 -C / "${backup_name}/payload/posix/" 2>&1
-							# 修复权限
-							fix_openclaw_state_permissions 2>/dev/null || true
-							echo -e "  ${GREEN}✅ 配置和数据已完整恢复！原配置已保存为 openclaw.json.pre-restore${NC}"
-							echo ""
-							prompt_with_default "是否重启服务使配置生效? (Y/n)" "Y" do_restart
-							if [ "$do_restart" != "n" ] && [ "$do_restart" != "N" ]; then
-								restart_gateway
-							fi
+					echo -e "  ${DIM}正在安全还原 State 状态...${NC}"
+					/etc/init.d/openclaw stop >/dev/null 2>&1 || true
+					sleep 2
+					local restore_ok=0
+					if [ -x "$state_helper" ]; then
+						if "$state_helper" restore-state "$latest" "$OC_STATE_DIR" 2>&1; then
+							restore_ok=1
 						fi
+					else
+						# 兜底旧逻辑
+						local backup_name=$(tar -tzf "$latest" 2>/dev/null | head -1 | cut -d/ -f1)
+						if [ -n "$backup_name" ]; then
+							tar -xzf "$latest" --strip-components=3 -C / "${backup_name}/payload/posix/" 2>&1 && restore_ok=1
+						fi
+					fi
+					if [ "$restore_ok" -eq 1 ]; then
+						fix_openclaw_state_permissions 2>/dev/null || true
+						echo -e "  ${GREEN}✅ 配置和数据已完整恢复！${NC}"
+						echo ""
+						prompt_with_default "是否重启服务使配置生效? (Y/n)" "Y" do_restart
+						if [ "$do_restart" != "n" ] && [ "$do_restart" != "N" ]; then
+							restart_gateway
+						fi
+					else
+						echo -e "  ${RED}❌ 恢复失败，已安全保留原状态与备份${NC}"
 					fi
 				else
 					echo -e "  ${DIM}已取消${NC}"
@@ -2651,6 +2717,163 @@ launch_interactive_model_config() {
 	return $rc
 }
 
+# ── 设备配对管理 (Control UI / 浏览器配对审批) ──
+devices_pairing_menu() {
+	while true; do
+		echo ""
+		echo -e "  ${BOLD}📱 设备配对管理 (Control UI / 浏览器配对审批)${NC}"
+		echo ""
+		echo -e "  ${YELLOW}⚠️  风险提示：${NC}"
+		echo -e "  ${YELLOW}   批准设备配对后，该浏览器/客户端将获得 OpenClaw 网关的完全控制权限。${NC}"
+		echo -e "  ${YELLOW}   请确保在受信任的局域网环境，并仅在您本人正在连接时批准！${NC}"
+		echo ""
+
+		local list_json
+		list_json=$(oc_cmd devices list --json 2>/dev/null || echo "")
+		local pending_count=0
+		local parsed=""
+
+		if [ -n "$list_json" ] && [ -x "$NODE_BIN" ]; then
+			parsed=$("$NODE_BIN" -e '
+				let data = null;
+				try {
+					data = JSON.parse(process.argv[1]);
+				} catch (_) {
+					const m = (process.argv[1] || "").match(/(\{[\s\S]*"pending"[\s\S]*\})/);
+					if (m) {
+						try { data = JSON.parse(m[1]); } catch (_) {}
+					}
+				}
+				const pending = (data && Array.isArray(data.pending)) ? data.pending : [];
+				console.log("COUNT=" + pending.length);
+				pending.forEach((item) => {
+					const rid = item.requestId || "";
+					const ip = item.remoteIp || item.ip || "未知IP";
+					const client = item.clientId || item.clientMode || "webchat";
+					const plat = item.platform || "";
+					const role = item.role || (item.roles && item.roles.join(",")) || "operator";
+					console.log("ITEM\t" + rid + "\t" + ip + "\t" + client + "\t" + plat + "\t" + role);
+				});
+			' "$list_json" 2>/dev/null || echo "COUNT=0")
+			pending_count=$(echo "$parsed" | grep '^COUNT=' | cut -d= -f2)
+			pending_count=${pending_count:-0}
+		fi
+
+		if [ "$pending_count" -gt 0 ]; then
+			echo -e "  ${GREEN}🔔 当前检测到 ${pending_count} 个待配对请求：${NC}"
+			echo ""
+			local idx=1
+			echo "$parsed" | grep '^ITEM' | while IFS="$(printf '\t')" read -r _ rid ip client plat role; do
+				echo -e "    ${CYAN}[$idx]${NC} 请求 ID: ${BOLD}${rid}${NC}"
+				echo -e "        来源 IP: ${GREEN}${ip}${NC} | 客户端: ${client} (${plat}) | 角色: ${role}"
+				idx=$((idx + 1))
+			done
+			echo ""
+			echo -e "  ${CYAN}1)${NC} ⚡ 一键批准所有待配对请求"
+			echo -e "  ${CYAN}2)${NC} 🔍 选择指定请求批准"
+			echo -e "  ${CYAN}3)${NC} 🔄 刷新待配对列表"
+			echo -e "  ${CYAN}0)${NC} 返回上级菜单"
+			echo ""
+			prompt_with_default "请选择" "1" dev_choice
+
+			case "$dev_choice" in
+				1)
+					echo ""
+					echo -e "  ${CYAN}正在批准所有设备配对请求...${NC}"
+					echo "$parsed" | grep '^ITEM' | cut -f2 | tr -d '\r' | while read -r rid; do
+						if [ -n "$rid" ]; then
+							local out
+							out=$(oc_cmd devices approve "$rid" 2>&1)
+							if echo "$out" | grep -qiE 'approved|success'; then
+								echo -e "  ${GREEN}✅ 已批准: ${rid}${NC}"
+							else
+								echo -e "  ${YELLOW}⚠️ 批准结果: ${out}${NC}"
+							fi
+						fi
+					done
+					fix_openclaw_state_permissions
+					echo ""
+					prompt_with_default "按回车继续" "" _
+					;;
+				2)
+					echo ""
+					prompt_with_default "请输入要批准的请求编号 (1-${pending_count}) 或直接输入 Request ID" "1" pick_val
+					local target_id=""
+					case "$pick_val" in
+						''|0|*[!0-9]*) target_id="$pick_val" ;;
+						*)
+							if [ "$pick_val" -ge 1 ] 2>/dev/null && [ "$pick_val" -le "$pending_count" ] 2>/dev/null; then
+								target_id=$(echo "$parsed" | grep '^ITEM' | sed -n "${pick_val}p" | cut -f2 | tr -d '\r')
+							else
+								target_id="$pick_val"
+							fi
+							;;
+					esac
+					if [ -n "$target_id" ]; then
+						echo ""
+						echo -e "  ${CYAN}正在批准请求: ${target_id}...${NC}"
+						local out
+						out=$(oc_cmd devices approve "$target_id" 2>&1)
+						if echo "$out" | grep -qiE 'approved|success'; then
+							echo -e "  ${GREEN}✅ 批准成功: ${target_id}${NC}"
+						else
+							echo -e "  ${YELLOW}⚠️ 批准结果: ${out}${NC}"
+						fi
+						fix_openclaw_state_permissions
+					else
+						echo -e "  ${YELLOW}未找到对应请求${NC}"
+					fi
+					echo ""
+					prompt_with_default "按回车继续" "" _
+					;;
+				3) ;;
+				0) return 0 ;;
+				*) echo -e "  ${YELLOW}无效选择${NC}" ;;
+			esac
+		else
+			echo -e "  ${DIM}当前无待配对设备请求。${NC}"
+			echo -e "  ${DIM}(在浏览器访问 OpenClaw Web 控制台时若提示「需要设备配对」，在此处刷新即可发现)${NC}"
+			echo ""
+			echo -e "  ${CYAN}1)${NC} 🔄 刷新待配对列表"
+			echo -e "  ${CYAN}2)${NC} ⌨️ 手动输入 Request ID 批准"
+			echo -e "  ${CYAN}3)${NC} 📋 查看完整设备列表 (含已配对)"
+			echo -e "  ${CYAN}0)${NC} 返回上级菜单"
+			echo ""
+			prompt_with_default "请选择" "1" dev_choice
+
+			case "$dev_choice" in
+				1) ;;
+				2)
+					echo ""
+					prompt_with_default "请输入待批准的 Request ID" "" manual_rid
+					if [ -n "$manual_rid" ]; then
+						echo ""
+						local out
+						out=$(oc_cmd devices approve "$manual_rid" 2>&1)
+						if echo "$out" | grep -qiE 'approved|success'; then
+							echo -e "  ${GREEN}✅ 批准成功: ${manual_rid}${NC}"
+						else
+							echo -e "  ${YELLOW}⚠️ 批准结果: ${out}${NC}"
+						fi
+						fix_openclaw_state_permissions
+						echo ""
+						prompt_with_default "按回车继续" "" _
+					fi
+					;;
+				3)
+					echo ""
+					echo -e "  ${CYAN}=== 设备列表 ===${NC}"
+					oc_cmd devices list 2>&1 || echo "  (无法获取设备列表)"
+					echo ""
+					prompt_with_default "按回车继续" "" _
+					;;
+				0) return 0 ;;
+				*) echo -e "  ${YELLOW}无效选择${NC}" ;;
+			esac
+		fi
+	done
+}
+
 main_menu() {
 	# 直接启动交互模式 (如果支持)
 	if can_use_interactive && [ "${OC_FORCE_TRADITIONAL:-0}" != "1" ]; then
@@ -2676,11 +2899,12 @@ main_menu() {
 		echo -e "  ${CYAN}4)${NC} 🩺 健康检查与状态"
 		echo -e "  ${CYAN}5)${NC} 📋 查看日志"
 		echo -e "  ${CYAN}6)${NC} 🔄 重启 Gateway"
+		echo -e "  ${CYAN}7)${NC} 📱 设备配对管理 (Control UI 审批)"
 		echo ""
 		echo -e "  ${DIM}━━━ 高级选项 ━━━${NC}"
-		echo -e "  ${CYAN}7)${NC} 🔧 高级配置"
-		echo -e "  ${CYAN}8)${NC} ♻️ 重置配置"
-		echo -e "  ${CYAN}9)${NC} 📊 显示当前配置概览"
+		echo -e "  ${CYAN}8)${NC} 🔧 高级配置"
+		echo -e "  ${CYAN}9)${NC} ♻️ 重置配置"
+		echo -e "  ${CYAN}10)${NC} 📊 显示当前配置概览"
 		echo ""
 		echo -e "  ${CYAN}0)${NC} 退出"
 		echo ""
@@ -2700,9 +2924,10 @@ main_menu() {
 				prompt_with_default "按回车继续" "" _
 				;;
 			6) restart_gateway ;;
-			7) advanced_menu ;;
-			8) reset_to_defaults ;;
-			9) show_current_config ;;
+			7) devices_pairing_menu ;;
+			8) advanced_menu ;;
+			9) reset_to_defaults ;;
+			10) show_current_config ;;
 			0)
 				echo -e "  ${GREEN}再见！${NC}"
 				exit 0
@@ -2737,6 +2962,7 @@ advanced_menu() {
 		echo -e "  ${CYAN}8)${NC} 编辑配置文件  ${DIM}(vi / nano)${NC}"
 		echo -e "  ${CYAN}9)${NC} 导出配置备份"
 		echo -e "  ${CYAN}10)${NC} 导入配置"
+		echo -e "  ${CYAN}11)${NC} 📱 设备配对管理"
 		echo -e "  ${CYAN}0)${NC} 返回主菜单"
 		echo ""
 		prompt_with_default "请选择" "0" adv_choice
@@ -2851,8 +3077,15 @@ advanced_menu() {
 			6)
 				echo ""
 				echo -e "  ${CYAN}启动官方配置向导...${NC}"
-				oc_cmd configure
-				ask_restart
+				echo -e "  ${YELLOW}提示: ↑↓ 移动, Tab/空格 选中, 回车 确认${NC}"
+				echo ""
+				enable_auth_plugins
+				if oc_cmd configure; then
+					echo ""
+					ask_restart
+				else
+					echo -e "  ${YELLOW}配置向导已退出${NC}"
+				fi
 				;;
 			7)
 				echo ""
@@ -2898,6 +3131,7 @@ advanced_menu() {
 					echo -e "  ${YELLOW}文件不存在${NC}"
 				fi
 				;;
+			11) devices_pairing_menu ;;
 			0) return ;;
 			*) echo -e "  ${YELLOW}无效选择${NC}" ;;
 		esac
@@ -2957,7 +3191,7 @@ case "${1:-}" in
 		restart_gateway
 		;;
 	--backup)
-		bk_dir="${OC_STATE_DIR}/backups"
+		bk_dir="${OPENCLAW_BACKUP_DIR:-${OC_DATA}/backups}"
 		mkdir -p "$bk_dir" 2>/dev/null
 		echo -e "${CYAN}正在创建配置备份...${NC}"
 		cd "$bk_dir" && oc_cmd backup create --only-config --no-include-workspace 2>&1

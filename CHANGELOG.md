@@ -4,6 +4,38 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [2.2.0] - 2026-09-06
+
+本次发布全面适配 OpenClaw 2026.9.1 最新稳定版基线，完成安全升级事务、外部 Supervisor 治理、微信插件 2.4.8 与废弃特性清理。
+
+### 新增与优化
+
+- **OpenClaw 2026.9.1 基线适配**：默认 OpenClaw 升级至 `2026.9.1`，Node.js 运行时基线升级至 `22.23.2`，微信插件升级至 `@tencent-weixin/openclaw-weixin@2.4.8`（兼容 openclaw >=2026.5.12）。
+- **安全升级事务机（Staging & Explicit Rollback）**：
+  - 杜绝原地破坏性 npm 覆写，升级采用独立 Staging 暂存目录提取与包契约校验（`openclaw-package-contract.js`），支持 npm lifecycle 白名单过滤。
+  - 新增 `openclaw-upgrade-state.sh`，在 `.luci-openclaw-upgrade/status.json` 中完整记录升级事务状态（`phase`、`target_version`、`backup_verified`、`migration_started`、`rollback_mode`、`error_code`）。
+  - 确立安全红线：迁移一旦开始，任何失败均进入 `recovery` 状态并保留 2026.9.1 候选与迁移状态，严禁旧代码自动覆写已迁移数据库，必须通过 `rollback-explicit` 进行受控的显式回滚。
+- **外部 Supervisor 治理**：
+  - 在 procd 守护进程、LuCI 运行时以及 CLI 执行环境中全面注入 `OPENCLAW_SUPERVISOR_MODE="external"` 与 `OPENCLAW_SERVICE_REPAIR_POLICY="external"`，禁止上游内部 supervisor 干预 OpenWrt procd 的进程与自愈生命周期。
+- **废弃补丁与弃用配置清理**：
+  - 彻底移除对旧版本 upstream dist 的历史猴子补丁（`patch_iframe_headers`、`patch_webchat_session_conflict`）。
+  - 彻底移除上游已废弃的配置项 `gateway.controlUi.dangerouslyDisableDeviceAuth` 及 `d.plugins.installs` 写入，全量契约测试均已锁定。
+- **微信插件运行时合约验证**：
+  - 微信插件升级至 `2.4.8`，废弃脆弱的纯文本正则匹配，改用官方 JSON 合约 `plugins inspect openclaw-weixin --runtime --json` 与 `plugins registry --refresh --json` 验证渠道健康度。
+- **前端体验与低负载轮询优化**：
+  - LuCI 状态页面轮询增加 `document.hidden` 检查与 `visibilitychange` 事件监听，后台标签页自动挂起轮询，切换回前台时即时触发刷新，降低 OpenWrt 路由器 CPU 负载。
+  - 安装弹窗明确标注 `v2026.9.1 (已验证版)` 与 `最新版 (未经验证)`，并在 openclaw-env 未就绪时优雅兜底。
+- **Web 控制台原生会话内嵌与自动探活**：
+  - Web 控制台页面原生内嵌 OpenClaw 官方 WebChat / Control UI 会话 iframe，携带 Gateway 鉴权令牌自动免密登录，支持一键全屏切换与会话就地刷新；
+  - 增加状态探活轮询机制，网关启动中时自动平滑重试并完成内嵌载入，无需手动 F5 刷新；增加 HTTPS 混杂内容安全指引。
+- **一键设备配对管理（Web 端与终端配置）**：
+  - 全面支持 OpenClaw 2026.9.1 新增的设备配对安全机制，在 Web 控制台与终端配置页增加待配对请求悬浮检测卡片与一键批准功能；
+  - 交互式终端与 Shell 菜单新增 `[p] 设备配对管理 / 一键批准设备配对`，支持批量或单独批准，免除手动复制复杂 ID 的门槛；
+  - 在 Web 界面与终端各处醒目标注安全风险提示，且控制器使用 `post()` + CSRF 保护，对客户端元数据做 HTML 转义杜绝存储型 XSS。
+- **配置管理模型菜单优化与终端重连加固**：
+  - 移除模型提供商顶级菜单中硬编码的具体过时模型名称，具体型号选择移交二级向导动态发现与精选预设；
+  - 修复终端配置点击重启后因连接代际竞争导致的“等待服务就绪... 5秒后重试”无限循环问题，引入序列锁与 Cookie 凭据注入，实现秒级就地重连。
+
 ## [2.1.1] - 2026-08-27
 
 本次维护以 OpenClaw 2026.7.1-2 为基准，逐项核对配置写入与上游 schema 的一致性。

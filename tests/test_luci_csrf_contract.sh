@@ -35,7 +35,8 @@ done
 
 # 必须用 post() 注册的端点: 会改状态或返回凭据
 MUST_POST="service_ctl uninstall plugin_upgrade backup get_token
-wechat_install wechat_login wechat_logout wechat_uninstall wechat_upgrade_plugin"
+wechat_install wechat_login wechat_logout wechat_uninstall wechat_upgrade_plugin
+devices_approve"
 
 for ep in $MUST_POST; do
 	line=$(grep -F "\"openclaw\", \"$ep\"}" "$CONTROLLER" | head -1)
@@ -84,7 +85,8 @@ done
 
 # 只读端点保持 call() 即可 —— 确认没有被误改成 post 而导致前端 GET 调用失效
 READ_ONLY="status_api setup_log check_update check_system plugin_upgrade_log
-wechat_status wechat_install_log wechat_login_status wechat_check_upgrade"
+wechat_status wechat_install_log wechat_login_status wechat_check_upgrade
+devices_list"
 for ep in $READ_ONLY; do
 	line=$(grep -F "\"openclaw\", \"$ep\"}" "$CONTROLLER" | head -1)
 	[ -n "$line" ] || fail "endpoint $ep not registered"

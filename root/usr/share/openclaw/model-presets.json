@@ -19,8 +19,8 @@
     "    plugin 表示需先安装官方 provider 插件，模型列表以插件为准。"
   ],
   "verified": {
-    "date": "2026-08-26",
-    "openclawVersion": "2026.7.1-2",
+    "date": "2026-09-05",
+    "openclawVersion": "2026.9.1",
     "method": "openclaw models list --provider <id> --plain"
   },
   "providers": {

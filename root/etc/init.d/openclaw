@@ -73,12 +73,15 @@ run_openclaw_cli_as_user() {
 	ulimit -v unlimited 2>/dev/null || true
 	ulimit -m unlimited 2>/dev/null || true
 	ulimit -d unlimited 2>/dev/null || true
-	HOME="$OC_DATA" OPENCLAW_HOME="$OC_DATA" OPENCLAW_STATE_DIR="${OC_DATA}/.openclaw" \
-		OPENCLAW_CONFIG_PATH="$CONFIG_FILE" NODE_ICU_DATA="${NODE_BASE}/share/icu" \
-		NPM_CONFIG_CACHE="${OC_DATA}/.npm" npm_config_cache="${OC_DATA}/.npm" TMPDIR="${OC_DATA}/.tmp" \
-		PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:$PATH" \
-		start-stop-daemon -S -m -p "$pid_file" -c openclaw:openclaw -d "$OC_INSTALL_PATH" \
-		-x "$NODE_BIN" -- "$oc_entry" "$@"
+	(
+		cd "${OC_DATA:-$OC_INSTALL_PATH}" 2>/dev/null || true
+		HOME="$OC_DATA" OPENCLAW_HOME="$OC_DATA" OPENCLAW_STATE_DIR="${OC_DATA}/.openclaw" \
+			OPENCLAW_CONFIG_PATH="$CONFIG_FILE" NODE_ICU_DATA="${NODE_BASE}/share/icu" \
+			NPM_CONFIG_CACHE="${OC_DATA}/.npm" npm_config_cache="${OC_DATA}/.npm" TMPDIR="${OC_DATA}/.tmp" \
+			PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:$PATH" \
+			start-stop-daemon -S -m -p "$pid_file" -c openclaw:openclaw \
+			-x "$NODE_BIN" -- "$oc_entry" "$@"
+	)
 	rc=$?
 	rm -f "$pid_file"
 	return "$rc"
@@ -122,115 +125,35 @@ done < "$_tmpf"
 rm -f "$_tmpf"
 }
 
-patch_iframe_headers() {
-# 移除 OpenClaw 网关的 X-Frame-Options 和 frame-ancestors 限制，允许 LuCI iframe 嵌入
-# v2026.4.x: 安全头设置迁移到 server.impl-*.js 文件
-local patched=0
-
-# 1. 搜索 server.impl-*.js (v2026.4.x 新位置)
-for f in $(find "${OC_GLOBAL}/lib/node_modules/openclaw/dist" -name "server.impl-*.js" -type f 2>/dev/null); do
-	if grep -q "X-Frame-Options.*DENY\|frame-ancestors.*none" "$f" 2>/dev/null; then
-		sed -i 's|res\.setHeader("X-Frame-Options", "DENY")|res.setHeader("X-Frame-Options", "ALLOW-FROM *") // patched by luci-app-openclaw|g' "$f"
-		sed -i "s|\"frame-ancestors 'none'\"|\"frame-ancestors *\"|g" "$f"
-		logger -t openclaw "Patched iframe headers in $f"
-		patched=1
-	fi
-done
-
-# 2. 兼容旧版本: 搜索 gateway-cli-*.js (v2026.3.x)
-for search_root in "${OC_GLOBAL}" "${NODE_BASE}/lib"; do
-	[ -d "$search_root" ] || continue
-	for f in $(find "$search_root" -name "gateway-cli-*.js" -type f 2>/dev/null); do
-		if grep -q "X-Frame-Options.*DENY" "$f" 2>/dev/null; then
-			sed -i "s|res.setHeader(\"X-Frame-Options\", \"DENY\");|// res.setHeader(\"X-Frame-Options\", \"DENY\"); // patched by luci-app-openclaw|g" "$f"
-			sed -i "s|\"frame-ancestors 'none'\"|\"frame-ancestors *\"|g" "$f"
-			logger -t openclaw "Patched iframe headers in $f"
-			patched=1
-		fi
-	done
-done
-
-[ $patched -eq 1 ] && logger -t openclaw "iframe headers patched successfully"
-}
-
-patch_webchat_session_conflict() {
-# OpenClaw 2026.6.11 的 Control UI / WebChat 在第二轮消息时可能触发:
-#   reply session initialization conflicted for agent:main:dashboard:...
-# 根因是 WebChat 追加用户消息会先更新 session registry revision，
-# 而 reply 初始化仍按旧 snapshot 做 guarded write；同时 dashboard 会话会被
-# terminal transcript mtime 误判为需要 rollover。这里做最小运行时兼容补丁。
-[ -x "$NODE_BIN" ] || return 0
-local oc_entry oc_dir dist_dir
-oc_entry=$(get_oc_entry)
-[ -n "$oc_entry" ] || return 0
-oc_dir=$(dirname "$oc_entry")
-dist_dir="${oc_dir}/dist"
-[ -d "$dist_dir" ] || return 0
-
-local patch_output
-patch_output=$(OC_DIST_DIR="$dist_dir" "$NODE_BIN" <<'NODE' 2>/tmp/openclaw-webchat-patch.err
-const fs = require('fs');
-const path = require('path');
-const dist = process.env.OC_DIST_DIR;
-let patched = 0;
-
-function patchFile(file, transforms) {
-	let source;
-	try {
-		source = fs.readFileSync(file, 'utf8');
-	} catch {
-		return;
-	}
-	let next = source;
-	for (const [needle, replacement] of transforms) {
-		if (next.includes(replacement)) continue;
-		if (next.includes(needle)) next = next.replace(needle, replacement);
-	}
-	if (next !== source) {
-		fs.writeFileSync(file, next);
-		patched += 1;
-	}
-}
-
-for (const name of fs.readdirSync(dist)) {
-	const file = path.join(dist, name);
-	if (!name.startsWith('get-reply-') || !name.endsWith('.js')) continue;
-	patchFile(file, [[
-		'const terminalMainTranscriptNewerThanRegistry = !isSystemEvent && await hasTerminalMainSessionTranscriptNewerThanRegistry({',
-		'const terminalMainTranscriptNewerThanRegistry = !isSystemEvent && !(ctx.Provider === "webchat" || ctx.Surface === "webchat" || ctx.OriginatingChannel === "webchat") && await hasTerminalMainSessionTranscriptNewerThanRegistry({'
-	]]);
-}
-
-for (const name of fs.readdirSync(dist)) {
-	const file = path.join(dist, name);
-	if (!name.startsWith('session-accessor-') || !name.endsWith('.js')) continue;
-	patchFile(file, [[
-		`\t\tif (revision !== params.expectedRevision) return {\n\t\t\tok: false,\n\t\t\t...currentEntry ? { currentEntry } : {},\n\t\t\treason: "stale-snapshot",\n\t\t\trevision\n\t\t};`,
-		`\t\tlet sessionEntryInput = params.sessionEntry;\n\t\tif (revision !== params.expectedRevision) {\n\t\t\tconst currentSessionId = typeof currentEntry?.sessionId === "string" ? currentEntry.sessionId.trim() : "";\n\t\t\tconst nextSessionId = typeof params.sessionEntry?.sessionId === "string" ? params.sessionEntry.sessionId.trim() : "";\n\t\t\tif (currentSessionId && nextSessionId && currentSessionId === nextSessionId) sessionEntryInput = {\n\t\t\t\t...currentEntry,\n\t\t\t\t...params.sessionEntry\n\t\t\t};\n\t\t\telse return {\n\t\t\t\tok: false,\n\t\t\t\t...currentEntry ? { currentEntry } : {},\n\t\t\t\treason: "stale-snapshot",\n\t\t\t\trevision\n\t\t\t};\n\t\t}`
-	], [
-		`sessionEntry: params.sessionEntry\n\t\t}) : params.sessionEntry;`,
-		`sessionEntry: sessionEntryInput\n\t\t}) : sessionEntryInput;`
-	]]);
-}
-
-process.stdout.write(String(patched));
-NODE
-)
-local rc=$?
-local patched_count=""
-[ -f /tmp/openclaw-webchat-patch.err ] && patched_count=$(cat /tmp/openclaw-webchat-patch.err 2>/dev/null)
-if [ $rc -eq 0 ]; then
-	local out_count
-	out_count=$(OC_DIST_DIR="$dist_dir" "$NODE_BIN" -e "const fs=require('fs'),path=require('path');let ok=0;for(const n of fs.readdirSync(process.env.OC_DIST_DIR)){const f=path.join(process.env.OC_DIST_DIR,n);if(!n.endsWith('.js'))continue;const s=fs.readFileSync(f,'utf8');if(s.includes('ctx.Provider === \"webchat\"')||s.includes('let sessionEntryInput = params.sessionEntry'))ok++;}process.stdout.write(String(ok));" 2>/dev/null || echo "")
-	logger -t openclaw "WebChat 会话冲突兼容补丁已检查 (${out_count:-0} 个命中, 本次修改 ${patch_output:-0} 个文件)"
-else
-	logger -t openclaw "WebChat 会话冲突兼容补丁失败: ${patched_count:-unknown error}"
-fi
-rm -f /tmp/openclaw-webchat-patch.err 2>/dev/null || true
-return 0
-}
 
 sync_uci_to_json() {
+# 检查是否处于升级事务迁移期间，若是则暂停 UCI 覆盖迁移配置
+local _sdir="${OPENCLAW_STATE_DIR:-${OC_DATA:+$OC_DATA/.openclaw}}"
+local _pdir="$(dirname "$_sdir")"
+local _rdir="$(dirname "$_pdir")"
+local _status_file="" cand
+for cand in \
+	"${_rdir}/.luci-openclaw-upgrade/status.json" \
+	"${_pdir}/.luci-openclaw-upgrade/status.json" \
+	"${_sdir}/.luci-openclaw-upgrade/status.json" \
+	"${OC_DATA:+$OC_DATA/.luci-openclaw-upgrade/status.json}" \
+	"${OC_BASE_PATH:-/opt}/openclaw/.luci-openclaw-upgrade/status.json"; do
+	if [ -n "$cand" ] && [ -f "$cand" ]; then
+		_status_file="$cand"
+		break
+	fi
+done
+if [ -n "$_status_file" ] && [ -f "$_status_file" ]; then
+	local _up_phase
+	_up_phase=$(grep -oE '"phase"[[:space:]]*:[[:space:]]*"[^"]+"' "$_status_file" 2>/dev/null | cut -d'"' -f4 || true)
+	case "$_up_phase" in
+		migrating|gateway_verifying|backing_up)
+			logger -t openclaw "检测到正在执行升级事务 (phase: $_up_phase)，暂停 UCI 覆盖迁移配置"
+			return 0
+			;;
+	esac
+fi
+
 # 将 UCI 配置同步到 openclaw.json，同时确保 token 双向同步
 local port bind token json_token
 port=$(uci -q get openclaw.main.port || echo "18789")
@@ -312,8 +235,8 @@ d.gateway.auth.mode='token';
 d.gateway.auth.token=process.env.OC_SYNC_TOKEN||'';
 if(!d.gateway.controlUi)d.gateway.controlUi={};
 d.gateway.controlUi.allowInsecureAuth=true;
-d.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
 d.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true;
+if(!Array.isArray(d.gateway.controlUi.allowedOrigins))d.gateway.controlUi.allowedOrigins=['*'];
 // 清理 v2026.3.1+ 已废弃的字段，避免配置验证失败
 delete d.gateway.name;
 delete d.gateway.bonjour;
@@ -344,46 +267,34 @@ if(d.hooks&&d.hooks.internal){delete d.hooks.internal.handlers;}
 // 5. agents.defaults.cliBackends 废弃
 if(d.agents&&d.agents.defaults){delete d.agents.defaults.cliBackends;}
 // v2026.4.9: 自动同步 plugins.allow (解决 "plugins.allow is empty" 警告)
-// 扫描已安装的插件并添加到 allow 列表
 if(!d.plugins)d.plugins={};
 if(!Array.isArray(d.plugins.allow))d.plugins.allow=[];
-// 从 plugins.installs 中提取已安装插件
-// 注意: 使用 installPath 中的目录名作为插件 ID (与 openclaw.plugin.json 中的 id 一致)
-if(d.plugins.installs){
-	Object.keys(d.plugins.installs).forEach(key=>{
-		const inst=d.plugins.installs[key];
-		if(inst&&inst.installPath){
-			// 从 installPath 提取插件目录名 (如 openclaw-weixin)
-			const match=inst.installPath.match(/\/([^\/]+)\/?$/);
-			if(match&&match[1]&&!d.plugins.allow.includes(match[1])){
-				d.plugins.allow.push(match[1]);
-		}
-		}
-	});
-}
+delete d.plugins.installs;
 // v2026.5.x: 微信插件渠道名统一为 openclaw-weixin
-// 旧配置里可能残留 weixin，启动前迁移，避免渠道加载失败。
 if(Array.isArray(d.plugins.allow)){
 	d.plugins.allow=d.plugins.allow.map(x=>x==='weixin'?'openclaw-weixin':x)
 		.filter((x,i,a)=>x&&a.indexOf(x)===i);
 }
-['entries','installs'].forEach(ns=>{
-	if(d.plugins&&d.plugins[ns]&&d.plugins[ns].weixin){
-		if(!d.plugins[ns]['openclaw-weixin'])d.plugins[ns]['openclaw-weixin']=d.plugins[ns].weixin;
-		delete d.plugins[ns].weixin;
-	}
-});
+if(d.plugins&&d.plugins.entries&&d.plugins.entries.weixin){
+	if(!d.plugins.entries['openclaw-weixin'])d.plugins.entries['openclaw-weixin']=d.plugins.entries.weixin;
+	delete d.plugins.entries.weixin;
+}
 ['channel','channels'].forEach(ns=>{
 	if(d[ns]&&d[ns].weixin){
 		if(!d[ns]['openclaw-weixin'])d[ns]['openclaw-weixin']=d[ns].weixin;
 		delete d[ns].weixin;
 	}
 });
-if(!d.plugins.allow.includes('openclaw-weixin') && d.plugins.installs && d.plugins.installs['openclaw-weixin']){
+if(d.channels&&d.channels['openclaw-weixin']&&!d.plugins.allow.includes('openclaw-weixin')){
 	d.plugins.allow.push('openclaw-weixin');
 }
 // 始终信任 copilot-proxy (内置插件)
 if(!d.plugins.allow.includes('copilot-proxy'))d.plugins.allow.push('copilot-proxy');
+// 允许 LuCI 跨源与 Host-Header 访问 Control UI
+if(!d.gateway)d.gateway={};
+if(!d.gateway.controlUi)d.gateway.controlUi={};
+d.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true;
+if(!Array.isArray(d.gateway.controlUi.allowedOrigins))d.gateway.controlUi.allowedOrigins=['*'];
 fs.writeFileSync(f,JSON.stringify(d,null,2));
 " 2>/dev/null
 fi
@@ -470,7 +381,7 @@ try {
 		if [ "$index_ok" != "1" ]; then
 			logger -t openclaw "检测到旧微信直装目录，正在迁移到 SQLite 插件索引"
 			mkdir -p "${OC_DATA}/.npm" "${OC_DATA}/.tmp" 2>/dev/null || true
-			if run_openclaw_cli_as_user "$oc_entry" plugins install --force --pin '@tencent-weixin/openclaw-weixin@2.4.6' \
+			if run_openclaw_cli_as_user "$oc_entry" plugins install --force --pin '@tencent-weixin/openclaw-weixin@2.4.8' \
 				>>/tmp/openclaw-wechat-self-heal.log 2>&1; then
 				logger -t openclaw "微信插件已迁移到 SQLite installed_plugin_index"
 			else
@@ -585,9 +496,7 @@ if(changed){
 	# 修复数据目录权限 (防止 root 用户操作后留下无法读取的文件)
 	fix_openclaw_state_permissions 2>/dev/null || true
 
-	# v2026.4.9: 修复插件目录权限 (OpenClaw 要求插件目录属主为 root)
-	# 详见: https://github.com/nicepkg/openclaw/releases/tag/v2026.4.9
-	# v2026.4.10 补充: 同时修复权限模式为 755，确保 Gateway 可读取插件
+	# 确保插件目录属主与权限统一 (openclaw:openclaw 755)，确保 Gateway 可读取与管理插件
 	# 原因: npm/npx 以 root 创建目录时默认权限 700，其他用户无法读取
 	local ext_dir="${OC_DATA}/.openclaw/extensions"
 	local npm_projects_dir="${OC_DATA}/.openclaw/npm/projects"
@@ -631,14 +540,15 @@ if(changed){
 	# 清理 plugins.allow / channels 中的微信配置。
 	_run_doctor_fix() {
 		local oc_entry="$1"
-		local _doc_cmd="HOME=\"${OC_DATA}\" OPENCLAW_HOME=\"${OC_DATA}\" OPENCLAW_STATE_DIR=\"${OC_DATA}/.openclaw\" OPENCLAW_CONFIG_PATH=\"${CONFIG_FILE}\" NODE_ICU_DATA=\"${NODE_BASE}/share/icu\" \"${NODE_BIN}\" \"${oc_entry}\" doctor --fix"
+		local _doc_cmd="cd \"${OC_DATA}\" && HOME=\"${OC_DATA}\" OPENCLAW_HOME=\"${OC_DATA}\" OPENCLAW_STATE_DIR=\"${OC_DATA}/.openclaw\" OPENCLAW_CONFIG_PATH=\"${CONFIG_FILE}\" NODE_ICU_DATA=\"${NODE_BASE}/share/icu\" OPENCLAW_SUPERVISOR_MODE=\"external\" OPENCLAW_SERVICE_REPAIR_POLICY=\"external\" \"${NODE_BIN}\" \"${oc_entry}\" doctor --fix"
 		if id openclaw >/dev/null 2>&1; then
 			if command -v su >/dev/null 2>&1; then
 				su -s /bin/sh openclaw -c "${_doc_cmd}" >/dev/null 2>&1
 			elif command -v runuser >/dev/null 2>&1; then
 				runuser -u openclaw -- sh -c "${_doc_cmd}" >/dev/null 2>&1
 			else
-				start-stop-daemon -S -m -p /tmp/openclaw-doctor.pid -c openclaw:openclaw -x /bin/sh -- -c "${_doc_cmd}" >/dev/null 2>&1
+				(cd "${OC_DATA}" 2>/dev/null || true; start-stop-daemon -S -m -p /tmp/openclaw-doctor.pid -c openclaw:openclaw -x /bin/sh -- -c "${_doc_cmd}" >/dev/null 2>&1)
+				rm -f /tmp/openclaw-doctor.pid 2>/dev/null || true
 			fi
 		else
 			# openclaw 用户不存在时退回 root 执行，保证迁移仍可运行
@@ -665,20 +575,31 @@ if(changed){
 		# 只在版本变化时才运行 doctor --fix
 		if [ "$current_ver" != "$last_ver" ]; then
 			logger -t openclaw "检测到版本变更 ($last_ver -> $current_ver)，执行配置迁移 (doctor --fix)..."
-			_run_doctor_fix "$oc_entry" && \
-				logger -t openclaw "配置迁移完成" || \
+			if _run_doctor_fix "$oc_entry"; then
+				local _val_cmd="cd \"${OC_DATA}\" && HOME=\"${OC_DATA}\" OPENCLAW_HOME=\"${OC_DATA}\" OPENCLAW_STATE_DIR=\"${OC_DATA}/.openclaw\" OPENCLAW_CONFIG_PATH=\"${CONFIG_FILE}\" NODE_ICU_DATA=\"${NODE_BASE}/share/icu\" OPENCLAW_SUPERVISOR_MODE=\"external\" OPENCLAW_SERVICE_REPAIR_POLICY=\"external\" \"${NODE_BIN}\" \"${oc_entry}\" config validate --json"
+				local _val_ok=0
+				if run_openclaw_cli_as_user "$oc_entry" config validate --json >/dev/null 2>&1 || eval "${_val_cmd}" >/dev/null 2>&1; then
+					_val_ok=1
+				fi
+				if [ "$_val_ok" -eq 1 ]; then
+					_ensure_critical_config
+					_sync_token_after_doctor
+					echo "$current_ver" > "$version_marker" 2>/dev/null
+					chown openclaw:openclaw "$version_marker" 2>/dev/null || true
+					logger -t openclaw "配置迁移完成"
+				else
+					logger -t openclaw "配置校验 (config validate --json) 失败，未记录版本标记"
+				fi
+			else
 				logger -t openclaw "配置迁移失败，请手动检查"
-			# 更新标记文件
-			echo "$current_ver" > "$version_marker" 2>/dev/null
-			chown openclaw:openclaw "$version_marker" 2>/dev/null || true
+			fi
 		else
 			logger -t openclaw "版本未变化 ($current_ver)，跳过 doctor --fix"
 		fi
 	}
 	_run_config_migration "$oc_entry"
 
-	# doctor --fix 后再次修复权限 (防止 root 创建的文件导致 EACCES)
-	# 注意: extensions 目录保持 root 权限 (OpenClaw 安全要求)
+	# doctor --fix 后再次修复权限 (确保 extensions 与 state 目录保持 openclaw:openclaw 755)
 	fix_openclaw_state_permissions 2>/dev/null || true
 
 	# v2026.4.10: doctor --fix 后确保关键配置字段存在
@@ -705,8 +626,8 @@ if (!d.gateway.bind) d.gateway.bind = 'lan';
 // 确保 controlUi 安全配置存在 (允许非 loopback 绑定和 LuCI iframe 嵌入)
 if (!d.gateway.controlUi) d.gateway.controlUi = {};
 if (d.gateway.controlUi.allowInsecureAuth !== true) d.gateway.controlUi.allowInsecureAuth = true;
-if (d.gateway.controlUi.dangerouslyDisableDeviceAuth !== true) d.gateway.controlUi.dangerouslyDisableDeviceAuth = true;
 if (d.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback !== true) d.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback = true;
+if (!Array.isArray(d.gateway.controlUi.allowedOrigins)) d.gateway.controlUi.allowedOrigins = ['*'];
 
 // 确保认证配置
 if (!d.gateway.auth) d.gateway.auth = {};
@@ -772,12 +693,6 @@ fs.writeFileSync(f, JSON.stringify(d, null, 2));
 
 		# v2026.4.10: final permission fix before Gateway start
 		fix_openclaw_state_permissions 2>/dev/null || true
-
-# Patch iframe 安全头，允许 LuCI 嵌入
-patch_iframe_headers
-
-# Patch WebChat 二次发送会话初始化冲突
-patch_webchat_session_conflict
 
 # 将 UCI bind 映射到 openclaw gateway --bind 参数
 local gw_bind="loopback"
@@ -852,6 +767,9 @@ chmod 700 "$node_compile_cache" 2>/dev/null || true
 		_validate_path "$_dir" || { logger -t openclaw "安全警告: 路径验证失败: $_dir"; return 1; }
 	done
 
+	# 允许 LuCI 页面以 iframe 内嵌 OpenClaw 官方 Web 控制台
+	[ -x /usr/libexec/openclaw-permissions.sh ] && /usr/libexec/openclaw-permissions.sh patch-control-ui "$OC_GLOBAL"
+
 	procd_open_instance "gateway"
 	procd_set_param command "$NODE_BIN" "$oc_entry" gateway run \
 	--port "$port" --bind "$gw_bind"
@@ -861,6 +779,8 @@ chmod 700 "$node_compile_cache" 2>/dev/null || true
 	OPENCLAW_STATE_DIR="${OC_DATA}/.openclaw" \
 	OPENCLAW_CONFIG_PATH="$CONFIG_FILE" \
 	OPENCLAW_GATEWAY_TOKEN="$gw_token" \
+	OPENCLAW_SUPERVISOR_MODE="external" \
+	OPENCLAW_SERVICE_REPAIR_POLICY="external" \
 	NODE_COMPILE_CACHE="$node_compile_cache" \
 	NODE_ICU_DATA="${NODE_BASE}/share/icu" \
 	NODE_BASE="$NODE_BASE" \

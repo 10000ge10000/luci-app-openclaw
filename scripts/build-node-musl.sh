@@ -4,13 +4,13 @@
 # 在 Alpine ARM64 Docker 容器内运行
 # 
 # 环境变量: 
-#   NODE_VER (目标版本号)
-#   BUILD_MODE (apk|cross) - apk: 使用 Alpine apk, cross: 从官方 glibc 版本交叉编译
+#   NODE_VER (目标版本号，如 22.23.2)
+#   BUILD_MODE (apk) - 仅支持 apk 模式，严格产出请求版本
 #   /output (输出目录)
 #
-# 打包策略:
-#   1. apk 模式: 使用 Alpine apk 安装 nodejs，版本受限于 Alpine 仓库
-#   2. cross 模式: 从 Node.js 官方下载 glibc 版本，转换为 musl
+# 打包契约:
+#   1. apk 模式: 使用 Alpine apk 安装 nodejs，必须精确产出 NODE_VER，禁止版本不符改名
+#   2. 禁止 cross 模式使用 glibc 替换 ELF interpreter 冒充 musl
 #   使用 patchelf 修改 node 二进制的 ELF interpreter 和 rpath，
 #   使其直接使用打包的 musl 链接器和共享库，无需 LD_LIBRARY_PATH。
 #   这样 process.execPath 返回正确的 node 路径，子进程 fork 也能正常工作。
@@ -42,12 +42,13 @@ build_apk() {
 	ACTUAL_VER=$(node --version | sed 's/^v//')
 	echo "Alpine Node.js version: v${ACTUAL_VER} (requested: v${NODE_VER})"
 
-	# 使用实际版本号作为文件名 (Alpine apk 的 nodejs 版本可能与请求版本不同)
+	# 必须产出请求的精确版本；禁止接受 Alpine apk 实际版本与 NODE_VER 不一致后改名发布
 	if [ "$ACTUAL_VER" != "$NODE_VER" ]; then
-		echo "WARNING: Actual version (${ACTUAL_VER}) differs from requested (${NODE_VER})"
-		echo "         Using actual version for package name"
+		echo "ERROR: Actual Alpine Node.js version (${ACTUAL_VER}) does not match requested version (${NODE_VER})" >&2
+		echo "       Refusing to rename or publish mismatched version" >&2
+		exit 1
 	fi
-	PKG_NAME="node-v${ACTUAL_VER}-linux-arm64-musl"
+	PKG_NAME="node-v${NODE_VER}-linux-arm64-musl"
 	PKG_DIR="/tmp/${PKG_NAME}"
 	mkdir -p "${PKG_DIR}/bin" "${PKG_DIR}/lib/node_modules" "${PKG_DIR}/include/node"
 
@@ -93,102 +94,11 @@ build_apk() {
 	echo "PKG_DIR=${PKG_DIR}" >> /tmp/build_env
 }
 
-# ── cross 模式: 从 Node.js 官方 glibc 版本交叉编译 ──
+# ── 禁止使用 glibc 二进制仅替换 ELF interpreter 冒充 musl ──
 build_cross() {
-	echo ""
-	echo "=== Building with cross-compilation mode ==="
-	apk add --no-cache xz patchelf curl wget ca-certificates
-
-	# 下载 Node.js 官方 ARM64 glibc 版本
-	NODE_TARBALL="node-v${NODE_VER}-linux-arm64.tar.xz"
-	NODE_URL="https://nodejs.org/dist/v${NODE_VER}/${NODE_TARBALL}"
-
-	echo "=== Downloading Node.js v${NODE_VER} ARM64 glibc ==="
-	cd /tmp
-	if ! curl -fSL -o "$NODE_TARBALL" "$NODE_URL"; then
-		echo "ERROR: Failed to download Node.js from $NODE_URL"
-		exit 1
-	fi
-
-	# 解压
-	echo "=== Extracting Node.js ==="
-	rm -rf "node-v${NODE_VER}-linux-arm64" 2>/dev/null || true
-	tar xf "$NODE_TARBALL"
-	SRC_DIR="node-v${NODE_VER}-linux-arm64"
-
-	# 创建输出目录
-	PKG_NAME="node-v${NODE_VER}-linux-arm64-musl"
-	PKG_DIR="/tmp/${PKG_NAME}"
-	rm -rf "$PKG_DIR" 2>/dev/null || true
-	mkdir -p "${PKG_DIR}/bin" "${PKG_DIR}/lib" "${PKG_DIR}/share/icu"
-
-	# 复制 node 二进制
-	echo "=== Copying Node.js binary ==="
-	cp "${SRC_DIR}/bin/node" "${PKG_DIR}/bin/node"
-	chmod +x "${PKG_DIR}/bin/node"
-
-	# 复制 npm
-	if [ -d "${SRC_DIR}/lib/node_modules/npm" ]; then
-		mkdir -p "${PKG_DIR}/lib/node_modules"
-		cp -r "${SRC_DIR}/lib/node_modules/npm" "${PKG_DIR}/lib/node_modules/"
-	fi
-
-	# 复制 ICU 数据
-	ICU_DAT=$(find "${SRC_DIR}" -name "icudt*.dat" 2>/dev/null | head -1)
-	if [ -n "$ICU_DAT" ] && [ -f "$ICU_DAT" ]; then
-		cp "$ICU_DAT" "${PKG_DIR}/share/icu/"
-		echo "  + ICU data: $(basename "$ICU_DAT")"
-	fi
-
-	# ── 关键步骤: musl 库收集 ──
-	echo "=== Converting to musl libc ==="
-
-	# 复制 musl 动态链接器
-	if [ -f /lib/ld-musl-aarch64.so.1 ]; then
-		cp -L /lib/ld-musl-aarch64.so.1 "${PKG_DIR}/lib/"
-		echo "  + ld-musl-aarch64.so.1"
-	else
-		echo "ERROR: musl dynamic linker not found"
-		exit 1
-	fi
-
-	# 收集 musl 版本的依赖库
-	# Node.js 官方 ARM64 版本依赖: libcrypto, libssl, libz, libstdc++, libgcc_s
-	# 这些库需要从 Alpine (musl) 版本获取
-	echo "=== Collecting musl libraries ==="
-	LIB_DIR="${PKG_DIR}/lib"
-	
-	# 安装必要的库包
-	apk add --no-cache libcrypto3 libssl3 zlib libstdc++ libgcc
-	
-	# 复制库文件
-	for lib in libcrypto.so.3 libssl.so.3 libz.so.1 libstdc++.so.6 libgcc_s.so.1; do
-		for libpath in /usr/lib/$lib /lib/$lib; do
-			if [ -f "$libpath" ]; then
-				cp -L "$libpath" "$LIB_DIR/" 2>/dev/null || true
-				echo "  + $lib"
-				break
-			fi
-		done
-	done
-
-	# 收集所有 musl 库的依赖
-	for lib in "$LIB_DIR"/*.so*; do
-		[ -f "$lib" ] || continue
-		ldd "$lib" 2>/dev/null | while read -r line; do
-			lib_path=$(echo "$line" | grep -oE '/[^ ]+\.so[^ ]*' | head -1)
-			if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
-				lib_name=$(basename "$lib_path")
-				[ -f "$LIB_DIR/$lib_name" ] || cp -L "$lib_path" "$LIB_DIR/" 2>/dev/null || true
-			fi
-		done
-	done
-
-	echo "Libraries collected: $(ls "$LIB_DIR"/*.so* 2>/dev/null | wc -l) files"
-
-	# 返回包名供后续使用
-	echo "PKG_NAME=${PKG_NAME}" >> /tmp/build_env
-	echo "PKG_DIR=${PKG_DIR}" >> /tmp/build_env
+	echo "ERROR: cross mode (glibc binary with patched ELF interpreter) is forbidden" >&2
+	echo "       Cannot impersonate musl using glibc binaries" >&2
+	exit 1
 }
 
 # ── 公共步骤: patchelf 和打包 ──
@@ -237,6 +147,7 @@ NPXWRAPPER
 		"${prefix}/bin/node" --version
 		"${prefix}/bin/node" -e "console.log('execPath:', process.execPath)"
 		"${prefix}/bin/node" -e "console.log(process.arch, process.platform, process.versions.modules)"
+		"${prefix}/bin/node" -e "if(process.arch!=='arm64'||process.platform!=='linux')throw new Error('Mismatched architecture: '+process.arch)"
 		NODE_ICU_DATA="${prefix}/share/icu" "${prefix}/bin/npm" --version 2>/dev/null || echo "npm needs ICU data"
 		rm -rf "$prefix"
 	}
@@ -248,6 +159,9 @@ NPXWRAPPER
 	echo "=== Creating tarball ==="
 	cd /tmp
 	tar cJf "/output/${PKG_NAME}.tar.xz" "${PKG_NAME}"
+	if command -v sha256sum >/dev/null 2>&1; then
+		(cd /output && sha256sum "${PKG_NAME}.tar.xz" > "${PKG_NAME}.tar.xz.sha256")
+	fi
 	ls -lh "/output/${PKG_NAME}.tar.xz"
 	echo "=== Done: ${PKG_NAME}.tar.xz ==="
 }

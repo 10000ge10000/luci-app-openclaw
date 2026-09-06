@@ -52,7 +52,6 @@ oc_fix_state_permissions() {
 
 	if [ -d "$state_dir" ]; then
 		find "$state_dir" -user root \
-			! -path "${ext_dir}*" \
 			! -path "${archive_dir}*" \
 			! -path "${state_dir}/npm/projects*" \
 			-exec chown openclaw:openclaw {} \; 2>/dev/null || true
@@ -68,12 +67,12 @@ oc_fix_state_permissions() {
 	fi
 
 	if [ -d "$ext_dir" ]; then
-		chown -R root:root "$ext_dir" 2>/dev/null || true
+		chown -R openclaw:openclaw "$ext_dir" 2>/dev/null || true
 		chmod -R 755 "$ext_dir" 2>/dev/null || true
 	fi
 	if [ -d "$archive_dir" ]; then
 		chown -R root:root "$archive_dir" 2>/dev/null || true
-		chmod -R 700 "$archive_dir" 2>/dev/null || true
+		chmod -R 755 "$archive_dir" 2>/dev/null || true
 	fi
 
 	oc_fix_npm_projects_permissions "$state_dir"
@@ -88,10 +87,35 @@ oc_prepare_openclaw_workdirs() {
 	mkdir -p "${data_dir}/.npm" "${data_dir}/.tmp" "$npm_dir" "${state_dir}/extensions" 2>/dev/null || true
 	chown -R openclaw:openclaw "${data_dir}/.npm" "${data_dir}/.tmp" 2>/dev/null || true
 	chown openclaw:openclaw "$data_dir" "$state_dir" "${state_dir}/npm" "$npm_dir" 2>/dev/null || true
-	chmod u+rwx,go+rx "${data_dir}/.npm" "${data_dir}/.tmp" "$state_dir" "${state_dir}/npm" "$npm_dir" 2>/dev/null || true
+	[ -d "${state_dir}/extensions" ] && chown -R openclaw:openclaw "${state_dir}/extensions" 2>/dev/null || true
+	[ -d "${state_dir}/extensions" ] && chmod -R 755 "${state_dir}/extensions" 2>/dev/null || true
+	chmod u+rwx,go+rx "${data_dir}/.npm" "${data_dir}/.tmp" "$state_dir" "${state_dir}/npm" "$npm_dir" "${state_dir}/extensions" 2>/dev/null || true
 
 	# During install/upgrade, allow openclaw to update npm generations.
 	[ -d "$npm_dir" ] && chown -R openclaw:openclaw "$npm_dir" 2>/dev/null || true
+}
+
+oc_patch_control_ui_security_headers() {
+	local global_dir="${1:-${OC_GLOBAL:-/opt/openclaw/global}}"
+	local dist_dir=""
+	for d in "${global_dir}/lib/node_modules/openclaw/dist" "${global_dir}/node_modules/openclaw/dist" "/opt/openclaw/global/lib/node_modules/openclaw/dist" "/opt/openclaw/node/lib/node_modules/openclaw/dist"; do
+		if [ -d "$d" ]; then
+			dist_dir="$d"
+			break
+		fi
+	done
+	[ -n "$dist_dir" ] || return 0
+	# 允许 LuCI 界面以 iframe 内嵌官方 Web 控制台 (Control UI / WebChat)
+	# 移除 X-Frame-Options: DENY 并将 frame-ancestors 放宽
+	for f in "$dist_dir"/control-ui-*.js; do
+		[ -f "$f" ] || continue
+		if grep -q 'res.setHeader("X-Frame-Options", "DENY");' "$f" 2>/dev/null; then
+			sed -i 's/res.setHeader("X-Frame-Options", "DENY");//g' "$f" 2>/dev/null || true
+		fi
+		if grep -q '"frame-ancestors '\''none'\''"' "$f" 2>/dev/null; then
+			sed -i "s/\"frame-ancestors 'none'\"/\"frame-ancestors *\"/g" "$f" 2>/dev/null || true
+		fi
+	done
 }
 
 if [ "${OPENCLAW_PERMISSIONS_SOURCED:-0}" = "1" ]; then
@@ -111,8 +135,12 @@ case "${1:-fix-state}" in
 		shift || true
 		oc_prepare_openclaw_workdirs "${1:-}"
 		;;
+	patch-control-ui)
+		shift || true
+		oc_patch_control_ui_security_headers "${1:-}"
+		;;
 	*)
-		echo "Usage: $0 {fix-state [state_dir]|fix-npm-projects [state_dir]|prepare-workdirs [data_dir]}" >&2
+		echo "Usage: $0 {fix-state [state_dir]|fix-npm-projects [state_dir]|prepare-workdirs [data_dir]|patch-control-ui [global_dir]}" >&2
 		exit 2
 		;;
 esac

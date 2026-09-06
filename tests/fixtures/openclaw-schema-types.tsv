@@ -1,5 +1,5 @@
 # OpenClaw 官方 schema 关键字段类型基线
-# 来源: openclaw config schema (OpenClaw 2026.7.1-2, 提取日期 2026-08-26)
+# 来源: openclaw config schema (OpenClaw 2026.9.1, 提取日期 2026-09-05)
 # 格式: <key><TAB><type><TAB><enum(逗号分隔, - 表示无枚举)>
 #
 # 说明:
@@ -16,7 +16,6 @@ gateway.customBindHost	string	-
 gateway.auth.mode	string	none,token,password,trusted-proxy
 gateway.auth.token	string	-
 gateway.controlUi.allowInsecureAuth	boolean	-
-gateway.controlUi.dangerouslyDisableDeviceAuth	boolean	-
 gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback	boolean	-
 logging.level	string	silent,fatal,error,warn,info,debug,trace
 acp.dispatch.enabled	boolean	-

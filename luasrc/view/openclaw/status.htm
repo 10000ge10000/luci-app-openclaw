@@ -177,7 +177,16 @@
 	}
 
 	updateStatus();
-	setInterval(updateStatus, 5000);
+	setInterval(function() {
+		if (!document.hidden) {
+			updateStatus();
+		}
+	}, 5000);
+	document.addEventListener('visibilitychange', function() {
+		if (!document.hidden) {
+			updateStatus();
+		}
+	});
 })();
 //]]>
 </script>

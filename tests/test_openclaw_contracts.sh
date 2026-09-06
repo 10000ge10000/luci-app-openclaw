@@ -6,11 +6,19 @@ fail() {
 	exit 1
 }
 
-grep -q "OC_TESTED_VERSION=\"2026.7.1-2\"" root/usr/bin/openclaw-env || fail "tested OpenClaw version not pinned"
-grep -q "NODE_VERSION_V2=\"22.23.0\"" root/usr/bin/openclaw-env || fail "default Node.js version not pinned"
+grep -q "OC_TESTED_VERSION=\"2026.9.1\"" root/usr/bin/openclaw-env || fail "tested OpenClaw version not pinned"
+grep -q "NODE_VERSION_V2=\"22.23.2\"" root/usr/bin/openclaw-env || fail "default Node.js version not pinned"
 grep -q "OC_NODE_MIN_VERSION=\"\${OC_NODE_MIN_VERSION:-22.22.3}\"" root/usr/bin/openclaw-env || fail "minimum Node.js version not pinned"
 grep -q "oc_assert_node_min_version" root/usr/bin/openclaw-env || fail "Node.js minimum version check missing"
 grep -q 'oc_node_version_ge "$from_pkg" "$required"' root/usr/bin/openclaw-env || fail "package Node.js requirement must not lower static minimum"
+grep -q "validate-runtime" root/usr/bin/openclaw-env || fail "openclaw-env must validate runtime against full engines.node contract"
+grep -q "openclaw-package-contract.js" root/usr/bin/openclaw-env || fail "openclaw-env must reference package contract validator"
+grep -q "validate_openclaw_manifest" root/usr/bin/openclaw-env || fail "openclaw-env must define static manifest validation helper"
+grep -q "execute_openclaw_lifecycle" root/usr/bin/openclaw-env || fail "openclaw-env must gate lifecycle script execution"
+grep -q "candidate_prefix" root/usr/bin/openclaw-env || fail "openclaw-env must install to candidate prefix before replacing OC_GLOBAL"
+grep -q -- "--ignore-scripts" root/usr/bin/openclaw-env || fail "npm install must enforce --ignore-scripts"
+grep -q -- "--omit=optional" root/usr/bin/openclaw-env || fail "npm install must enforce --omit=optional"
+grep -q "npm_config_ignore_scripts=true" root/usr/bin/openclaw-env || fail "postinstall must inherit npm_config_ignore_scripts=true"
 grep -q "install_openclaw_cli_wrapper" root/usr/bin/openclaw-env || fail "OpenClaw CLI wrapper must set runtime env"
 grep -q 'export NODE_ICU_DATA="${NODE_BASE}/share/icu"' root/usr/bin/openclaw-env || fail "OpenClaw CLI wrapper must export NODE_ICU_DATA"
 grep -q 'rm -f "$OC_GLOBAL/bin/openclaw"' root/usr/bin/openclaw-env || fail "OpenClaw CLI wrapper must unlink npm symlink before writing"
@@ -64,7 +72,7 @@ grep -q "archived-extensions" root/etc/init.d/openclaw || fail "legacy weixin ex
 grep -q "find_wechat_plugin_dir" luasrc/controller/openclaw.lua || fail "wechat npm plugin detection missing"
 grep -q "wechat_openclaw_plugin_install_cmd" luasrc/controller/openclaw.lua || fail "wechat install must use OpenClaw plugin installer"
 grep -q "delete d.plugins.installs\\['openclaw-weixin'\\]" luasrc/controller/openclaw.lua || fail "wechat config must remove deprecated authored install records"
-grep -q "plugins install --force --pin @tencent-weixin/openclaw-weixin@2.4.6" luasrc/controller/openclaw.lua || fail "wechat install must write the official plugin index"
+grep -q "plugins install --force --pin @tencent-weixin/openclaw-weixin@2.4.8" luasrc/controller/openclaw.lua || fail "wechat install must write the official plugin index"
 grep -q "channels\\['openclaw-weixin'\\].enabled = true" luasrc/controller/openclaw.lua || fail "wechat channel enable registration missing"
 grep -q "OpenClaw 插件索引注册完成" luasrc/controller/openclaw.lua || fail "wechat install log must confirm index registration"
 grep -q "plugins enable openclaw-weixin" luasrc/controller/openclaw.lua || fail "wechat lifecycle must persist the official plugin enable entry"
@@ -117,12 +125,17 @@ grep -q "procd_set_param term_timeout 2" root/etc/init.d/openclaw || fail "procd
 grep -q "procd_set_param respawn 5 1 -1" root/etc/init.d/openclaw || fail "gateway respawn must avoid procd crash throttling during manual restart_gateway"
 grep -q "openclaw-restart-gateway.lock" root/etc/init.d/openclaw || fail "restart_gateway must guard concurrent restart requests"
 grep -q "kill -USR1" root/etc/init.d/openclaw || fail "restart_gateway must prefer OpenClaw SIGUSR1 in-process restart"
-grep -q "SIGUSR1 请求 Gateway 快速重载" root/etc/init.d/openclaw || fail "restart_gateway SIGUSR1 fast reload log missing"
-grep -q "patch_webchat_session_conflict" root/etc/init.d/openclaw || fail "WebChat session conflict patch helper missing"
-grep -q 'ctx.Provider === "webchat"' root/etc/init.d/openclaw || fail "WebChat patch must skip terminal transcript rollover for webchat"
-grep -q "let sessionEntryInput = params.sessionEntry" root/etc/init.d/openclaw || fail "WebChat patch must merge same-session stale guarded writes"
-grep -q "WebChat 二次发送会话初始化冲突" root/etc/init.d/openclaw || fail "WebChat patch must run before gateway start"
-grep -q 'openclaw.main.clear_jiti_cache_on_start' root/etc/init.d/openclaw || fail "JITI cleanup must be guarded by UCI flag"
+grep -q 'OPENCLAW_SUPERVISOR_MODE="external"' root/etc/init.d/openclaw || fail "gateway must receive external supervisor mode"
+grep -q 'OPENCLAW_SERVICE_REPAIR_POLICY="external"' root/etc/init.d/openclaw || fail "gateway must receive external repair policy"
+if grep -q "patch_webchat_session_conflict" root/etc/init.d/openclaw; then
+	fail "obsolete WebChat patch helper must be removed"
+fi
+if grep -q "patch_iframe_headers" root/etc/init.d/openclaw; then
+	fail "obsolete iframe patch helper must be removed"
+fi
+if grep -q "dangerouslyDisableDeviceAuth" root/etc/init.d/openclaw root/usr/share/openclaw/oc-config.sh root/usr/share/openclaw/oc-config-interactive.js root/usr/bin/openclaw-env tests/fixtures/openclaw-schema-types.tsv; then
+	fail "deprecated dangerouslyDisableDeviceAuth must be completely removed"
+fi
 grep -q "openclaw-node-compile-cache" root/etc/init.d/openclaw || fail "Node compile cache must be enabled for faster warm restarts"
 grep -q 'NODE_COMPILE_CACHE="$node_compile_cache"' root/etc/init.d/openclaw || fail "gateway and pty must receive Node compile cache env"
 grep -q "通常 20~40 秒" root/etc/init.d/openclaw luasrc/view/openclaw/status.htm luasrc/view/openclaw/console.htm || fail "startup hint must match measured OpenWrt timing"
@@ -170,9 +183,7 @@ grep -q "anthropic-messages" root/usr/share/openclaw/oc-config.sh || fail "shell
 
 grep -q "var url = 'http://'" luasrc/view/openclaw/console.htm || fail "console must force HTTP gateway URL"
 grep -q "新窗口打开" luasrc/view/openclaw/console.htm || fail "console must expose a new-window entry"
-if grep -q "document.createElement('iframe')" luasrc/view/openclaw/console.htm; then
-	fail "console must not embed OpenClaw in an iframe"
-fi
+grep -q "document.createElement('iframe')" luasrc/view/openclaw/console.htm || fail "console must embed OpenClaw in an iframe"
 
 grep -q "root/usr/libexec" scripts/build_ipk.sh || fail "ipk script must package shell helpers"
 grep -q "root/usr/libexec" scripts/build_run.sh || fail "run script must package shell helpers"
@@ -183,5 +194,54 @@ grep -q "chown -R root:root" scripts/build_run.sh || fail ".run installer must r
 grep -q "chown -R root:root" scripts/build_ipk.sh || fail ".ipk postinst must repair root-owned system files after extraction"
 grep -q "先解压到临时目录并确认完整，再替换 NODE_BASE" root/usr/bin/openclaw-env || fail "Node install must not delete existing runtime before extraction succeeds"
 grep -q "OC_SETUP_FRESH_ROOT" root/usr/bin/openclaw-env || fail "setup cleanup must preserve existing runtime roots"
+
+grep -q "openclaw-upgrade-state.sh" Makefile || fail "Makefile must install openclaw-upgrade-state.sh"
+grep -q "openclaw-upgrade-state.sh" root/usr/bin/openclaw-env || fail "openclaw-env must reference openclaw-upgrade-state.sh"
+grep -q "openclaw-upgrade-state.sh" root/usr/share/openclaw/oc-config.sh || fail "oc-config must reference openclaw-upgrade-state.sh"
+grep -q "backup create --verify --no-include-workspace" root/usr/libexec/openclaw-upgrade-state.sh || fail "helper must enforce full backup create arguments"
+grep -q "backup verify" root/usr/libexec/openclaw-upgrade-state.sh || fail "helper must execute backup verify"
+grep -q "config validate --json" root/usr/libexec/openclaw-upgrade-state.sh || fail "helper must execute config validate --json"
+grep -q "gateway health --json" root/usr/libexec/openclaw-upgrade-state.sh || fail "helper must execute gateway health --json"
+grep -q "RESULT:" root/usr/bin/openclaw-env || fail "openclaw-env must report RESULT field"
+grep -q "BACKUP:" root/usr/bin/openclaw-env || fail "openclaw-env must report BACKUP field"
+grep -q "DOCTOR:" root/usr/bin/openclaw-env || fail "openclaw-env must report DOCTOR field"
+grep -q "GATEWAY:" root/usr/bin/openclaw-env || fail "openclaw-env must report GATEWAY field"
+grep -q "ROLLBACK:" root/usr/bin/openclaw-env || fail "openclaw-env must report ROLLBACK field"
+grep -q "VERIFIED:" root/usr/bin/openclaw-env || fail "openclaw-env must report VERIFIED field"
+
+# ── 真机实测缺陷回归断言 ──
+if grep -E 'start-stop-daemon[[:space:]]+.*-d[[:space:]]+' root/etc/init.d/openclaw luasrc/controller/openclaw.lua; then
+	fail "BusyBox start-stop-daemon does not support -d flag"
+fi
+
+grep -q 'chmod 755 "$candidate_prefix"' root/usr/bin/openclaw-env || fail "candidate_prefix must be chmod 755 before atomic switch"
+
+grep -q 'chmod -R 755 "$archive_dir"' root/usr/libexec/openclaw-permissions.sh || fail "archived-extensions must have 755 permission"
+grep -q 'chown -R root:root "$archive_dir"' root/usr/libexec/openclaw-permissions.sh || fail "archived-extensions must be owned by root:root"
+grep -q 'chown -R openclaw:openclaw "$ext_dir"' root/usr/libexec/openclaw-permissions.sh || fail "extensions must be owned by openclaw:openclaw"
+grep -q 'chmod -R 755 "$ext_dir"' root/usr/libexec/openclaw-permissions.sh || fail "extensions must have 755 permissions"
+if grep -q 'chown -R root:root "$ext_dir"' root/usr/libexec/openclaw-permissions.sh; then
+	fail "extensions must NOT be owned by root:root"
+fi
+if grep -q 'chown -R root:root.*qqbot_ext_dir' root/usr/share/openclaw/oc-config.sh; then
+	fail "qqbot extension must not be chowned to root:root"
+fi
+grep -q 'chown -R openclaw:openclaw "$qqbot_ext_dir"' root/usr/share/openclaw/oc-config.sh || fail "qqbot extension must be owned by openclaw:openclaw"
+
+grep -q 'oc_load_paths' root/usr/libexec/openclaw-upgrade-state.sh || fail "openclaw-upgrade-state.sh must support oc_load_paths fallback"
+grep -q '/opt/openclaw/global/bin/openclaw' root/usr/libexec/openclaw-upgrade-state.sh || fail "openclaw-upgrade-state.sh must fallback to /opt/openclaw/global/bin/openclaw"
+grep -Fq '"ok"[[:space:]]*:[[:space:]]*true' root/usr/libexec/openclaw-upgrade-state.sh || fail "gateway-verify must support ok:true regex"
+grep -q 'cd.*data_dir.*&&' root/usr/libexec/openclaw-upgrade-state.sh || fail "oc_run_as_user must cd into data_dir"
+
+# ── 深度加固：cwd 隔离与目录权限防逃逸 ──
+grep -q 'cd.*OC_DATA.*&&.*doctor --fix' root/etc/init.d/openclaw || fail "init.d _run_doctor_fix must cd into OC_DATA"
+grep -q 'cd.*OC_DATA.*&&.*config validate' root/etc/init.d/openclaw || fail "init.d _run_config_migration must cd into OC_DATA"
+grep -q 'cd.*OC_DATA.*&&.*doctor' root/usr/share/openclaw/oc-config.sh || fail "oc-config doctor must cd into OC_DATA"
+if grep -q '! -path "\*/extensions\*"' root/usr/share/openclaw/oc-config-interactive.js; then
+	fail "interactive config must not exclude extensions from state permission fix"
+fi
+grep -q 'chmod -R a+rX "\$candidate_prefix"' root/usr/bin/openclaw-env || fail "candidate_prefix must have chmod -R a+rX"
+grep -q 'chown -R openclaw:openclaw "\${state_dir}/extensions"' root/usr/libexec/openclaw-permissions.sh || fail "prepare-workdirs must recursively chown extensions to openclaw"
+grep -q 'chown -R openclaw:openclaw.*extensions' luasrc/controller/openclaw.lua || fail "openclaw.lua fallbacks must recursively chown extensions to openclaw"
 
 echo "ok"

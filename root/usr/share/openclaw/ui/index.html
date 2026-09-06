@@ -37,7 +37,7 @@
 <div id="topbar">
   <span class="logo">🦞 一万AI分享 OpenClaw 配置管理</span>
   <span id="status" class="status disconnected">● 连接中...</span>
-  <button class="btn" onclick="location.reload()" title="重新启动配置脚本">🔄 重启</button>
+  <button class="btn" onclick="restartSession()" title="重新启动配置脚本">🔄 重启</button>
 </div>
 
 <div id="loading">
@@ -52,7 +52,7 @@
 <div id="reconnect-overlay">
   <p style="font-size:16px;margin-bottom:4px">⚡ 连接已断开</p>
   <p style="font-size:13px;color:#565f89">配置脚本已退出或连接中断</p>
-  <button onclick="location.reload()">🔄 重新启动</button>
+  <button onclick="restartSession()">🔄 重新启动</button>
 </div>
 
 <link rel="stylesheet" href="/lib/xterm.min.css">
@@ -128,11 +128,17 @@
 
   // ── WebSocket 连接 ──
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  // 从 URL 参数或 hash 获取 PTY token 用于 WebSocket 认证
+  // 从 URL 参数或 sessionStorage 读取 PTY token 用于 WebSocket 认证
   const urlParams = new URLSearchParams(location.search);
-  const ptyToken = urlParams.get('pty_token') || '';
+  let ptyToken = urlParams.get('pty_token') || '';
+  if (ptyToken) {
+    try { sessionStorage.setItem('openclaw_pty_token', ptyToken); } catch(e) {}
+  } else {
+    try { ptyToken = sessionStorage.getItem('openclaw_pty_token') || ''; } catch(e) {}
+  }
+
   // 取到 token 后立刻从地址栏移除: 否则它会留在浏览器历史、
-  // 以及任何 Referer/截图里。内存中的 ptyToken 仍可用于建连。
+  // 以及任何 Referer/截图里。内存与 sessionStorage 中的 ptyToken 仍可用于建连。
   if (ptyToken && window.history && history.replaceState) {
     try {
       const clean = new URL(location.href);
@@ -140,17 +146,86 @@
       history.replaceState(null, '', clean.pathname + (clean.search || '') + clean.hash);
     } catch (e) {}
   }
-  const wsUrl = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=' + encodeURIComponent(ptyToken) : '');
+
+  // 连接序号与单飞状态机
+  let currentConnectSeq = 0;
+  let wsUrl = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=' + encodeURIComponent(ptyToken) : '');
   // 展示用 URL: 隐去 token。真实 wsUrl 只用于建立连接，
   // 不写入页面文本或 console —— 否则 token 会留在截图、录屏与浏览器历史里。
-  const wsUrlSafe = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=<hidden>' : '');
+  let wsUrlSafe = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=<hidden>' : '');
   let ws = null;
   let connected = false;
+  let isConnecting = false;
   let retryCount = 0;
   const MAX_RETRY = Infinity;
   let retryTimer = null;
   let wasEverConnected = false;
   let pingTimer = null;
+
+  // 重启配置终端: 原地平滑重连，清屏并重连 WebSocket，无需重新加载整个页面
+  window.restartSession = function() {
+    console.log('[oc-config] restartSession invoked');
+    currentConnectSeq++;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    if (ws) {
+      try {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        ws.close();
+      } catch(e) {}
+      ws = null;
+    }
+    connected = false;
+    isConnecting = false;
+    retryCount = 0;
+
+    // 清空终端并显示重启中状态
+    try { term.clear(); } catch(e) {}
+    reconnectEl.classList.remove('show');
+    loadingEl.classList.remove('hidden');
+    loadingMsg.textContent = '正在重启终端会话...';
+    statusEl.textContent = '● 重启中...';
+    statusEl.className = 'status disconnected';
+
+    connect();
+  };
+
+  // 跨窗口通信: 向父页面 (LuCI) 请求缺失的 token，或接收父页面发送的 token
+  function requestParentToken() {
+    if (window.parent && window.parent !== window) {
+      try {
+        window.parent.postMessage({ type: 'openclaw_request_token' }, '*');
+      } catch(e) {}
+    }
+  }
+
+  window.addEventListener('message', function(ev) {
+    if (ev.data && ev.data.type === 'openclaw_token' && ev.data.pty_token) {
+      ptyToken = ev.data.pty_token;
+      try { sessionStorage.setItem('openclaw_pty_token', ptyToken); } catch(e) {}
+      wsUrl = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=' + encodeURIComponent(ptyToken) : '');
+      wsUrlSafe = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=<hidden>' : '');
+      if (!connected) {
+        currentConnectSeq++;
+        if (ws) {
+          try {
+            ws.onopen = null;
+            ws.onclose = null;
+            ws.onerror = null;
+            ws.onmessage = null;
+            ws.close();
+          } catch(e){}
+          ws = null;
+        }
+        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+        isConnecting = false;
+        connect();
+      }
+    }
+  });
 
   console.log('[oc-config] protocol:', location.protocol);
   console.log('[oc-config] host:', location.host, 'port:', location.port);
@@ -158,9 +233,31 @@
   loadingDebug.textContent = wsUrlSafe;
 
   function connect() {
+    if (isConnecting || connected) return;
+    isConnecting = true;
+    const mySeq = ++currentConnectSeq;
+
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-    if (ws) { try { ws.close(); } catch(e){} ws = null; }
+    if (ws) {
+      try {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        ws.close();
+      } catch(e) {}
+      ws = null;
+    }
+
+    if (!ptyToken) {
+      try { ptyToken = sessionStorage.getItem('openclaw_pty_token') || ''; } catch(e) {}
+    }
+    if (!ptyToken) {
+      requestParentToken();
+    }
+    wsUrl = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=' + encodeURIComponent(ptyToken) : '');
+    wsUrlSafe = proto + '//' + location.host + '/ws' + (ptyToken ? '?token=<hidden>' : '');
 
     retryCount++;
     console.log('[oc-config] Connecting to', wsUrlSafe, '(attempt', retryCount + ')');
@@ -169,42 +266,66 @@
       : '正在连接终端...';
     loadingDebug.textContent = wsUrlSafe;
 
-    // 先做一个 HTTP 预检确认服务器可达
-    fetch('/health').then(function(r) {
+    // 先用带超时的 HTTP /health 预检确认服务端就绪
+    var controller = null;
+    var signal = null;
+    if (typeof AbortController !== 'undefined') {
+      controller = new AbortController();
+      signal = controller.signal;
+      setTimeout(function() {
+        try { controller.abort(); } catch(e) {}
+      }, 2500);
+    }
+
+    fetch('/health', { signal: signal, cache: 'no-store' }).then(function(r) {
       return r.json();
     }).then(function(data) {
+      if (mySeq !== currentConnectSeq) return;
       console.log('[oc-config] Health check OK:', JSON.stringify(data));
-      doWebSocket();
+      doWebSocket(mySeq);
     }).catch(function(err) {
+      if (mySeq !== currentConnectSeq) return;
       console.log('[oc-config] Health check failed:', err.message || err);
-      // 服务器不可达，稍后重试
+      isConnecting = false;
       scheduleRetry();
     });
   }
 
-  function doWebSocket() {
+  function doWebSocket(mySeq) {
+    if (mySeq !== currentConnectSeq || connected) {
+      isConnecting = false;
+      return;
+    }
+    isConnecting = true;
+
     try {
       ws = new WebSocket(wsUrl);
     } catch(e) {
       console.error('[oc-config] WebSocket constructor error:', e);
+      isConnecting = false;
       scheduleRetry();
       return;
     }
 
     console.log('[oc-config] WebSocket created, readyState:', ws.readyState);
 
-    // 连接超时保护: 5秒没连上就重试
+    // 连接超时保护: 5秒没连上就关闭当前 socket，由 onclose 统一调度重试
     var connectTimeout = setTimeout(function() {
+      if (mySeq !== currentConnectSeq) return;
       if (ws && ws.readyState !== WebSocket.OPEN) {
         console.log('[oc-config] Connection timeout, readyState:', ws.readyState);
         try { ws.close(); } catch(e){}
-        scheduleRetry();
       }
     }, 5000);
 
     ws.onopen = function() {
+      if (mySeq !== currentConnectSeq) {
+        try { ws.close(); } catch(e){}
+        return;
+      }
       clearTimeout(connectTimeout);
       connected = true;
+      isConnecting = false;
       var isReconnect = wasEverConnected;
       wasEverConnected = true;
       retryCount = 0;
@@ -248,45 +369,58 @@
     ws.onclose = function(ev) {
       clearTimeout(connectTimeout);
       if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+      if (mySeq !== currentConnectSeq) return;
       connected = false;
+      isConnecting = false;
+      ws = null;
       statusEl.textContent = '● 已断开';
       statusEl.className = 'status disconnected';
       console.log('[oc-config] WebSocket closed, code:', ev.code, 'reason:', ev.reason);
-      if (wasEverConnected) {
-        // 自动重连，不显示断连覆盖层
-        console.log('[oc-config] Auto-reconnecting in 2s...');
-        statusEl.textContent = '● 重连中...';
-        retryCount = 0;
-        setTimeout(function() {
-          connect();
-        }, 2000);
-      } else {
-        // 从未连接成功过，自动重试
-        scheduleRetry();
-      }
+      scheduleRetry();
     };
 
     ws.onerror = function(ev) {
       clearTimeout(connectTimeout);
+      if (mySeq !== currentConnectSeq) return;
       connected = false;
+      isConnecting = false;
       console.error('[oc-config] WebSocket error, will retry');
       // 不要在这里做UI更新, onclose 会紧跟着触发
     };
   }
 
   function scheduleRetry() {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    isConnecting = false;
+
+    if (!ptyToken) {
+      requestParentToken();
+    }
     if (retryCount >= MAX_RETRY) {
       loadingMsg.textContent = '连接失败，请检查服务状态';
       loadingDebug.textContent = '已重试 ' + MAX_RETRY + ' 次。请刷新页面重试。';
+      loadingEl.classList.remove('hidden');
       statusEl.textContent = '● 连接失败';
       statusEl.className = 'status disconnected';
       return;
     }
-    // 逐步增加重试间隔: 1s, 1s, 2s, 2s, 3s, 3s, ...
+    // 逐步增加重试间隔: 1s, 1s, 2s, 2s, 3s, 3s, ... 最大 5s
     var delay = Math.min(Math.floor(retryCount / 2) + 1, 5) * 1000;
-    loadingMsg.textContent = '等待服务就绪... ' + Math.ceil(delay/1000) + '秒后重试';
+    loadingEl.classList.remove('hidden');
+    if (wasEverConnected) {
+      statusEl.textContent = '● 重连中...';
+      loadingMsg.textContent = '连接中断，等待服务就绪... ' + Math.ceil(delay / 1000) + '秒后重试';
+    } else {
+      loadingMsg.textContent = (!ptyToken)
+        ? '等待服务就绪或获取认证令牌... ' + Math.ceil(delay / 1000) + '秒后重试'
+        : '等待服务就绪... ' + Math.ceil(delay / 1000) + '秒后重试';
+    }
+    loadingDebug.textContent = wsUrlSafe;
     console.log('[oc-config] Retry in', delay, 'ms');
-    retryTimer = setTimeout(connect, delay);
+    retryTimer = setTimeout(function() {
+      retryTimer = null;
+      connect();
+    }, delay);
   }
 
   term.onData(function(data) {
