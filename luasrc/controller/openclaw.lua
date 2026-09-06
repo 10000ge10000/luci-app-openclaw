@@ -772,6 +772,23 @@ function action_service_ctl()
 		http.prepare_content("application/json")
 		http.write_json({ status = "ok", message = "安装已启动，请查看安装日志..." })
 		return
+	elseif action == "upgrade" then
+		-- 先清理旧日志和状态
+		sys.exec("rm -f /tmp/openclaw-setup.log /tmp/openclaw-setup.pid /tmp/openclaw-setup.exit")
+		local target_ver = http.formvalue("version") or ""
+		local env_prefix = ""
+		if target_ver == "latest" then
+			env_prefix = "OC_VERSION='latest' "
+		elseif target_ver ~= "" and target_ver ~= "stable" then
+			if target_ver:match("^[%d%.%-a-zA-Z]+$") then
+				env_prefix = "OC_VERSION=" .. shellquote(target_ver) .. " "
+			end
+		end
+		-- 异步执行 openclaw-env upgrade 事务状态机
+		sys.exec("( " .. env_prefix .. "/usr/bin/openclaw-env upgrade > /tmp/openclaw-setup.log 2>&1; echo $? > /tmp/openclaw-setup.exit ) & echo $! > /tmp/openclaw-setup.pid")
+		http.prepare_content("application/json")
+		http.write_json({ status = "ok", message = "OpenClaw 核心升级已启动，正在执行安全事务..." })
+		return
 	else
 		http.prepare_content("application/json")
 		http.write_json({ status = "error", message = "未知操作: " .. action })
@@ -887,13 +904,47 @@ function action_check_update()
 		plugin_has_update = true
 	end
 
+	-- 2. OpenClaw 核心版本检查
+	local openclaw_current = ""
+	local openclaw_latest = ""
+	local openclaw_has_update = false
+
+	local oc_check_str = sys.exec("/usr/bin/openclaw-env check 2>/dev/null | grep -i 'OpenClaw:' | head -1"):gsub("%s+", "")
+	if oc_check_str ~= "" then
+		openclaw_current = oc_check_str:match("[vV]?([%d%.%-]+)") or ""
+	end
+	if openclaw_current == "" or openclaw_current == "未安装" then
+		-- 备用路径读取: 从 package.json 探测
+		local candidate_pkg = "/opt/openclaw/global/lib/node_modules/openclaw/package.json"
+		local f_pkg = io.open(candidate_pkg, "r")
+		if f_pkg then
+			local content = f_pkg:read("*a")
+			f_pkg:close()
+			openclaw_current = content:match('"version"%s*:%s*"([^"]+)"') or ""
+		end
+	end
+
+	-- 推荐/已验证的最新稳定版本
+	local tested_ver = sys.exec("sed -n 's/^OC_TESTED_VERSION=\"\\(.*\\)\"/\\1/p' /usr/bin/openclaw-env 2>/dev/null"):gsub("%s+", "")
+	if tested_ver == "" then tested_ver = "2026.9.1" end
+	openclaw_latest = tested_ver
+
+	if openclaw_current ~= "" and openclaw_current ~= "未安装" and openclaw_latest ~= "" then
+		if is_newer_version(openclaw_latest, openclaw_current) then
+			openclaw_has_update = true
+		end
+	end
+
 	http.prepare_content("application/json")
 	http.write_json({
 		status = "ok",
 		plugin_current = plugin_current,
 		plugin_latest = plugin_latest,
 		plugin_has_update = plugin_has_update,
-		release_notes = release_notes
+		release_notes = release_notes,
+		openclaw_current = openclaw_current,
+		openclaw_latest = openclaw_latest,
+		openclaw_has_update = openclaw_has_update
 	})
 end
 

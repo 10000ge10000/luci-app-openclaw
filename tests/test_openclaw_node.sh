@@ -157,14 +157,21 @@ set -e
 [ "$RC_WGET_EXHAUSTED" -ne 0 ] || fail "downloader must fail when all candidate mirrors fail (wget only)"
 
 # (2.3) 验证 openclaw-env setup 调用链：Node 下载失败立即退出，不产生伪成功，且 OC_GLOBAL 零副作用
+rm -f "$MOCK_NODE/bin/node" 2>/dev/null || true
 set +e
-PATH="$MOCK_BIN:$PATH" \
-OC_INSTALL_PATH="$MOCK_ROOT" \
-NODE_VERSION="22.23.2" \
-sh "$ENV_SCRIPT" setup >/dev/null 2>&1
+OUT_SETUP=$(
+	PATH="$MOCK_BIN:$PATH" \
+	OC_INSTALL_PATH="$MOCK_ROOT" \
+	NODE_VERSION="22.23.2" \
+	sh "$ENV_SCRIPT" setup 2>&1
+)
 RC_SETUP=$?
 set -e
-[ "$RC_SETUP" -ne 0 ] || fail "openclaw-env setup must fail non-zero when candidate mirrors fail"
+if [ "$RC_SETUP" -eq 0 ]; then
+	echo "UNEXPECTED SUCCESS of openclaw-env setup (RC=0)! Output was:" >&2
+	echo "$OUT_SETUP" >&2
+	fail "openclaw-env setup must fail non-zero when candidate mirrors fail"
+fi
 
 # 检查后续安装未发生且原有安装保持完整
 [ ! -f "$NPM_LOG" ] || fail "npm install/pack was called after node download failure"

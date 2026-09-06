@@ -24,8 +24,22 @@ OC_NODE_MIN_VERSION="${OC_NODE_MIN_VERSION:-22.22.3}"
 # 用户可通过 OC_VERSION 环境变量覆盖安装版本
 OC_VERSION="${OC_VERSION:-}"
 
-[ -r /usr/libexec/openclaw-paths.sh ] && . /usr/libexec/openclaw-paths.sh
-[ -r /usr/libexec/openclaw-node.sh ] && . /usr/libexec/openclaw-node.sh
+_script_dir="$(CDPATH= cd -- "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
+if [ -r /usr/libexec/openclaw-paths.sh ]; then
+	. /usr/libexec/openclaw-paths.sh
+elif [ -n "$_script_dir" ] && [ -r "${_script_dir}/../libexec/openclaw-paths.sh" ]; then
+	. "${_script_dir}/../libexec/openclaw-paths.sh"
+elif [ -r ./root/usr/libexec/openclaw-paths.sh ]; then
+	. ./root/usr/libexec/openclaw-paths.sh
+fi
+
+if [ -r /usr/libexec/openclaw-node.sh ]; then
+	. /usr/libexec/openclaw-node.sh
+elif [ -n "$_script_dir" ] && [ -r "${_script_dir}/../libexec/openclaw-node.sh" ]; then
+	. "${_script_dir}/../libexec/openclaw-node.sh"
+elif [ -r ./root/usr/libexec/openclaw-node.sh ]; then
+	. ./root/usr/libexec/openclaw-node.sh
+fi
 
 # ── 安装路径 (支持自定义) ──
 # UCI 公开字段继续使用 openclaw.main.install_path，语义为“基础目录”。
@@ -48,9 +62,13 @@ else
 	OC_DATA="${OC_INSTALL_PATH}/data"
 	CONFIG_FILE="${OC_DATA}/.openclaw/openclaw.json"
 fi
+[ -n "${NODE_BASE:-}" ] || NODE_BASE="${OC_INSTALL_PATH}/node"
+[ -n "${OC_GLOBAL:-}" ] || OC_GLOBAL="${OC_INSTALL_PATH}/global"
+[ -n "${OC_DATA:-}" ] || OC_DATA="${OC_INSTALL_PATH}/data"
+[ -n "${CONFIG_FILE:-}" ] || CONFIG_FILE="${OC_DATA}/.openclaw/openclaw.json"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-${OC_DATA}/.openclaw}"
 OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-${CONFIG_FILE}}"
-export OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH
+export OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH NODE_BASE OC_GLOBAL OC_DATA CONFIG_FILE
 
 # ── OverlayFS 兼容性修复 ──
 # iStoreOS/OpenWrt 上 Docker 的 bind mount (/overlay/upper/opt/docker)
