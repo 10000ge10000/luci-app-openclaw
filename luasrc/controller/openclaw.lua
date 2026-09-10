@@ -2396,14 +2396,26 @@ function action_devices_list()
 
 	local output, exit_code = run_openclaw_devices_cli("devices list --json")
 	http.prepare_content("application/json")
-	if not output then
-		http.write_json({ status = "error", message = "执行失败", pending = {}, paired = {} })
+	if not output or exit_code ~= 0 then
+		local err_msg = "查询设备列表失败"
+		if output and output:gsub("^%s+", ""):gsub("%s+$", "") ~= "" then
+			err_msg = output:sub(1, 300)
+		elseif type(exit_code) == "string" and exit_code ~= "" then
+			err_msg = exit_code
+		end
+		http.write_json({
+			status = "error",
+			message = err_msg,
+			exit_code = type(exit_code) == "number" and exit_code or -1,
+			pending = {},
+			paired = {}
+		})
 		return
 	end
 
 	local json_str = output:match("({%s*\"pending\".*})") or output:match("({.*})")
 	local data = json_str and json.parse(json_str) or nil
-	if data and (data.pending or data.paired) then
+	if type(data) == "table" and (data.pending ~= nil or data.paired ~= nil) then
 		http.write_json({
 			status = "ok",
 			pending = data.pending or {},
@@ -2411,7 +2423,8 @@ function action_devices_list()
 		})
 	else
 		http.write_json({
-			status = "ok",
+			status = "error",
+			message = "解析设备列表失败",
 			pending = {},
 			paired = {},
 			raw = output:sub(1, 300)
@@ -2432,9 +2445,38 @@ function action_devices_approve()
 
 	if approve_all then
 		local list_out, list_code = run_openclaw_devices_cli("devices list --json")
-		local json_str = list_out and (list_out:match("({%s*\"pending\".*})") or list_out:match("({.*})"))
+		if not list_out or list_code ~= 0 then
+			http.prepare_content("application/json")
+			local err_msg = "查询设备列表失败"
+			if list_out and list_out:gsub("^%s+", ""):gsub("%s+$", "") ~= "" then
+				err_msg = list_out:sub(1, 300)
+			elseif type(list_code) == "string" and list_code ~= "" then
+				err_msg = list_code
+			end
+			http.write_json({
+				status = "error",
+				message = err_msg,
+				exit_code = type(list_code) == "number" and list_code or -1,
+				success_count = 0,
+				fail_count = 0
+			})
+			return
+		end
+
+		local json_str = list_out:match("({%s*\"pending\".*})") or list_out:match("({.*})")
 		local data = json_str and json.parse(json_str) or nil
-		local pending = (data and data.pending) or {}
+		if type(data) ~= "table" or data.pending == nil then
+			http.prepare_content("application/json")
+			http.write_json({
+				status = "error",
+				message = "解析设备列表失败",
+				success_count = 0,
+				fail_count = 0
+			})
+			return
+		end
+
+		local pending = data.pending or {}
 
 		if #pending == 0 then
 			http.prepare_content("application/json")
@@ -2447,12 +2489,16 @@ function action_devices_approve()
 			if rid and rid ~= "" and rid:match("^[a-zA-Z0-9%-_]+$") then
 				local out, exit_code = run_openclaw_devices_cli("devices approve " .. shellquote(rid))
 				local is_ok = (exit_code == 0) and (out and not out:match("No pending device") and not out:match("Error") and not out:match("ERROR"))
+				local err_detail = out
+				if (not err_detail or err_detail == "") and type(exit_code) == "string" then
+					err_detail = exit_code
+				end
 				if is_ok or (out and out:lower():match("approved")) then
 					success_count = success_count + 1
 					table.insert(results, { requestId = rid, ok = true, message = out })
 				else
 					fail_count = fail_count + 1
-					table.insert(results, { requestId = rid, ok = false, message = out or "批准失败" })
+					table.insert(results, { requestId = rid, ok = false, message = err_detail or "批准失败" })
 				end
 			end
 		end
@@ -2464,12 +2510,16 @@ function action_devices_approve()
 		end
 		local out, exit_code = run_openclaw_devices_cli("devices approve " .. shellquote(request_id))
 		local is_ok = (exit_code == 0) and (out and not out:match("No pending device") and not out:match("Error") and not out:match("ERROR"))
+		local err_detail = out
+		if (not err_detail or err_detail == "") and type(exit_code) == "string" then
+			err_detail = exit_code
+		end
 		if is_ok or (out and out:lower():match("approved")) then
 			success_count = 1
 			table.insert(results, { requestId = request_id, ok = true, message = out })
 		else
 			fail_count = 1
-			table.insert(results, { requestId = request_id, ok = false, message = out or "批准失败" })
+			table.insert(results, { requestId = request_id, ok = false, message = err_detail or "批准失败" })
 		end
 	else
 		http.prepare_content("application/json")

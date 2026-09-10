@@ -74,9 +74,18 @@ for f in "$CONSOLE" "$ADVANCED"; do
 	grep -Fq "escapeHtml(item.requestId" "$f" || fail "$(basename "$f") must escape requestId"
 done
 
-# ── 7. 控制器退出码与参数完整性契约 ──
+# ── 7. 控制器退出码与错误分支解析契约 ──
 grep -Fq "__EXIT" "$CONTROLLER" || fail "controller must check command exit code"
 grep -Fq "缺少 request_id 或 all 参数" "$CONTROLLER" || fail "controller must reject empty approve requests"
+grep -Fq "if not output or exit_code ~= 0 then" "$CONTROLLER" || fail "controller must reject non-zero exit_code in devices_list"
+grep -Fq "if not list_out or list_code ~= 0 then" "$CONTROLLER" || fail "controller must reject non-zero exit_code when querying devices list in approve_all"
+grep -Fq "解析设备列表失败" "$CONTROLLER" || fail "controller must report error on JSON parse failure in devices_list"
+
+# ── 8. 前端状态与批准语义契约 ──
+for f in "$CONSOLE" "$ADVANCED"; do
+	grep -Fq "success_count" "$f" || fail "$(basename "$f") must check success_count to prevent false reload on empty list"
+	grep -Fq "data.status !==" "$f" || fail "$(basename "$f") must check data.status before consuming devices list"
+done
 
 # ── 8. 换行符约束 (LF only) ──
 cr=$(printf '\r')

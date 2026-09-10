@@ -158,7 +158,12 @@ local pty_token = uci:get("openclaw", "main", "pty_token") or ""
 		(new XHR()).get(devicesListUrl, null, function(x) {
 			try {
 				var data = JSON.parse(x.responseText);
-				var pending = (data && data.pending) || [];
+				if (!data || data.status !== 'ok') {
+					if (advPairingBadge) advPairingBadge.textContent = '!';
+					if (advPairingBanner) advPairingBanner.style.display = 'none';
+					return;
+				}
+				var pending = data.pending || [];
 				if (advPairingBadge) advPairingBadge.textContent = pending.length;
 				if (pending.length > 0) {
 					var html = '';
@@ -204,11 +209,19 @@ local pty_token = uci:get("openclaw", "main", "pty_token") or ""
 			try {
 				var res = JSON.parse(x.responseText);
 				if (res.status === 'ok') {
-					advPairingMsg.style.color = '#52c41a';
-					advPairingMsg.innerHTML = '✅ ' + (res.message || '批准成功！');
-					setTimeout(function() {
-						checkAdvDevices();
-					}, 1500);
+					if ((res.success_count || 0) > 0) {
+						advPairingMsg.style.color = '#52c41a';
+						advPairingMsg.innerHTML = '✅ ' + (res.message || '批准成功！');
+						setTimeout(function() {
+							checkAdvDevices();
+						}, 1500);
+					} else {
+						advPairingMsg.style.color = '#faad14';
+						advPairingMsg.innerHTML = 'ℹ️ ' + (res.message || '当前没有待配对的设备请求');
+						setTimeout(function() {
+							checkAdvDevices();
+						}, 1500);
+					}
 				} else {
 					advPairingMsg.style.color = '#cf222e';
 					advPairingMsg.innerHTML = '❌ ' + (res.message || '批准失败');

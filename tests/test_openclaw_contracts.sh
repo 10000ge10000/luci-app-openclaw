@@ -181,8 +181,11 @@ grep -q "yiwanai/gpt-5.5" root/usr/share/openclaw/oc-config.sh || fail "shell Yi
 grep -q "anthropic-compatible" root/usr/share/openclaw/oc-config.sh || fail "shell custom Anthropic provider missing"
 grep -q "anthropic-messages" root/usr/share/openclaw/oc-config.sh || fail "shell custom Anthropic provider mode missing"
 
-grep -q "var url = 'http://'" luasrc/view/openclaw/console.htm || fail "console must force HTTP gateway URL"
+grep -q "uciHttpsConsoleUrl" luasrc/view/openclaw/console.htm || fail "console must support HTTPS console url"
+grep -q "var url = 'http://'" luasrc/view/openclaw/console.htm || fail "console must fallback to HTTP gateway URL"
+grep -q "新窗口直达" luasrc/view/openclaw/console.htm || fail "console must expose a new-window direct entry"
 grep -q "新窗口打开" luasrc/view/openclaw/console.htm || fail "console must expose a new-window entry"
+grep -q "访问条件提示" luasrc/view/openclaw/console.htm || fail "console must provide access condition hint"
 grep -q "document.createElement('iframe')" luasrc/view/openclaw/console.htm || fail "console must embed OpenClaw in an iframe"
 
 grep -q "root/usr/libexec" scripts/build_ipk.sh || fail "ipk script must package shell helpers"

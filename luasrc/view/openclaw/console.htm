@@ -7,6 +7,11 @@
 <%
 local uci = require "luci.model.uci".cursor()
 local port = uci:get("openclaw", "main", "port") or "18789"
+local raw_console_url = tostring(uci:get("openclaw", "main", "console_url") or ""):gsub("^%s+", ""):gsub("%s+$", "")
+local https_console_url = ""
+if raw_console_url ~= "" and raw_console_url:match("^https://[a-zA-Z0-9%-%._~:/?#%[%]@!$&'()*+,;=]+$") then
+	https_console_url = raw_console_url:gsub("/+$", "")
+end
 %>
 
 <style type="text/css">
@@ -128,8 +133,8 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 		<button type="button" id="oc-console-pairing-toggle-btn" class="btn-action" title="管理/批准设备配对请求">📱 设备配对 <span id="oc-console-pairing-nav-badge" style="display:none; background:#ff4d4f; color:#fff; padding:0 6px; border-radius:10px; font-size:11px; font-weight:600; margin-left:2px;">0</span></button>
 		<button type="button" id="oc-console-refresh-btn" class="btn-action" title="重新载入当前会话">🔄 刷新</button>
 		<button type="button" id="oc-console-fullscreen-btn" class="btn-action" title="全屏查看">⛶ 全屏</button>
-		<a id="oc-console-open-btn" class="btn-open" href="#" target="_blank" rel="noopener">
-			↗ 新窗口打开
+		<a id="oc-console-open-btn" class="btn-open" href="#" target="_blank" rel="noopener noreferrer" title="新窗口打开">
+			↗ 新窗口直达
 		</a>
 	</div>
 </div>
@@ -162,7 +167,23 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 </div>
 
 <div id="oc-console-https-hint" style="display:none; padding:10px 14px; margin-bottom:14px; background:#fffbe6; border:1px solid #ffe58f; border-radius:6px; font-size:13px; color:#d48806; line-height:1.6;">
-	⚠️ <strong>浏览器安全提示</strong>：当前正在通过 HTTPS 访问 LuCI。由于 OpenClaw 网关为 HTTP 服务，浏览器可能会拦截跨协议内嵌页面（Mixed Content）。若下方界面显示空白，请点击右上角「<strong>↗ 新窗口打开</strong>」直接访问会话，或改用 HTTP 协议访问 LuCI。
+	⚠️ <strong>浏览器安全提示</strong>：当前正在通过 HTTPS 访问 LuCI。由于 OpenClaw 网关默认提供 HTTP 服务，浏览器可能会拦截跨协议内嵌页面（Mixed Content）。若下方界面显示空白，请配置 HTTPS 控制台地址，或点击右上角「<strong>↗ 新窗口直达</strong>」直接访问会话。
+</div>
+
+<div id="oc-console-context-hint" style="display:none; padding:10px 14px; margin-bottom:14px; background:#e6f4ff; border:1px solid #91caff; border-left:4px solid #1677ff; border-radius:6px; font-size:13px; color:#0958d9; line-height:1.6;">
+	<div style="font-weight:600; margin-bottom:4px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+		<span>💡 访问条件提示（图片/附件与安全上下文）</span>
+		<a id="oc-console-direct-btn" href="#" target="_blank" rel="noopener noreferrer" class="btn-action" style="background:#fff; color:#0958d9; border-color:#91caff; font-weight:normal; text-decoration:none; display:inline-flex; align-items:center; gap:4px;">
+			↗ 新窗口直达控制台
+		</a>
+	</div>
+	<div id="oc-console-context-detail" style="font-size:12px; color:#333;">
+		当前运行于非安全上下文（HTTP 局域网地址）。受现代浏览器安全策略（Secure Context）限制，图片粘贴、附件拖拽上传与麦克风/剪贴板权限可能受限。<br/>
+		<strong>如需使用完整附件/图片与语音功能，建议：</strong><br/>
+		1. <strong>HTTPS 控制台</strong>：配置反向代理并启用 HTTPS，在 UCI 中配置经过验证的 <code>option console_url 'https://...'</code>；<br/>
+		2. <strong>本地安全访问</strong>：在路由器本机或通过 SSH 端口转发访问 <code>http://localhost:18789/</code>；<br/>
+		3. <strong>新窗口直达</strong>：点击右上角或上方的「<strong>新窗口直达</strong>」在独立窗口运行。
+	</div>
 </div>
 
 <div class="oc-console-wrap" id="oc-console-wrap">
@@ -178,6 +199,7 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 //<![CDATA[
 (function() {
 	var gwPort = '<%=port%>';
+	var uciHttpsConsoleUrl = '<%=https_console_url%>';
 	var gwToken = '';
 	var statusUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "status_api")%>';
 	var tokenUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "get_token")%>';
@@ -197,8 +219,32 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 	function getConsoleUrl() {
 		var host = window.location.hostname;
 		var url = 'http://' + host + ':' + gwPort + '/';
-		if (gwToken) url += '#token=' + encodeURIComponent(gwToken);
+		if (uciHttpsConsoleUrl && uciHttpsConsoleUrl.indexOf('https://') === 0) {
+			url = uciHttpsConsoleUrl;
+			if (url.indexOf('?') === -1 && url.indexOf('#') === -1 && url.slice(-1) !== '/') {
+				url += '/';
+			}
+		}
+		if (gwToken) {
+			url += (url.indexOf('#') === -1 ? '#' : '&') + 'token=' + encodeURIComponent(gwToken);
+		}
 		return url;
+	}
+
+	function updateContextHint(url) {
+		var hintEl = document.getElementById('oc-console-context-hint');
+		var directBtn = document.getElementById('oc-console-direct-btn');
+		if (directBtn) directBtn.href = url;
+		var isHttps = (url.indexOf('https://') === 0);
+		var isSecure = (typeof window.isSecureContext !== 'undefined') ? window.isSecureContext : (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1');
+
+		if (hintEl) {
+			if (!isHttps && !isSecure && location.protocol !== 'https:') {
+				hintEl.style.display = 'block';
+			} else {
+				hintEl.style.display = 'none';
+			}
+		}
 	}
 
 	function toggleFullScreen() {
@@ -227,7 +273,11 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 	}
 
 	function checkAndLoad() {
-		addrEl.textContent = window.location.hostname + ':' + gwPort;
+		if (uciHttpsConsoleUrl && uciHttpsConsoleUrl.indexOf('https://') === 0) {
+			addrEl.textContent = uciHttpsConsoleUrl;
+		} else {
+			addrEl.textContent = window.location.hostname + ':' + gwPort;
+		}
 
 		(new XHR()).post(tokenUrl, { token: ocCsrfToken }, function(tx) {
 			try {
@@ -247,7 +297,8 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 						statusTextEl.innerHTML = '<span style="color:#1a7f37;">● 网关运行中</span>';
 						openBtn.href = url;
 						actionsEl.style.display = 'flex';
-						if (location.protocol === 'https:') {
+						updateContextHint(url);
+						if (location.protocol === 'https:' && url.indexOf('https://') !== 0) {
 							var hintEl = document.getElementById('oc-console-https-hint');
 							if (hintEl) hintEl.style.display = 'block';
 						}
@@ -331,7 +382,16 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 		(new XHR()).get(devicesListUrl, null, function(x) {
 			try {
 				var data = JSON.parse(x.responseText);
-				var pending = (data && data.pending) || [];
+				if (!data || data.status !== 'ok') {
+					if (pairingBadge) pairingBadge.textContent = '!';
+					var errMsg = (data && data.message) || '查询设备列表失败';
+					if (manualOpen) {
+						pairingItems.innerHTML = '<div style="color:#cf222e; font-size:12px;">❌ ' + escapeHtml(errMsg) + '</div>';
+						pairingBanner.style.display = 'block';
+					}
+					return;
+				}
+				var pending = data.pending || [];
 				if (pairingBadge) pairingBadge.textContent = pending.length;
 				var navBadge = document.getElementById('oc-console-pairing-nav-badge');
 				if (navBadge) {
@@ -396,14 +456,22 @@ local port = uci:get("openclaw", "main", "port") or "18789"
 			try {
 				var res = JSON.parse(x.responseText);
 				if (res.status === 'ok') {
-					pairingMsg.style.color = '#52c41a';
-					pairingMsg.innerHTML = '✅ ' + (res.message || '批准成功！') + ' 正在重新载入控制台...';
-					setTimeout(function() {
-						checkDevices(false);
-						if (iframeEl) {
-							iframeEl.src = getConsoleUrl();
-						}
-					}, 1500);
+					if ((res.success_count || 0) > 0) {
+						pairingMsg.style.color = '#52c41a';
+						pairingMsg.innerHTML = '✅ ' + (res.message || '批准成功！') + ' 正在重新载入控制台...';
+						setTimeout(function() {
+							checkDevices(false);
+							if (iframeEl) {
+								iframeEl.src = getConsoleUrl();
+							}
+						}, 1500);
+					} else {
+						pairingMsg.style.color = '#faad14';
+						pairingMsg.innerHTML = 'ℹ️ ' + (res.message || '当前没有待配对的设备请求');
+						setTimeout(function() {
+							checkDevices(false);
+						}, 1500);
+					}
 				} else {
 					pairingMsg.style.color = '#cf222e';
 					pairingMsg.innerHTML = '❌ ' + (res.message || '批准失败');

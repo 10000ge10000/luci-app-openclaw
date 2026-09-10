@@ -22,6 +22,7 @@ act = s3:option(DummyValue, "_actions")
 act.rawhtml = true
 act.cfgvalue = function(self, section)
 	local ctl_url = luci.dispatcher.build_url("admin", "services", "openclaw", "service_ctl")
+	local service_ctl_url = ctl_url
 	local log_url = luci.dispatcher.build_url("admin", "services", "openclaw", "setup_log")
 	local check_url = luci.dispatcher.build_url("admin", "services", "openclaw", "check_update")
 	local uninstall_url = luci.dispatcher.build_url("admin", "services", "openclaw", "uninstall")
