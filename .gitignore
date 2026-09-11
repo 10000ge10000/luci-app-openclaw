@@ -25,5 +25,8 @@ Thumbs.db
 # Claude Code local settings
 .claude/
 
+# CodeBuddy local data (memory / teams / scratch)
+.codebuddy/
+
 # Internal notes (not for release)
 docs/notes/
