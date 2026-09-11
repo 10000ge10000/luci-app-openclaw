@@ -143,7 +143,9 @@ cat > "$CTRL_DIR/postinst" << 'EOF'
 		USER_BIND=$(sed -n "s/^\s*option\s\+bind\s\+['\"]\\?\\([^'\"]*\\)['\"]\\?.*/\\1/p" "$OLD_CONFIG" 2>/dev/null | tail -1)
 		USER_TOKEN=$(sed -n "s/^\s*option\s\+token\s\+['\"]\\?\\([^'\"]*\\)['\"]\\?.*/\\1/p" "$OLD_CONFIG" 2>/dev/null | tail -1)
 		USER_PTY_PORT=$(sed -n "s/^\s*option\s\+pty_port\s\+['\"]\\?\\([^'\"]*\\)['\"]\\?.*/\\1/p" "$OLD_CONFIG" 2>/dev/null | tail -1)
+		USER_PTY_TOKEN=$(sed -n "s/^\s*option\s\+pty_token\s\+['\"]\\?\\([^'\"]*\\)['\"]\\?.*/\\1/p" "$OLD_CONFIG" 2>/dev/null | tail -1)
 		USER_INSTALL_PATH=$(sed -n "s/^\s*option\s\+install_path\s\+['\"]\\?\\([^'\"]*\\)['\"]\\?.*/\\1/p" "$OLD_CONFIG" 2>/dev/null | tail -1)
+		USER_CONSOLE_URL=$(sed -n "s/^\s*option\s\+console_url\s\+['\"]\\?\\([^'\"]*\\)['\"]\\?.*/\\1/p" "$OLD_CONFIG" 2>/dev/null | tail -1)
 		
 		# 步骤2: 备份旧配置 (带时间戳)
 		BAK_FILE="/etc/config/openclaw.$(date +%Y%m%d%H%M%S).bak"
@@ -162,6 +164,9 @@ cat > "$CTRL_DIR/postinst" << 'EOF'
 		[ -n "$USER_TOKEN" ] && sed -i "s/^\(\s*option\s\+token\s\+\).*/\\1'$USER_TOKEN'/" "$OLD_CONFIG" 2>/dev/null || true
 		[ -n "$USER_PTY_PORT" ] && sed -i "s/^\(\s*option\s\+pty_port\s\+\).*/\\1'$USER_PTY_PORT'/" "$OLD_CONFIG" 2>/dev/null || true
 		[ -n "$USER_INSTALL_PATH" ] && sed -i "s/^\(\s*option\s\+install_path\s\+\).*/\\1'$USER_INSTALL_PATH'/" "$OLD_CONFIG" 2>/dev/null || true
+		[ -n "$USER_PTY_TOKEN" ] && uci set openclaw.main.pty_token="$USER_PTY_TOKEN" 2>/dev/null || true
+		[ -n "$USER_CONSOLE_URL" ] && uci set openclaw.main.console_url="$USER_CONSOLE_URL" 2>/dev/null || true
+		uci commit openclaw 2>/dev/null || true
 		
 		echo "配置合并完成，用户设置已保留"
 	fi

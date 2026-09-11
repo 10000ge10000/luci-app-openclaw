@@ -182,7 +182,7 @@ grep -q "anthropic-compatible" root/usr/share/openclaw/oc-config.sh || fail "she
 grep -q "anthropic-messages" root/usr/share/openclaw/oc-config.sh || fail "shell custom Anthropic provider mode missing"
 
 grep -q "uciHttpsConsoleUrl" luasrc/view/openclaw/console.htm || fail "console must support HTTPS console url"
-grep -q "var url = 'http://'" luasrc/view/openclaw/console.htm || fail "console must fallback to HTTP gateway URL"
+grep -q "return 'http://'" luasrc/view/openclaw/console.htm || fail "console must fallback to HTTP gateway URL"
 grep -q "新窗口直达" luasrc/view/openclaw/console.htm || fail "console must expose a new-window direct entry"
 grep -q "新窗口打开" luasrc/view/openclaw/console.htm || fail "console must expose a new-window entry"
 grep -q "访问条件提示" luasrc/view/openclaw/console.htm || fail "console must provide access condition hint"

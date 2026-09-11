@@ -141,6 +141,13 @@ for s in "$MK" "$IPK" "$RUN"; do
 		|| fail "$(basename "$s") must install model-presets.json (the *.js glob does not cover it)"
 done
 
+# 自定义 IPK 的 conffile 合并必须保留所有运行凭据和兼容控制台地址。
+for key in USER_PTY_TOKEN USER_CONSOLE_URL; do
+	grep -Fq "$key" "$IPK" || fail "build_ipk.sh must preserve $key during package upgrades"
+done
+grep -Fq 'uci set openclaw.main.pty_token="$USER_PTY_TOKEN"' "$IPK" || fail "IPK postinst must restore the existing PTY token"
+grep -Fq 'uci set openclaw.main.console_url="$USER_CONSOLE_URL"' "$IPK" || fail "IPK postinst must restore the existing console URL"
+
 # ── 真实构建产物校验 ──
 # 前面的检查都是静态文本比对，抓不到"脚本已改但产物仍缺文件"的情况
 # (例如同步失误)。这里实际构建一次 .ipk 并检查解包内容。
@@ -166,6 +173,10 @@ if command -v ar >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
 						|| fail "built .ipk is missing /usr/share/openclaw/$want"
 				done
 				[ -d "$SHARE/ui" ] || fail "built .ipk is missing /usr/share/openclaw/ui/"
+				for want in devices.lua console.lua; do
+					[ -f "$EXTRACT/data/usr/lib/lua/openclaw/$want" ] \
+						|| fail "built .ipk is missing /usr/lib/lua/openclaw/$want"
+				done
 			fi
 		fi
 	fi

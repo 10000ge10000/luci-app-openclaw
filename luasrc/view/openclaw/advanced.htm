@@ -163,7 +163,8 @@ local pty_token = uci:get("openclaw", "main", "pty_token") or ""
 					if (advPairingBanner) advPairingBanner.style.display = 'none';
 					return;
 				}
-				var pending = data.pending || [];
+				if (!Array.isArray(data.pending) || !Array.isArray(data.paired)) throw new Error('设备列表结构无效');
+				var pending = data.pending;
 				if (advPairingBadge) advPairingBadge.textContent = pending.length;
 				if (pending.length > 0) {
 					var html = '';
@@ -211,20 +212,24 @@ local pty_token = uci:get("openclaw", "main", "pty_token") or ""
 				if (res.status === 'ok') {
 					if ((res.success_count || 0) > 0) {
 						advPairingMsg.style.color = '#52c41a';
-						advPairingMsg.innerHTML = '✅ ' + (res.message || '批准成功！');
+						advPairingMsg.textContent = '✅ ' + (res.message || '批准成功！');
 						setTimeout(function() {
 							checkAdvDevices();
 						}, 1500);
 					} else {
 						advPairingMsg.style.color = '#faad14';
-						advPairingMsg.innerHTML = 'ℹ️ ' + (res.message || '当前没有待配对的设备请求');
+						advPairingMsg.textContent = 'ℹ️ ' + (res.message || '当前没有待配对的设备请求');
 						setTimeout(function() {
 							checkAdvDevices();
 						}, 1500);
 					}
+				} else if (res.status === 'partial' || res.status === 'unconfirmed') {
+					advPairingMsg.style.color = '#d48806';
+					advPairingMsg.textContent = '⚠️ ' + (res.message || '部分设备状态尚未确认，请刷新后重试');
+					setTimeout(function() { checkAdvDevices(); }, 1500);
 				} else {
 					advPairingMsg.style.color = '#cf222e';
-					advPairingMsg.innerHTML = '❌ ' + (res.message || '批准失败');
+					advPairingMsg.textContent = '❌ ' + (res.message || '批准失败');
 				}
 			} catch(e) {
 				advPairingMsg.style.color = '#cf222e';

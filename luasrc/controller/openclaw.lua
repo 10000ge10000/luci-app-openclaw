@@ -2,6 +2,7 @@
 module("luci.controller.openclaw", package.seeall)
 
 local paths_ok, oc_paths = pcall(require, "openclaw.paths")
+local devices_ok, oc_devices = pcall(require, "openclaw.devices")
 
 local function shellquote(value)
 	if paths_ok and oc_paths.shellquote then
@@ -2364,20 +2365,25 @@ local function run_openclaw_devices_cli(args)
 		return nil, "OpenClaw 未安装或 Node.js 不可用"
 	end
 	local oc_data = install_path .. "/data"
-	local cmd = string.format(
-		"ulimit -v unlimited 2>/dev/null || true; " ..
-		"HOME=%s OPENCLAW_HOME=%s " ..
-		"OPENCLAW_STATE_DIR=%s/.openclaw " ..
-		"OPENCLAW_CONFIG_PATH=%s/.openclaw/openclaw.json " ..
-		"NODE_ICU_DATA=%s/node/share/icu " ..
-		"PATH=%s/node/bin:%s/global/bin:$PATH " ..
-		"%s %s %s 2>&1; printf '\\n__EXIT:%%d__' $?",
-		shellquote(oc_data), shellquote(oc_data),
-		shellquote(oc_data), shellquote(oc_data),
-		shellquote(install_path),
+	if not ensure_openclaw_user(oc_data) then
+		return nil, "无法创建或读取 openclaw 系统用户"
+	end
+	local inner_cmd = string.format(
+		"cd %s && HOME=%s OPENCLAW_HOME=%s " ..
+		"OPENCLAW_STATE_DIR=%s/.openclaw OPENCLAW_CONFIG_PATH=%s/.openclaw/openclaw.json " ..
+		"OPENCLAW_SUPERVISOR_MODE=external OPENCLAW_SERVICE_REPAIR_POLICY=external " ..
+		"NODE_ICU_DATA=%s/node/share/icu NPM_CONFIG_CACHE=%s/.npm npm_config_cache=%s/.npm " ..
+		"TMPDIR=%s/.tmp PATH=%s/node/bin:%s/global/bin:$PATH " ..
+		"timeout 20 %s %s %s",
+		shellquote(oc_data), shellquote(oc_data), shellquote(oc_data),
+		shellquote(oc_data), shellquote(oc_data), shellquote(install_path),
+		shellquote(oc_data), shellquote(oc_data), shellquote(oc_data),
 		shellquote(install_path), shellquote(install_path),
 		shellquote(node_bin), shellquote(oc_entry), args
 	)
+	local cmd = openclaw_user_runner_cmd() ..
+		"_oc_as_openclaw " .. shellquote(inner_cmd) ..
+		" 2>&1; _oc_rc=$?; printf '\\n__EXIT:%d__' \"$_oc_rc\""
 	local output = sys.exec(cmd)
 	local exit_code = 0
 	if output then
@@ -2390,162 +2396,153 @@ local function run_openclaw_devices_cli(args)
 	return output, exit_code
 end
 
+local function devices_error(http, error_code, message, extra)
+	local json = require "luci.jsonc"
+	local response = extra or {}
+	if devices_ok and oc_devices then
+		if response.pending ~= nil then response.pending = oc_devices.json_array(response.pending, json.parse) end
+		if response.paired ~= nil then response.paired = oc_devices.json_array(response.paired, json.parse) end
+	end
+	response.status = "error"
+	response.error_code = error_code
+	response.message = message
+	http.prepare_content("application/json")
+	http.write(json.stringify(response))
+end
+
+local function load_devices_list(json)
+	if not devices_ok or not oc_devices then
+		return nil, "DEVICES_HELPER_UNAVAILABLE", "设备列表校验模块不可用"
+	end
+	local output, exit_code = run_openclaw_devices_cli("devices list --json")
+	if not output or exit_code ~= 0 then
+		local message = type(exit_code) == "string" and exit_code or oc_devices.sanitize_output(output)
+		if message == "" then message = "查询设备列表失败" end
+		return nil, exit_code == 124 and "DEVICES_TIMEOUT" or "DEVICES_CLI_FAILED", message, exit_code
+	end
+	local data, error_code, message = oc_devices.parse_list(output, json.parse)
+	return data, error_code, message, exit_code
+end
+
+local function approve_device_request(json, item)
+	local request_id = item.requestId
+	local output, exit_code = run_openclaw_devices_cli("devices approve " .. shellquote(request_id))
+	local detail = devices_ok and oc_devices.sanitize_output(output) or tostring(output or ""):sub(1, 300)
+	if exit_code ~= 0 then
+		return oc_devices.evaluate_approval(exit_code, item, nil, nil, detail)
+	end
+
+	local after, error_code, message = load_devices_list(json)
+	return oc_devices.evaluate_approval(exit_code, item, after, error_code, detail ~= "" and detail or tostring(message or ""))
+end
+
 function action_devices_list()
 	local http = require "luci.http"
 	local json = require "luci.jsonc"
-
-	local output, exit_code = run_openclaw_devices_cli("devices list --json")
-	http.prepare_content("application/json")
-	if not output or exit_code ~= 0 then
-		local err_msg = "查询设备列表失败"
-		if output and output:gsub("^%s+", ""):gsub("%s+$", "") ~= "" then
-			err_msg = output:sub(1, 300)
-		elseif type(exit_code) == "string" and exit_code ~= "" then
-			err_msg = exit_code
-		end
-		http.write_json({
-			status = "error",
-			message = err_msg,
+	local data, error_code, message, exit_code = load_devices_list(json)
+	if not data then
+		devices_error(http, error_code, message, {
 			exit_code = type(exit_code) == "number" and exit_code or -1,
-			pending = {},
-			paired = {}
+			pending = {}, paired = {}
 		})
 		return
 	end
-
-	local json_str = output:match("({%s*\"pending\".*})") or output:match("({.*})")
-	local data = json_str and json.parse(json_str) or nil
-	if type(data) == "table" and (data.pending ~= nil or data.paired ~= nil) then
-		http.write_json({
-			status = "ok",
-			pending = data.pending or {},
-			paired = data.paired or {}
-		})
-	else
-		http.write_json({
-			status = "error",
-			message = "解析设备列表失败",
-			pending = {},
-			paired = {},
-			raw = output:sub(1, 300)
-		})
-	end
+	http.prepare_content("application/json")
+	http.write(json.stringify({
+		status = "ok",
+		pending = oc_devices.json_array(data.pending, json.parse),
+		paired = oc_devices.json_array(data.paired, json.parse)
+	}))
 end
 
 function action_devices_approve()
 	local http = require "luci.http"
 	local json = require "luci.jsonc"
-
 	local request_id = http.formvalue("request_id")
 	local approve_all = http.formvalue("all") == "1" or http.formvalue("all") == "true"
-
 	local results = {}
 	local success_count = 0
 	local fail_count = 0
+	local unconfirmed_count = 0
+	local requested = {}
 
 	if approve_all then
-		local list_out, list_code = run_openclaw_devices_cli("devices list --json")
-		if not list_out or list_code ~= 0 then
-			http.prepare_content("application/json")
-			local err_msg = "查询设备列表失败"
-			if list_out and list_out:gsub("^%s+", ""):gsub("%s+$", "") ~= "" then
-				err_msg = list_out:sub(1, 300)
-			elseif type(list_code) == "string" and list_code ~= "" then
-				err_msg = list_code
-			end
-			http.write_json({
-				status = "error",
-				message = err_msg,
-				exit_code = type(list_code) == "number" and list_code or -1,
-				success_count = 0,
-				fail_count = 0
-			})
+		local data, error_code, message = load_devices_list(json)
+		if not data then
+			devices_error(http, error_code, message, { success_count = 0, fail_count = 0, unconfirmed_count = 0 })
 			return
 		end
-
-		local json_str = list_out:match("({%s*\"pending\".*})") or list_out:match("({.*})")
-		local data = json_str and json.parse(json_str) or nil
-		if type(data) ~= "table" or data.pending == nil then
+		if #data.pending == 0 then
 			http.prepare_content("application/json")
-			http.write_json({
-				status = "error",
-				message = "解析设备列表失败",
-				success_count = 0,
-				fail_count = 0
-			})
+			http.write_json({ status = "ok", success_count = 0, fail_count = 0, unconfirmed_count = 0, count = 0, message = "当前没有待配对的设备请求" })
 			return
 		end
-
-		local pending = data.pending or {}
-
-		if #pending == 0 then
-			http.prepare_content("application/json")
-			http.write_json({ status = "ok", success_count = 0, fail_count = 0, count = 0, message = "当前没有待配对的设备请求" })
-			return
-		end
-
-		for _, item in ipairs(pending) do
-			local rid = item.requestId
-			if rid and rid ~= "" and rid:match("^[a-zA-Z0-9%-_]+$") then
-				local out, exit_code = run_openclaw_devices_cli("devices approve " .. shellquote(rid))
-				local is_ok = (exit_code == 0) and (out and not out:match("No pending device") and not out:match("Error") and not out:match("ERROR"))
-				local err_detail = out
-				if (not err_detail or err_detail == "") and type(exit_code) == "string" then
-					err_detail = exit_code
-				end
-				if is_ok or (out and out:lower():match("approved")) then
-					success_count = success_count + 1
-					table.insert(results, { requestId = rid, ok = true, message = out })
-				else
-					fail_count = fail_count + 1
-					table.insert(results, { requestId = rid, ok = false, message = err_detail or "批准失败" })
-				end
-			end
-		end
+		requested = data.pending
 	elseif request_id and request_id ~= "" then
-		if not request_id:match("^[a-zA-Z0-9%-_]+$") then
-			http.prepare_content("application/json")
-			http.write_json({ status = "error", message = "无效的请求 ID 格式" })
+		if not devices_ok or not oc_devices.valid_request_id(request_id) then
+			devices_error(http, "INVALID_REQUEST_ID", "无效的请求 ID 格式", { success_count = 0, fail_count = 1, unconfirmed_count = 0 })
 			return
 		end
-		local out, exit_code = run_openclaw_devices_cli("devices approve " .. shellquote(request_id))
-		local is_ok = (exit_code == 0) and (out and not out:match("No pending device") and not out:match("Error") and not out:match("ERROR"))
-		local err_detail = out
-		if (not err_detail or err_detail == "") and type(exit_code) == "string" then
-			err_detail = exit_code
+		local data, error_code, message = load_devices_list(json)
+		if not data then
+			devices_error(http, error_code, message, { success_count = 0, fail_count = 1, unconfirmed_count = 0 })
+			return
 		end
-		if is_ok or (out and out:lower():match("approved")) then
-			success_count = 1
-			table.insert(results, { requestId = request_id, ok = true, message = out })
-		else
-			fail_count = 1
-			table.insert(results, { requestId = request_id, ok = false, message = err_detail or "批准失败" })
+		local item = oc_devices.find_pending(data, request_id)
+		if not item then
+			devices_error(http, "REQUEST_NOT_PENDING", "指定请求不存在或已失效", { success_count = 0, fail_count = 1, unconfirmed_count = 0 })
+			return
 		end
+		requested = { item }
 	else
-		http.prepare_content("application/json")
-		http.write_json({ status = "error", message = "缺少 request_id 或 all 参数" })
+		devices_error(http, "MISSING_APPROVAL_TARGET", "缺少 request_id 或 all 参数", { success_count = 0, fail_count = 1, unconfirmed_count = 0 })
 		return
 	end
 
-	local install_path = get_install_path()
-	fix_openclaw_state_permissions(install_path .. "/data")
-
-	http.prepare_content("application/json")
-	if success_count > 0 then
-		http.write_json({
-			status = "ok",
-			success_count = success_count,
-			fail_count = fail_count,
-			results = results,
-			message = string.format("成功批准 %d 个设备配对请求%s", success_count, fail_count > 0 and string.format("，%d 个失败", fail_count) or "")
-		})
-	else
-		http.write_json({
-			status = "error",
-			success_count = 0,
-			fail_count = fail_count,
-			results = results,
-			message = results[1] and results[1].message or "批准设备配对失败"
+	for _, item in ipairs(requested) do
+		local outcome, error_code, message = approve_device_request(json, item)
+		if outcome == "ok" then
+			success_count = success_count + 1
+		elseif outcome == "unconfirmed" then
+			unconfirmed_count = unconfirmed_count + 1
+		else
+			fail_count = fail_count + 1
+		end
+		table.insert(results, {
+			requestId = item.requestId,
+			ok = outcome == "ok",
+			status = outcome,
+			error_code = error_code,
+			message = message
 		})
 	end
+
+	if success_count > 0 then
+		local install_path = get_install_path()
+		fix_openclaw_state_permissions(install_path .. "/data")
+	end
+
+	http.prepare_content("application/json")
+	local status = "error"
+	if success_count == #requested then status = "ok"
+	elseif success_count > 0 then status = "partial"
+	elseif unconfirmed_count > 0 then status = "unconfirmed" end
+	local message
+	if status == "ok" then message = string.format("成功批准并确认 %d 个设备配对请求", success_count)
+	elseif status == "partial" then message = string.format("已确认 %d 个，失败 %d 个，待确认 %d 个", success_count, fail_count, unconfirmed_count)
+	elseif status == "unconfirmed" then message = "批准命令已完成，但设备状态尚未确认"
+	else message = results[1] and results[1].message or "批准设备配对失败" end
+	local aggregate_error_code = nil
+	for _, result in ipairs(results) do
+		if result.error_code then aggregate_error_code = result.error_code break end
+	end
+	http.write_json({
+		status = status,
+		error_code = status == "ok" and nil or (aggregate_error_code or "APPROVAL_FAILED"),
+		success_count = success_count,
+		fail_count = fail_count,
+		unconfirmed_count = unconfirmed_count,
+		results = results,
+		message = message
+	})
 end

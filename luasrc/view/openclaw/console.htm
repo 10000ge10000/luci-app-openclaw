@@ -6,12 +6,10 @@
 
 <%
 local uci = require "luci.model.uci".cursor()
+local console_utils = require "openclaw.console"
 local port = uci:get("openclaw", "main", "port") or "18789"
 local raw_console_url = tostring(uci:get("openclaw", "main", "console_url") or ""):gsub("^%s+", ""):gsub("%s+$", "")
-local https_console_url = ""
-if raw_console_url ~= "" and raw_console_url:match("^https://[a-zA-Z0-9%-%._~:/?#%[%]@!$&'()*+,;=]+$") then
-	https_console_url = raw_console_url:gsub("/+$", "")
-end
+local https_console_url = console_utils.normalize_https_url(raw_console_url) or ""
 %>
 
 <style type="text/css">
@@ -174,17 +172,19 @@ end
 	<div style="font-weight:600; margin-bottom:4px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
 		<span>💡 访问条件提示（图片/附件与安全上下文）</span>
 		<a id="oc-console-direct-btn" href="#" target="_blank" rel="noopener noreferrer" class="btn-action" style="background:#fff; color:#0958d9; border-color:#91caff; font-weight:normal; text-decoration:none; display:inline-flex; align-items:center; gap:4px;">
-			↗ 新窗口直达控制台
+			↗ 打开控制台
 		</a>
 	</div>
 	<div id="oc-console-context-detail" style="font-size:12px; color:#333;">
-		当前运行于非安全上下文（HTTP 局域网地址）。受现代浏览器安全策略（Secure Context）限制，图片粘贴、附件拖拽上传与麦克风/剪贴板权限可能受限。<br/>
-		<strong>如需使用完整附件/图片与语音功能，建议：</strong><br/>
-		1. <strong>HTTPS 控制台</strong>：配置反向代理并启用 HTTPS，在 UCI 中配置经过验证的 <code>option console_url 'https://...'</code>；<br/>
-		2. <strong>本地安全访问</strong>：在路由器本机或通过 SSH 端口转发访问 <code>http://localhost:18789/</code>；<br/>
-		3. <strong>新窗口直达</strong>：点击右上角或上方的「<strong>新窗口直达</strong>」在独立窗口运行。
+		HTTP 局域网地址不属于浏览器安全上下文，图片粘贴、附件拖拽、麦克风和剪贴板能力可能不可用。<br/>
+		<strong>完整附件功能请通过 SSH localhost 隧道访问顶级页面：</strong><br/>
+		<code id="oc-console-tunnel-command"></code><br/>
+		然后打开 <code id="oc-console-tunnel-url">http://localhost:18790/</code>。若本地 18790 端口被占用，请将命令和地址中的 18790 一并改为空闲端口。<br/>
+		配置了可信 HTTPS 控制台地址时，「打开控制台」仅打开该地址，不会自动传递 Gateway Token。
 	</div>
 </div>
+
+<span id="oc-console-config" data-console-url="<%=console_utils.html_attr(https_console_url)%>" style="display:none;"></span>
 
 <div class="oc-console-wrap" id="oc-console-wrap">
 	<div id="oc-console-container">
@@ -199,7 +199,8 @@ end
 //<![CDATA[
 (function() {
 	var gwPort = '<%=port%>';
-	var uciHttpsConsoleUrl = '<%=https_console_url%>';
+	var consoleConfigEl = document.getElementById('oc-console-config');
+	var uciHttpsConsoleUrl = consoleConfigEl ? (consoleConfigEl.getAttribute('data-console-url') || '') : '';
 	var gwToken = '';
 	var statusUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "status_api")%>';
 	var tokenUrl = '<%=luci.dispatcher.build_url("admin", "services", "openclaw", "get_token")%>';
@@ -215,36 +216,35 @@ end
 	var fullscreenBtn = document.getElementById('oc-console-fullscreen-btn');
 	var wrapEl = document.getElementById('oc-console-wrap');
 	var iframeEl = null;
+	var tunnelCommandEl = document.getElementById('oc-console-tunnel-command');
+	if (tunnelCommandEl) tunnelCommandEl.textContent = 'ssh -N -L 127.0.0.1:18790:127.0.0.1:' + gwPort + ' root@' + window.location.hostname;
 
-	function getConsoleUrl() {
+	function getGatewayBaseUrl() {
 		var host = window.location.hostname;
-		var url = 'http://' + host + ':' + gwPort + '/';
-		if (uciHttpsConsoleUrl && uciHttpsConsoleUrl.indexOf('https://') === 0) {
-			url = uciHttpsConsoleUrl;
-			if (url.indexOf('?') === -1 && url.indexOf('#') === -1 && url.slice(-1) !== '/') {
-				url += '/';
-			}
-		}
+		return 'http://' + host + ':' + gwPort + '/';
+	}
+
+	function appendGatewayToken(url) {
 		if (gwToken) {
 			url += (url.indexOf('#') === -1 ? '#' : '&') + 'token=' + encodeURIComponent(gwToken);
 		}
 		return url;
 	}
 
-	function updateContextHint(url) {
+	function getEmbeddedConsoleUrl() {
+		return appendGatewayToken(getGatewayBaseUrl());
+	}
+
+	function getExternalConsoleUrl() {
+		if (uciHttpsConsoleUrl && uciHttpsConsoleUrl.indexOf('https://') === 0) return uciHttpsConsoleUrl;
+		return appendGatewayToken(getGatewayBaseUrl());
+	}
+
+	function updateContextHint() {
 		var hintEl = document.getElementById('oc-console-context-hint');
 		var directBtn = document.getElementById('oc-console-direct-btn');
-		if (directBtn) directBtn.href = url;
-		var isHttps = (url.indexOf('https://') === 0);
-		var isSecure = (typeof window.isSecureContext !== 'undefined') ? window.isSecureContext : (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1');
-
-		if (hintEl) {
-			if (!isHttps && !isSecure && location.protocol !== 'https:') {
-				hintEl.style.display = 'block';
-			} else {
-				hintEl.style.display = 'none';
-			}
-		}
+		if (directBtn) directBtn.href = getExternalConsoleUrl();
+		if (hintEl) hintEl.style.display = getGatewayBaseUrl().indexOf('http://localhost') === 0 || getGatewayBaseUrl().indexOf('http://127.0.0.1') === 0 ? 'none' : 'block';
 	}
 
 	function toggleFullScreen() {
@@ -288,21 +288,22 @@ end
 			(new XHR()).get(statusUrl, null, function(x) {
 				try {
 					var d = JSON.parse(x.responseText);
-					var url = getConsoleUrl();
+					var embeddedUrl = getEmbeddedConsoleUrl();
+					var externalUrl = getExternalConsoleUrl();
 					if (d.active_model) {
 						modelEl.textContent = d.active_model;
 					}
 					if (d.gateway_running) {
 						if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
 						statusTextEl.innerHTML = '<span style="color:#1a7f37;">● 网关运行中</span>';
-						openBtn.href = url;
+						openBtn.href = externalUrl;
 						actionsEl.style.display = 'flex';
-						updateContextHint(url);
-						if (location.protocol === 'https:' && url.indexOf('https://') !== 0) {
+						updateContextHint();
+						if (location.protocol === 'https:' && embeddedUrl.indexOf('https://') !== 0) {
 							var hintEl = document.getElementById('oc-console-https-hint');
 							if (hintEl) hintEl.style.display = 'block';
 						}
-						showIframe(url);
+						showIframe(embeddedUrl);
 						checkDevices(false);
 						setTimeout(function() { checkDevices(false); }, 2500);
 						setTimeout(function() { checkDevices(false); }, 6000);
@@ -378,6 +379,15 @@ end
 	var pairingRefreshBtn = document.getElementById('oc-pairing-refresh-btn');
 	var pairingToggleBtn = document.getElementById('oc-console-pairing-toggle-btn');
 
+	function showPairingItemsMessage(message, color) {
+		pairingItems.textContent = '';
+		var line = document.createElement('div');
+		line.style.color = color || '#cf222e';
+		line.style.fontSize = '12px';
+		line.textContent = message;
+		pairingItems.appendChild(line);
+	}
+
 	function checkDevices(manualOpen) {
 		(new XHR()).get(devicesListUrl, null, function(x) {
 			try {
@@ -386,12 +396,13 @@ end
 					if (pairingBadge) pairingBadge.textContent = '!';
 					var errMsg = (data && data.message) || '查询设备列表失败';
 					if (manualOpen) {
-						pairingItems.innerHTML = '<div style="color:#cf222e; font-size:12px;">❌ ' + escapeHtml(errMsg) + '</div>';
+						showPairingItemsMessage('❌ ' + errMsg);
 						pairingBanner.style.display = 'block';
 					}
 					return;
 				}
-				var pending = data.pending || [];
+					if (!Array.isArray(data.pending) || !Array.isArray(data.paired)) throw new Error('设备列表结构无效');
+					var pending = data.pending;
 				if (pairingBadge) pairingBadge.textContent = pending.length;
 				var navBadge = document.getElementById('oc-console-pairing-nav-badge');
 				if (navBadge) {
@@ -435,7 +446,7 @@ end
 				}
 			} catch(e) {
 				if (manualOpen) {
-					pairingItems.innerHTML = '<div style="color:#cf222e; font-size:12px;">查询设备列表失败</div>';
+					showPairingItemsMessage('查询设备列表失败');
 					pairingBanner.style.display = 'block';
 				}
 			}
@@ -458,23 +469,27 @@ end
 				if (res.status === 'ok') {
 					if ((res.success_count || 0) > 0) {
 						pairingMsg.style.color = '#52c41a';
-						pairingMsg.innerHTML = '✅ ' + (res.message || '批准成功！') + ' 正在重新载入控制台...';
+						pairingMsg.textContent = '✅ ' + (res.message || '批准成功！') + ' 正在重新载入控制台...';
 						setTimeout(function() {
 							checkDevices(false);
 							if (iframeEl) {
-								iframeEl.src = getConsoleUrl();
+								iframeEl.src = getEmbeddedConsoleUrl();
 							}
 						}, 1500);
 					} else {
 						pairingMsg.style.color = '#faad14';
-						pairingMsg.innerHTML = 'ℹ️ ' + (res.message || '当前没有待配对的设备请求');
+						pairingMsg.textContent = 'ℹ️ ' + (res.message || '当前没有待配对的设备请求');
 						setTimeout(function() {
 							checkDevices(false);
 						}, 1500);
 					}
+				} else if (res.status === 'partial' || res.status === 'unconfirmed') {
+					pairingMsg.style.color = '#d48806';
+					pairingMsg.textContent = '⚠️ ' + (res.message || '部分设备状态尚未确认，请刷新后重试');
+					setTimeout(function() { checkDevices(true); }, 1500);
 				} else {
 					pairingMsg.style.color = '#cf222e';
-					pairingMsg.innerHTML = '❌ ' + (res.message || '批准失败');
+					pairingMsg.textContent = '❌ ' + (res.message || '批准失败');
 				}
 			} catch(e) {
 				pairingMsg.style.color = '#cf222e';
@@ -505,7 +520,7 @@ end
 
 	refreshBtn.addEventListener('click', function() {
 		if (iframeEl) {
-			var url = getConsoleUrl();
+			var url = getEmbeddedConsoleUrl();
 			iframeEl.src = url;
 		}
 	});

@@ -78,13 +78,24 @@ done
 grep -Fq "__EXIT" "$CONTROLLER" || fail "controller must check command exit code"
 grep -Fq "缺少 request_id 或 all 参数" "$CONTROLLER" || fail "controller must reject empty approve requests"
 grep -Fq "if not output or exit_code ~= 0 then" "$CONTROLLER" || fail "controller must reject non-zero exit_code in devices_list"
-grep -Fq "if not list_out or list_code ~= 0 then" "$CONTROLLER" || fail "controller must reject non-zero exit_code when querying devices list in approve_all"
-grep -Fq "解析设备列表失败" "$CONTROLLER" || fail "controller must report error on JSON parse failure in devices_list"
+grep -Fq "load_devices_list(json)" "$CONTROLLER" || fail "controller must use the shared devices list parser"
+grep -Fq "oc_devices.evaluate_approval" "$CONTROLLER" || fail "controller must verify approval results"
+grep -Fq "http.write(json.stringify(response))" "$CONTROLLER" || fail "controller must preserve JSON array markers"
+grep -Fq "pending = oc_devices.json_array" "$CONTROLLER" || fail "controller must encode empty pending lists as arrays"
+grep -Fq "OPENCLAW_SUPERVISOR_MODE=external" "$CONTROLLER" || fail "devices CLI must use external supervisor mode"
+grep -Fq "timeout 20" "$CONTROLLER" || fail "devices CLI must have a timeout"
+if grep -Fq 'out:lower():match("approved")' "$CONTROLLER"; then
+	fail "approval output text must never override a non-zero exit status"
+fi
 
 # ── 8. 前端状态与批准语义契约 ──
 for f in "$CONSOLE" "$ADVANCED"; do
 	grep -Fq "success_count" "$f" || fail "$(basename "$f") must check success_count to prevent false reload on empty list"
 	grep -Fq "data.status !==" "$f" || fail "$(basename "$f") must check data.status before consuming devices list"
+	grep -Fq "res.status === 'partial'" "$f" || fail "$(basename "$f") must show partial/unconfirmed results"
+	if grep -Eq 'PairingMsg\.innerHTML|pairingMsg\.innerHTML' "$f"; then
+		fail "$(basename "$f") must not render CLI messages with innerHTML"
+	fi
 done
 
 # ── 8. 换行符约束 (LF only) ──

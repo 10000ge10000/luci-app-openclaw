@@ -72,6 +72,8 @@ define Package/$(PKG_NAME)/install
 	$(INSTALL_DATA) ./luasrc/controller/openclaw.lua $(1)/usr/lib/lua/luci/controller/openclaw.lua
 	$(INSTALL_DIR) $(1)/usr/lib/lua/openclaw
 	$(INSTALL_DATA) ./luasrc/openclaw/paths.lua $(1)/usr/lib/lua/openclaw/paths.lua
+	$(INSTALL_DATA) ./luasrc/openclaw/devices.lua $(1)/usr/lib/lua/openclaw/devices.lua
+	$(INSTALL_DATA) ./luasrc/openclaw/console.lua $(1)/usr/lib/lua/openclaw/console.lua
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/model/cbi/openclaw
 	$(INSTALL_DATA) ./luasrc/model/cbi/openclaw/basic.lua $(1)/usr/lib/lua/luci/model/cbi/openclaw/basic.lua
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/view/openclaw
