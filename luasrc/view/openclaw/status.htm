@@ -6,9 +6,10 @@
 #oc-status-panel {
 	margin: 0 0 20px 0;
 	padding: 0;
-	border: 1px solid #e0e0e0;
+	border: 1px solid rgba(127,127,127,0.35);
 	border-radius: 8px;
-	background: #fff;
+	background: transparent;
+	color: inherit;
 	overflow: hidden;
 	box-shadow: 0 1px 4px rgba(0,0,0,0.06);
 }
@@ -26,24 +27,46 @@
 #oc-status-panel table {
 	width: 100%;
 	border-collapse: collapse;
+	background: transparent !important;
+}
+#oc-status-panel tr,
+#oc-status-panel td {
+	background: transparent !important;
+}
+#oc-status-panel tr:nth-child(even) {
+	background: rgba(127,127,127,0.08) !important;
 }
 #oc-status-panel td {
 	padding: 8px 16px;
-	border-bottom: 1px solid #f2f2f2;
+	border-bottom: 1px solid rgba(127,127,127,0.2);
 	font-size: 13px;
 	vertical-align: middle;
+	color: inherit;
 }
 #oc-status-panel tr:last-child td {
 	border-bottom: none;
 }
 #oc-status-panel td:first-child {
 	width: 120px;
-	color: #888;
+	color: inherit;
+	opacity: 0.72;
 	font-weight: 500;
 	white-space: nowrap;
 }
 #oc-status-panel td:last-child {
-	color: #333;
+	color: inherit;
+}
+#oc-status-panel .oc-inline-code {
+	padding: 2px 8px;
+	border: 1px solid rgba(127,127,127,0.28);
+	border-radius: 4px;
+	background: rgba(127,127,127,0.12);
+	color: inherit;
+	font-size: 12px;
+}
+#oc-status-panel .oc-value-strong {
+	color: inherit;
+	font-weight: 600;
 }
 .oc-badge {
 	display: inline-block;
@@ -130,14 +153,20 @@
 
 				var channelsEl = document.getElementById('oc-st-channels');
 				if (d.channels) {
-					channelsEl.innerHTML = '<span style="color:#1a7f37;font-weight:500;">' + d.channels + '</span>';
+					channelsEl.textContent = d.channels;
+					channelsEl.className = 'oc-value-strong';
 				} else {
 					channelsEl.textContent = '未配置';
+					channelsEl.className = '';
 				}
 
 				var modelEl = document.getElementById('oc-st-model');
 				if (d.active_model) {
-					modelEl.innerHTML = '<code style="padding:2px 8px;background:#f0f3f6;border-radius:4px;font-size:12px;">' + d.active_model + '</code>';
+					modelEl.textContent = '';
+					var modelCode = document.createElement('code');
+					modelCode.className = 'oc-inline-code';
+					modelCode.textContent = d.active_model;
+					modelEl.appendChild(modelCode);
 				} else {
 					modelEl.textContent = '未配置';
 				}
@@ -158,7 +187,11 @@
 				// 安装路径和剩余空间
 				var pathEl = document.getElementById('oc-st-path');
 				if (d.install_path) {
-					pathEl.innerHTML = '<code style="padding:2px 8px;background:#f0f3f6;border-radius:4px;font-size:12px;">' + d.install_path + '</code>';
+					pathEl.textContent = '';
+					var pathCode = document.createElement('code');
+					pathCode.className = 'oc-inline-code';
+					pathCode.textContent = d.install_path;
+					pathEl.appendChild(pathCode);
 				} else {
 					pathEl.textContent = '-';
 				}
@@ -166,9 +199,11 @@
 				// 剩余空间
 				var diskEl = document.getElementById('oc-st-disk');
 				if (d.disk_free) {
-					diskEl.innerHTML = '<span style="color:#1a7f37;font-weight:500;">' + d.disk_free + '</span> 可用';
+					diskEl.textContent = d.disk_free + ' 可用';
+					diskEl.className = 'oc-value-strong';
 				} else {
 					diskEl.textContent = '-';
+					diskEl.className = '';
 				}
                         } catch(e) {
 				document.getElementById('oc-st-status').innerHTML = '<span class="oc-badge oc-badge-unknown">查询失败</span>';
