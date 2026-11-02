@@ -69,7 +69,7 @@
       "wechat": { "minPlugin": "2.4.9" },
       "verification": {
         "cliSchema": "2026-11-01 macOS x86_64 + Node 24.22.2：onboard、models auth paste-api-key、plugins install、models set/fallbacks、models status --check、config validate、doctor --fix、Gateway 启动 (2026-11-02)",
-        "device": "2026-11-02 Raspberry Pi 4 / Kwrt 25.12.5 aarch64 musl + Node 24.22.2：从 2026.6.11 升级、备份校验、Doctor 迁移、凭据保留、Gateway 启动通过；微信插件 2.4.10 渠道启动、备份在隔离目录恢复、自定义 Provider 与真实请求、两套菜单查看、LuCI 接口通过。未验证：微信消息收发、真机端到端回滚。"
+        "device": "2026-11-02 Raspberry Pi 4 / Kwrt 25.12.5 aarch64 musl + Node 24.22.2：从 2026.6.11 升级、备份校验、Doctor 迁移、凭据保留、Gateway 启动通过；微信插件 2.4.10 渠道启动、备份在隔离目录恢复、自定义 Provider 与真实请求、两套菜单查看、LuCI 接口通过。未验证：真机端到端回滚。"
       }
     },
     "2026.9.1": {

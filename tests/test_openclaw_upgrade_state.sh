@@ -226,6 +226,24 @@ for pid in "$PPID" "$(ps -o ppid= -p "$PPID" | tr -d ' ')"; do
 done
 EOF
 	chmod +x "$RB_BIN/pgrep"
+	# BusyBox pgrep 没有 -u，服务用户的进程只能靠 /proc 属主找到。
+	# 替身 ls 把两个后台 sleep 列成 openclaw 和 root 的进程: 前者必须被清理，后者不能碰。
+	# 双重 fork 让 init 回收，否则已退出的子进程是僵尸，kill -0 仍会成功。
+	( sleep 60 >/dev/null 2>&1 & echo $! > "$RB_DIR/victim.pid" )
+	( sleep 60 >/dev/null 2>&1 & echo $! > "$RB_DIR/bystander.pid" )
+	RB_VICTIM=$(cat "$RB_DIR/victim.pid")
+	RB_BYSTANDER=$(cat "$RB_DIR/bystander.pid")
+	cat > "$RB_BIN/ls" <<EOF
+#!/bin/sh
+case "\$*" in
+	*/proc/*)
+		echo "dr-xr-xr-x 9 openclaw openclaw 0 Nov  2 16:00 /proc/$RB_VICTIM"
+		echo "dr-xr-xr-x 9 root root 0 Nov  2 16:00 /proc/$RB_BYSTANDER"
+		;;
+	*) exec /bin/ls "\$@" ;;
+esac
+EOF
+	chmod +x "$RB_BIN/ls"
 	echo '{"gateway":{"port":1},"marker":"before-upgrade"}' > "$RB_STATE/openclaw.json"
 	RB_ENV="OC_GLOBAL=$RB_DIR/global OC_DATA=$RB_DATA OPENCLAW_STATE_DIR=$RB_STATE OPENCLAW_GATEWAY_PORT=1"
 	RB_ARCHIVE="$RB_DIR/before.tar.gz"
@@ -236,6 +254,19 @@ EOF
 	RC_RB_FULL=$?
 	set -e
 	[ "$RC_RB_FULL" -eq 0 ] || { cat "$RB_DIR/out" >&2; fail "rollback-explicit must complete instead of killing itself (rc=$RC_RB_FULL)"; }
+	RB_BYSTANDER_ALIVE=0
+	kill -0 "$RB_BYSTANDER" 2>/dev/null && RB_BYSTANDER_ALIVE=1
+	kill "$RB_BYSTANDER" 2>/dev/null || true
+	RB_VICTIM_ALIVE=1
+	for _ in 1 2 3 4 5; do
+		kill -0 "$RB_VICTIM" 2>/dev/null || { RB_VICTIM_ALIVE=0; break; }
+		sleep 1
+	done
+	if [ "$RB_VICTIM_ALIVE" -ne 0 ]; then
+		kill "$RB_VICTIM" 2>/dev/null || true
+		fail "rollback-explicit must stop processes owned by the service user without pgrep -u"
+	fi
+	[ "$RB_BYSTANDER_ALIVE" -eq 1 ] || fail "rollback-explicit must not kill processes owned by other users"
 	grep -q 'before-upgrade' "$RB_STATE/openclaw.json" || fail "rollback-explicit must restore the state from the archive"
 	ls "$RB_DATA"/backups/failed-state-*.tar.gz >/dev/null 2>&1 || fail "rollback-explicit must archive the failed state first"
 	RB_STATUS=$(env $RB_ENV sh "$STATE_SCRIPT" status "$RB_STATE" 2>/dev/null)

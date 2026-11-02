@@ -1172,7 +1172,9 @@ do_rollback_explicit() {
 	sleep 2
 	# 不能用 pgrep -f "openclaw": 本脚本和调用方的路径都含 openclaw，
 	# BusyBox pgrep 不排除祖先进程，会在服务已停时把回滚自身杀掉。
-	for p in $(pgrep -u openclaw 2>/dev/null) $(pgrep -f "openclaw-gateway" 2>/dev/null); do
+	# BusyBox pgrep 也没有 -u (1.37 实测报错后返回空)，服务用户的进程按 /proc 属主枚举。
+	for p in $(ls -ld /proc/[0-9]* 2>/dev/null | awk '$3 == "openclaw" { p = $NF; sub(".*/", "", p); print p }') \
+		$(pgrep -f "openclaw-gateway" 2>/dev/null); do
 		[ "$p" = "$$" ] || kill "$p" 2>/dev/null || true
 	done
 	sleep 1
