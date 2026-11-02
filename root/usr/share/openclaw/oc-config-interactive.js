@@ -37,14 +37,6 @@ const PERMISSIONS_HELPER = '/usr/libexec/openclaw-permissions.sh';
 // 及 .bak.1~.bak.4 轮转，占用同名文件会破坏上游备份链。
 const CONFIG_BACKUP_SUFFIX = '.luci-pre-write';
 
-// 精选模型预设 (shell 与 JS 共读的唯一数据源)
-const MODEL_PRESETS_FILE = process.env.OC_MODEL_PRESETS
-  || '/usr/share/openclaw/model-presets.json';
-
-// 动态发现模型列表的超时。OpenWrt 上要避免菜单长时间卡住，
-// 超时或失败时回落到本地精选预设。
-const MODEL_DISCOVERY_TIMEOUT_MS = 6000;
-
 // ═══════════════════════════════════════════════════════════════════════════
 // 辅助函数 (与 oc-config.sh 逻辑对应)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -464,290 +456,6 @@ function parsePairingCodes(raw) {
 }
 
 /**
- * 读取精选模型预设 (shell 与 JS 共读的唯一数据源)。
- * 文件缺失或损坏时返回空结构，调用方回落到"手动输入"。
- */
-function loadModelPresets() {
-  try {
-    const raw = fs.readFileSync(MODEL_PRESETS_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && parsed.providers) return parsed;
-  } catch {}
-  return { providers: {} };
-}
-
-/**
- * 动态发现某个 provider 当前实际可用的模型。
- *
- * 调 `openclaw models list --provider <id> --plain`，输出形如
- * "openai/gpt-5.5" 每行一个，这里剥掉 provider 前缀只留裸模型 ID。
- *
- * 注意上游行为 (已实测): `models list --all` 不是各 provider 的超集，
- * 必须按 provider 查询才能拿到完整列表；未安装对应插件的 provider
- * 会返回 "No models found."。因此失败/空结果都属正常，调用方回落预设。
- */
-function discoverProviderModels(providerId) {
-  const ocEntry = findOpenClawEntry();
-  if (!ocEntry) return [];
-  try {
-    const stdout = execFileSync(
-      NODE_BIN,
-      [ocEntry, 'models', 'list', '--provider', providerId, '--plain'],
-      {
-        encoding: 'utf8',
-        timeout: MODEL_DISCOVERY_TIMEOUT_MS,
-        stdio: ['ignore', 'pipe', 'ignore'],
-        env: {
-          ...process.env,
-          OPENCLAW_HOME: OC_DATA,
-          OPENCLAW_CONFIG_PATH: CONFIG_FILE,
-          OPENCLAW_STATE_DIR: OC_STATE_DIR,
-          HOME: OC_DATA,
-        },
-      }
-    );
-    const prefix = `${providerId}/`;
-    return [...new Set(
-      String(stdout || '')
-        .split('\n')
-        .map((l) => l.trim())
-        .filter((l) => l.startsWith(prefix))
-        .map((l) => l.slice(prefix.length))
-        .filter(Boolean)
-    )];
-  } catch {
-    // 超时 / 命令不可用 / provider 无模型: 均回落到精选预设
-    return [];
-  }
-}
-
-/**
- * 构建模型选择菜单项: 精选预设 + 动态发现 + 手动输入。
- *
- * 三层设计的取舍 (架构决定):
- *   - 完全硬编码: 上游更新后必然过期。本项目此前正因如此积累了
- *     openai/gpt-5.2、claude-sonnet-4、grok-4 等一批上游已不存在的 ID。
- *   - 完全动态: 依赖 CLI 可用且已配置 Key，未装插件时返回 0 条，
- *     且逐 provider 调用在路由器上较慢，不能作为唯一来源。
- *   - 精选 + 动态 + 手动: 首屏快、能自动跟进、离线仍可用。
- */
-function buildModelMenuItems(providerId, opts = {}) {
-  const presets = loadModelPresets();
-  const entry = presets.providers[providerId] || {};
-  const presetModels = Array.isArray(entry.models) ? entry.models : [];
-  const keys = 'abcdefghijkmnpqrstuvwxyz'.split('');
-  const items = [];
-  let ki = 0;
-
-  if (presetModels.length) {
-    items.push({ label: `${C.bold}── 精选模型 ──${C.reset}`, disabled: true });
-    for (const m of presetModels) {
-      items.push({
-        key: keys[ki++] || undefined,
-        label: m.model,
-        desc: m.desc || '',
-        value: m.model,
-      });
-    }
-  }
-
-  // 动态发现: 只展示不在精选列表里的，避免重复
-  if (opts.discovered && opts.discovered.length) {
-    const known = new Set(presetModels.map((m) => m.model));
-    const extra = opts.discovered.filter((m) => !known.has(m));
-    if (extra.length) {
-      items.push({ label: `${C.bold}── OpenClaw 当前可用 ──${C.reset}`, disabled: true });
-      for (const m of extra) {
-        items.push({ key: keys[ki++] || undefined, label: m, desc: '', value: m });
-      }
-    }
-  }
-
-  items.push({ label: '', disabled: true });
-  if (!opts.discovered) {
-    items.push({ key: 'r', label: '从 OpenClaw 获取完整模型列表', desc: '动态发现当前可用模型', value: '__discover__' });
-  }
-  // 手动输入是永久保留的兼容出口: 上游新增模型时无需等插件更新
-  items.push({ key: 'z', label: '手动输入模型 ID', desc: '', value: '__custom__' });
-  return items;
-}
-
-/**
- * 统一的模型选择流程: 处理动态发现与手动输入两个特殊分支。
- * 返回裸模型 ID (不含 provider 前缀)，取消时返回 null。
- */
-async function selectProviderModel(providerId, title, fallbackDefault) {
-  let discovered = null;
-  for (let round = 0; round < 2; round++) {
-    const choice = await select({
-      title,
-      showSearch: true,
-      items: buildModelMenuItems(providerId, discovered ? { discovered } : {}),
-    });
-    if (!choice) return null;
-
-    if (choice.value === '__discover__') {
-      console.log(`\n${C.cyan}正在从 OpenClaw 获取模型列表...${C.reset}`);
-      discovered = discoverProviderModels(providerId);
-      if (!discovered.length) {
-        console.log(`${C.yellow}未获取到模型列表 (该 Provider 可能需要先安装插件或配置 API Key)，`
-          + `已显示内置精选列表。${C.reset}\n`);
-        discovered = [];
-      } else {
-        console.log(`${C.green}获取到 ${discovered.length} 个模型${C.reset}\n`);
-      }
-      continue;
-    }
-
-    if (choice.value === '__custom__') {
-      const manual = await input({ prompt: '请输入模型 ID', defaultValue: fallbackDefault || '' });
-      const trimmed = manual ? String(manual).trim() : '';
-      return trimmed || null;
-    }
-    return choice.value;
-  }
-  return null;
-}
-
-/**
- * 注册模型并设为默认 (对应 register_and_set_model)
- */
-function registerAndSetModel(modelId) {
-  const config = readConfig();
-  if (!config.agents) config.agents = {};
-  if (!config.agents.defaults) config.agents.defaults = {};
-  if (!config.agents.defaults.models) config.agents.defaults.models = {};
-  if (!config.agents.defaults.model) config.agents.defaults.model = {};
-  config.agents.defaults.models[modelId] = {};
-  config.agents.defaults.model.primary = modelId;
-  writeConfig(config);
-}
-
-/**
- * 写入 API Key 到 auth-profiles.json (对应 auth_set_apikey)
- */
-function authSetApikey(provider, apiKey, profileId) {
-  const authDir = `${OC_STATE_DIR}/agents/main/agent`;
-  const authFile = `${authDir}/auth-profiles.json`;
-  try {
-    fs.mkdirSync(authDir, { recursive: true }); try { execSync(`chown openclaw:openclaw "${authDir}"`, { stdio: "ignore" }); } catch {}
-  } catch {}
-
-  let authData = { version: 1, profiles: {}, usageStats: {} };
-  try {
-    if (fs.existsSync(authFile)) {
-      authData = JSON.parse(fs.readFileSync(authFile, 'utf8'));
-    }
-  } catch {}
-
-  if (!authData.profiles) authData.profiles = {};
-  authData.profiles[profileId || `${provider}:manual`] = {
-    type: 'api_key',
-    provider: provider,
-    key: apiKey,
-  };
-
-  fs.writeFileSync(authFile, JSON.stringify(authData, null, 2));
-  try {
-    execSync(`chown openclaw:openclaw "${authFile}"`, { stdio: 'ignore' });
-    fixStatePermissions();
-  } catch {}
-}
-
-/**
- * 注册自定义提供商 (对应 register_custom_provider)
- */
-function registerCustomProvider(providerName, baseUrl, apiKey, modelId, modelDisplay, ctxWindow, maxTok) {
-  const config = readConfig();
-  if (!config.models) config.models = {};
-  if (!config.models.providers) config.models.providers = {};
-  config.models.mode = 'merge';
-  config.models.providers[providerName] = {
-    baseUrl: baseUrl,
-    apiKey: apiKey,
-    api: 'openai-completions',
-    models: [{
-      id: modelId,
-      name: modelDisplay || modelId,
-      reasoning: false,
-      input: ['text', 'image'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: parseInt(ctxWindow) || 128000,
-      maxTokens: parseInt(maxTok) || 32000,
-    }]
-  };
-  writeConfig(config);
-}
-
-/**
- * 注册 Coding Plan 提供商 (对应 register_codingplan_provider)
- */
-function registerCodingPlanProvider(apiKey) {
-  const config = readConfig();
-  if (!config.models) config.models = {};
-  if (!config.models.providers) config.models.providers = {};
-  config.models.mode = 'merge';
-  config.models.providers['bailian'] = {
-    baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
-    apiKey: apiKey,
-    api: 'openai-completions',
-    models: [
-      { id: 'qwen3.5-plus', name: 'qwen3.5-plus', reasoning: false, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 65536 },
-      { id: 'qwen3-coder-plus', name: 'qwen3-coder-plus', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 65536 },
-      { id: 'qwen3-coder-next', name: 'qwen3-coder-next', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 262144, maxTokens: 65536 },
-      { id: 'qwen3-max-2026-01-23', name: 'qwen3-max-2026-01-23', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 262144, maxTokens: 65536 },
-      { id: 'MiniMax-M2.5', name: 'MiniMax-M2.5', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 204800, maxTokens: 131072 },
-      { id: 'glm-5', name: 'glm-5', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 202752, maxTokens: 16384 },
-      { id: 'glm-4.7', name: 'glm-4.7', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 202752, maxTokens: 16384 },
-      { id: 'kimi-k2.5', name: 'kimi-k2.5', reasoning: false, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 262144, maxTokens: 32768 },
-    ]
-  };
-
-  if (!config.agents) config.agents = {};
-  if (!config.agents.defaults) config.agents.defaults = {};
-  if (!config.agents.defaults.models) config.agents.defaults.models = {};
-  ['qwen3.5-plus', 'qwen3-coder-plus', 'qwen3-coder-next', 'qwen3-max-2026-01-23', 'MiniMax-M2.5', 'glm-5', 'glm-4.7', 'kimi-k2.5'].forEach(m => {
-    config.agents.defaults.models[`bailian/${m}`] = {};
-  });
-
-  writeConfig(config);
-}
-
-/**
- * 注册腾讯云 Coding Plan 提供商 (对应 register_lkeap_codingplan_provider)
- */
-function registerLkeapCodingPlanProvider(apiKey) {
-  const config = readConfig();
-  if (!config.models) config.models = {};
-  if (!config.models.providers) config.models.providers = {};
-  config.models.mode = 'merge';
-  config.models.providers['lkeap'] = {
-    baseUrl: 'https://api.lkeap.cloud.tencent.com/coding/v3',
-    apiKey: apiKey,
-    api: 'openai-completions',
-    models: [
-      { id: 'tc-code-latest', name: 'Auto (智能匹配最优模型)', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 8192 },
-      { id: 'hunyuan-2.0-instruct', name: 'Tencent HY 2.0 Instruct', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 16000 },
-      { id: 'hunyuan-2.0-thinking', name: 'Tencent HY 2.0 Think', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 64000 },
-      { id: 'hunyuan-t1', name: 'Hunyuan-T1', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32000, maxTokens: 64000 },
-      { id: 'hunyuan-turbos', name: 'Hunyuan-TurboS', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32000, maxTokens: 16000 },
-      { id: 'minimax-m2.5', name: 'MiniMax-M2.5', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 204800, maxTokens: 131072 },
-      { id: 'kimi-k2.5', name: 'Kimi-K2.5', reasoning: false, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 262144, maxTokens: 32768 },
-      { id: 'glm-5', name: 'GLM-5', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 202752, maxTokens: 8192 },
-    ]
-  };
-
-  if (!config.agents) config.agents = {};
-  if (!config.agents.defaults) config.agents.defaults = {};
-  if (!config.agents.defaults.models) config.agents.defaults.models = {};
-  ['tc-code-latest', 'hunyuan-2.0-instruct', 'hunyuan-2.0-thinking', 'hunyuan-t1', 'hunyuan-turbos', 'minimax-m2.5', 'kimi-k2.5', 'glm-5'].forEach(m => {
-    config.agents.defaults.models[`lkeap/${m}`] = {};
-  });
-
-  writeConfig(config);
-}
-
-/**
  * 重启 Gateway
  */
 async function restartGateway() {
@@ -844,47 +552,6 @@ async function showMainMenu() {
 
       { label: '', disabled: true },
       { key: '0', label: '退出', desc: '', value: 'quit' },
-    ],
-  });
-
-  return result;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 模型配置菜单 (对应 configure_model)
-// ═══════════════════════════════════════════════════════════════════════════
-
-async function showModelMenu() {
-  const result = await select({
-    title: '配置 AI 模型和提供商',
-    showSearch: false,
-    items: [
-      { label: `${C.green}${C.bold}── 推荐 ──${C.reset}`, disabled: true },
-      { key: 'w', label: '官方完整模型配置向导', desc: `${C.green}(推荐，支持所有提供商)${C.reset}`, value: 'wizard' },
-
-      { label: `${C.bold}── 国外模型提供商 ──${C.reset}`, disabled: true },
-      { key: 'a', label: 'OpenAI', desc: '', value: 'openai' },
-      { key: 'b', label: 'Anthropic', desc: '', value: 'anthropic' },
-      { key: 'c', label: 'Google Gemini', desc: '', value: 'google' },
-      { key: 'd', label: 'OpenRouter', desc: '聚合多家模型', value: 'openrouter' },
-      { key: 'e', label: 'GitHub Copilot', desc: '需要 Copilot 订阅', value: 'copilot' },
-      { key: 'f', label: 'xAI Grok', desc: '', value: 'xai' },
-
-      { label: `${C.bold}── 国内模型提供商 ──${C.reset}`, disabled: true },
-      { key: 'g', label: '阿里云通义千问 Qwen', desc: '', value: 'qwen' },
-      { key: 'h', label: '硅基流动 SiliconFlow', desc: '', value: 'siliconflow' },
-      { key: 'i', label: '腾讯云 Coding Plan', desc: '', value: 'tencent' },
-      { key: 'j', label: '百度千帆', desc: '', value: 'baidu' },
-      { key: 'k', label: '智谱 GLM / Z.AI', desc: '', value: 'zhipu' },
-
-      { label: `${C.bold}── 本地模型 / 自定义 API ──${C.reset}`, disabled: true },
-      { key: 'l', label: 'Ollama', desc: '本地模型，无需 API Key', value: 'ollama' },
-      { key: 'm', label: '自定义 OpenAI 兼容 API', desc: '', value: 'custom' },
-      { key: 'n', label: '自定义 Anthropic 兼容 API', desc: '', value: 'custom-anthropic' },
-      { key: 'o', label: '一万AI分享 粉丝专享 API', desc: '', value: 'yiwanai-fan' },
-
-      { label: '', disabled: true },
-      { key: '0', label: '返回', desc: '', value: 'back' },
     ],
   });
 
@@ -1000,548 +667,442 @@ async function showBackupMenu() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 模型配置处理函数 (与 oc-config.sh 完全对应)
+// AI 模型配置 (对应 oc-config.sh 的 configure_model)
+//
+// 业务逻辑全部在 oc-providers.js，本文件只负责交互。Shell 菜单调用同一个
+// 后端与同一份 provider-catalog.json，两边菜单项、按键与流程保持一致。
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function configureOpenAI() {
-  resetRenderCount();
-  console.log(`\n${C.bold}OpenAI 配置${C.reset}`);
-  console.log(`${C.yellow}获取 API Key: https://platform.openai.com/api-keys${C.reset}\n`);
+const providers = require('./oc-providers');
 
-  const apiKey = await input({ prompt: '请输入 OpenAI API Key (sk-...)', placeholder: 'sk-...' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  const modelName = await selectProviderModel('openai', 'OpenAI 模型选择', 'gpt-5.6-sol');
-  if (!modelName) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  authSetApikey('openai', apiKey);
-  registerAndSetModel(`openai/${modelName}`);
-  console.log(`\n${C.green}✅ OpenAI 已配置，活跃模型: openai/${modelName}${C.reset}\n`);
-  return true;
+// 模型模块的菜单只用 Esc 返回: select() 默认把 'q' 也当退出键，且先于搜索处理，
+// 会导致可搜索列表里无法输入 q (如搜索 qwen)，也与「q 快速配置」快捷键冲突
+function selectMenu(opts) {
+  return select({ exitKeys: ['escape'], ...opts });
 }
 
-async function configureAnthropic() {
-  resetRenderCount();
-  console.log(`\n${C.bold}Anthropic 配置${C.reset}`);
-  console.log(`${C.yellow}获取 API Key: https://console.anthropic.com/settings/keys${C.reset}\n`);
-
-  const apiKey = await input({ prompt: '请输入 Anthropic API Key (sk-ant-...)', placeholder: 'sk-ant-...' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  const modelName = await selectProviderModel('anthropic', 'Anthropic 模型选择', 'claude-sonnet-5');
-  if (!modelName) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  authSetApikey('anthropic', apiKey);
-  registerAndSetModel(`anthropic/${modelName}`);
-  console.log(`\n${C.green}✅ Anthropic 已配置，活跃模型: anthropic/${modelName}${C.reset}\n`);
-  return true;
+function printResultNotes(r) {
+  for (const n of (r.notes || [])) console.log(`${C.dim}   ${n}${C.reset}`);
 }
 
-async function configureGoogle() {
-  resetRenderCount();
-  console.log(`\n${C.bold}Google Gemini 配置${C.reset}`);
-  console.log(`${C.yellow}获取 API Key: https://aistudio.google.com/apikey${C.reset}\n`);
-
-  const apiKey = await input({ prompt: '请输入 Google AI API Key', placeholder: 'AIza...' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  const modelName = await selectProviderModel('google', 'Google Gemini 模型选择', 'gemini-2.5-pro');
-  if (!modelName) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  authSetApikey('google', apiKey);
-  registerAndSetModel(`google/${modelName}`);
-  console.log(`\n${C.green}✅ Google Gemini 已配置，活跃模型: google/${modelName}${C.reset}\n`);
-  return true;
+function pause() {
+  return input({ prompt: '按回车继续', defaultValue: '' });
 }
 
-async function configureOpenRouter() {
-  resetRenderCount();
-  console.log(`\n${C.bold}OpenRouter 配置${C.reset}`);
-  console.log(`${C.yellow}获取 API Key: https://openrouter.ai/keys${C.reset}`);
-  console.log(`${C.dim}聚合多家模型，一个 Key 可调用所有主流模型${C.reset}\n`);
-
-  const apiKey = await input({ prompt: '请输入 OpenRouter API Key', placeholder: 'sk-or-...' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  // OpenRouter 的模型 ID 本身带上游 provider 前缀 (如 moonshotai/kimi-k2.6)
-  const modelName = await selectProviderModel('openrouter', 'OpenRouter 模型选择', 'auto');
-  if (!modelName) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  authSetApikey('openrouter', apiKey);
-  registerCustomProvider('openrouter', 'https://openrouter.ai/api/v1', apiKey, modelName, modelName);
-  registerAndSetModel(`openrouter/${modelName}`);
-  console.log(`\n${C.green}✅ OpenRouter 已配置，活跃模型: openrouter/${modelName}${C.reset}\n`);
-  return true;
-}
-
-async function configureCopilot() {
-  resetRenderCount();
-  console.log(`\n${C.bold}GitHub Copilot 配置${C.reset}`);
-  console.log(`${C.yellow}需要有效的 GitHub Copilot 订阅 (Free/Pro/Business 均可)${C.reset}\n`);
-
-  console.log(`${C.cyan}启动 GitHub Copilot OAuth 登录...${C.reset}`);
-  console.log(`${C.dim}请在浏览器中打开显示的 URL，输入授权码完成登录${C.reset}\n`);
-
+function verificationHeader() {
   try {
-    await ocCmd('models', 'auth', 'login-github-copilot', '--yes');
-    console.log(`\n${C.green}✅ GitHub Copilot OAuth 认证成功${C.reset}\n`);
-
-    // 登录成功后动态发现通常可用，因此这里默认就尝试拉取一次
-    const modelName = await selectProviderModel('github-copilot', 'GitHub Copilot 模型选择', 'gpt-5.5');
-    if (modelName) {
-      registerAndSetModel(`github-copilot/${modelName}`);
-      console.log(`\n${C.green}✅ 活跃模型已设置: github-copilot/${modelName}${C.reset}\n`);
-    }
-    return true;
+    const v = providers.catalogVerification();
+    if (!v.installed) return `${C.yellow}OpenClaw 未安装${C.reset}`;
+    return v.verified
+      ? `${C.dim}OpenClaw ${v.installed} — provider 目录已在此版本核实 (${v.verifiedAt})${C.reset}`
+      : `${C.yellow}OpenClaw ${v.installed} 不在 provider 目录核实范围 (${v.verifiedWith.join(' / ')})，配置项可能有出入${C.reset}`;
   } catch (e) {
-    console.log(`\n${C.yellow}OAuth 授权已退出或失败${C.reset}\n`);
-    return false;
+    return `${C.red}provider 目录读取失败: ${e.message}${C.reset}`;
   }
 }
 
-async function configureXAI() {
-  resetRenderCount();
-  console.log(`\n${C.bold}xAI Grok 配置${C.reset}`);
-  console.log(`${C.yellow}获取 API Key: https://console.x.ai${C.reset}\n`);
-
-  const apiKey = await input({ prompt: '请输入 xAI API Key', placeholder: '' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  const modelName = await selectProviderModel('xai', 'xAI Grok 模型选择', 'grok-4.3');
-  if (!modelName) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  authSetApikey('xai', apiKey);
-  registerAndSetModel(`xai/${modelName}`);
-  console.log(`\n${C.green}✅ xAI Grok 已配置，活跃模型: xai/${modelName}${C.reset}\n`);
-  return true;
-}
-
-async function configureQwen() {
-  resetRenderCount();
-  console.log(`\n${C.bold}阿里云通义千问 Qwen 配置${C.reset}\n`);
-
-  const modeChoice = await select({
-    title: '配置方式',
+async function showModelMenu() {
+  const currentModel = getCurrentModel();
+  return selectMenu({
+    title: 'AI 模型配置',
+    header: `${currentModel ? `${C.green}当前默认模型: ${currentModel}${C.reset}` : `${C.yellow}尚未设置默认模型${C.reset}`}\n${verificationHeader()}`,
     showSearch: false,
     items: [
-      { key: 'a', label: '通过官方向导配置', desc: 'Qwen Portal OAuth', value: 'portal' },
-      { key: 'b', label: '百炼按量付费 API Key', desc: 'sk-xxx, 按 token 计费', value: 'bailian' },
-      { key: 'c', label: 'Coding Plan 套餐', desc: `${C.green}★ 推荐${C.reset}`, value: 'codingplan' },
+      { label: `${C.green}${C.bold}── 快速配置 ──${C.reset}`, disabled: true },
+      { key: 'q', label: '常用 Provider 快速配置', desc: `${C.green}(推荐)${C.reset}`, value: 'quick' },
+
+      { label: `${C.bold}── 按类别添加 ──${C.reset}`, disabled: true },
+      { key: '1', label: '官方 API (按量付费)', desc: 'OpenAI / Claude / Gemini / DeepSeek / 千问 / 智谱 ...', value: 'group:official' },
+      { key: '2', label: '订阅套餐 / Coding Plan / 账号登录', desc: '百炼 / GLM / Kimi Code / Copilot ...', value: 'group:plan' },
+      { key: '3', label: '聚合平台 / 自定义 API', desc: 'OpenRouter / 硅基流动 / OpenAI 兼容 ...', value: 'group:aggregator' },
+      { key: '4', label: '本地 / 局域网模型', desc: 'Ollama / vLLM / LM Studio', value: 'group:local' },
+
+      { label: `${C.bold}── 模型管理 ──${C.reset}`, disabled: true },
+      { key: '5', label: '查看模型与认证状态', desc: '', value: 'status' },
+      { key: '6', label: '切换默认模型', desc: '', value: 'set-default' },
+      { key: '7', label: '管理备用模型 (fallback)', desc: '', value: 'fallbacks' },
+      { key: '8', label: '连通性测试', desc: '真实请求，验证账号能否调用', value: 'probe' },
+      { key: '9', label: '删除凭据 / Provider', desc: '', value: 'remove' },
+
+      { label: `${C.bold}── 其他 ──${C.reset}`, disabled: true },
+      { key: 'w', label: '官方完整配置向导', desc: 'openclaw configure --section model', value: 'wizard' },
+      { label: '', disabled: true },
+      { key: '0', label: '返回', desc: '', value: 'back' },
     ],
   });
-  if (!modeChoice) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
+}
 
-  if (modeChoice.value === 'portal') {
-    console.log(`\n${C.cyan}启动 Qwen OAuth 授权...${C.reset}\n`);
-    try {
-      enableAuthPlugins();
-      await ocCmd('models', 'auth', 'login', '--provider', 'qwen-portal', '--set-default');
-      console.log(`\n${C.green}✅ Qwen OAuth 授权完成${C.reset}\n`);
-      return true;
-    } catch {
-      console.log(`\n${C.yellow}OAuth 授权已退出${C.reset}\n`);
+async function pickMethodFromGroup(groupId) {
+  const entries = providers.menuEntries().filter((e) => e.group === groupId);
+  if (!entries.length) return null;
+  const keys = 'abcdefghijklmnoprstuvwxyz'.split('');
+  const items = [];
+  let ki = 0;
+  for (const e of entries) {
+    for (const m of e.methods) {
+      const label = e.methods.length > 1 ? `${e.label} — ${m.label}` : e.label;
+      items.push({ key: keys[ki++], label, desc: e.plugin ? `${C.dim}需官方插件${C.reset}` : '', value: m.ref });
+    }
+  }
+  items.push({ label: '', disabled: true });
+  items.push({ key: '0', label: '返回', desc: '', value: 'back' });
+  const choice = await selectMenu({ title: entries[0].groupLabel, showSearch: true, items });
+  return choice && choice.value !== 'back' ? choice.value : null;
+}
+
+async function pickQuickMethod() {
+  const items = providers.quickEntries().map((q, i) => ({ key: String(i + 1), label: q.label, desc: '', value: q.ref }));
+  items.push({ label: '', disabled: true });
+  items.push({ key: '0', label: '返回', desc: '', value: 'back' });
+  const choice = await selectMenu({ title: '常用 Provider 快速配置', showSearch: false, items });
+  return choice && choice.value !== 'back' ? choice.value : null;
+}
+
+function printMethodIntro(f) {
+  const p = f.provider;
+  const m = f.method;
+  console.log(`\n${C.bold}${p.label}${p.methods.length > 1 ? ` — ${m.label}` : ''}${C.reset}`);
+  if (p.keyUrl) console.log(`${C.yellow}获取 Key: ${p.keyUrl}${C.reset}`);
+  const docs = providers.docsUrl(p);
+  if (docs) console.log(`${C.dim}文档: ${docs}${C.reset}`);
+  if (m.baseUrl) console.log(`${C.dim}Base URL: ${m.baseUrl}${C.reset}`);
+  if (p.note) console.log(`${C.cyan}说明: ${p.note}${C.reset}`);
+  if (m.note) console.log(`${C.cyan}说明: ${m.note}${C.reset}`);
+  if (m.keyHint) console.log(`${C.cyan}提示: ${m.keyHint}${C.reset}`);
+  if (m.unverified) console.log(`${C.yellow}未实测: ${m.unverified}${C.reset}`);
+  console.log('');
+}
+
+/** 插件缺失时征得同意后安装；返回 false 表示用户取消或安装失败 */
+async function ensurePluginInteractive(f) {
+  const pkg = f.provider.plugin;
+  if (!pkg) return true;
+  console.log(`${C.cyan}检查官方插件 ${pkg}...${C.reset}`);
+  const st = providers.pluginStatus(pkg);
+  if (st.installed) return true;
+  if (st.error) console.log(`${C.yellow}插件状态查询失败: ${st.error}${C.reset}`);
+  console.log(`${C.yellow}该 Provider 需要 OpenClaw 官方插件 ${pkg}，将通过 npm 下载安装 (版本与当前 OpenClaw 匹配)。${C.reset}`);
+  const ok = await confirm({ prompt: '是否安装该插件?', defaultYes: true });
+  if (!ok) return false;
+  console.log(`${C.cyan}正在安装 ${pkg} (可能需要 1~3 分钟)...${C.reset}`);
+  const r = providers.installPlugin(pkg);
+  if (!r.ok) {
+    console.log(`${C.red}插件安装失败: ${r.reason}${C.reset}\n`);
+    return false;
+  }
+  console.log(`${C.green}✅ 插件已安装${C.reset}`);
+  return true;
+}
+
+/**
+ * 模型选择: 精选 + 动态发现 + 手动输入 + 保持当前默认。
+ * 返回 { model } / { keep: true } / null(取消)。
+ */
+async function pickModel(providerId, curated, opts = {}) {
+  let discovered = null;
+  const current = getCurrentModel();
+  while (true) {
+    const keys = 'abcdefghijkmnoprstuvwxy'.split('');
+    let ki = 0;
+    const items = [];
+    if (curated.length) {
+      items.push({ label: `${C.bold}── 精选模型 ──${C.reset}`, disabled: true });
+      for (const m of curated) items.push({ key: keys[ki++], label: m.id, desc: `${m.tier ? `[${m.tier}] ` : ''}${m.desc || ''}`, value: `m:${m.id}` });
+    }
+    if (discovered && discovered.models.length) {
+      const known = new Set(curated.map((m) => m.id));
+      const extra = discovered.models.filter((m) => !known.has(m.id));
+      if (extra.length) {
+        const title = discovered.source === 'cache' ? `OpenClaw 模型列表 (缓存 ${discovered.cachedAt || ''})` : 'OpenClaw 当前模型列表';
+        items.push({ label: `${C.bold}── ${title} ──${C.reset}`, disabled: true });
+        for (const m of extra) items.push({ key: keys[ki++], label: m.id, desc: m.name || '', value: `m:${m.id}` });
+      }
+    }
+    items.push({ label: '', disabled: true });
+    if (!discovered && providerId) items.push({ key: 'r', label: '从 OpenClaw 获取完整模型列表', desc: '动态发现', value: 'discover' });
+    items.push({ key: 'z', label: '手动输入模型 ID', desc: '', value: 'manual' });
+    if (opts.allowKeep && current) items.push({ key: 'k', label: '保持当前默认模型不变', desc: current, value: 'keep' });
+    items.push({ key: '0', label: '取消', desc: '', value: 'back' });
+
+    const choice = await selectMenu({ title: opts.title || '选择模型', showSearch: true, items });
+    if (!choice || choice.value === 'back') return null;
+    if (choice.value === 'keep') return { keep: true };
+    if (choice.value === 'manual') {
+      const v = await input({ prompt: '请输入模型 ID (不含 provider/ 前缀)', defaultValue: opts.defaultModel || '' });
+      const t = v ? String(v).trim() : '';
+      if (!t) continue;
+      return { model: t };
+    }
+    if (choice.value === 'discover') {
+      console.log(`\n${C.cyan}正在从 OpenClaw 获取模型列表 (路由器上可能需要 10~60 秒)...${C.reset}`);
+      discovered = providers.discoverModels(providerId);
+      if (discovered.source === 'none') {
+        console.log(`${C.yellow}未获取到模型列表${discovered.reason ? `: ${discovered.reason}` : ''}，仍可使用精选列表或手动输入。${C.reset}`);
+      } else {
+        console.log(`${C.green}获取到 ${discovered.models.length} 个模型${discovered.source === 'cache' ? ' (来自缓存)' : ''}${C.reset}`);
+      }
+      if (discovered.hints.includes('auth-rejected')) {
+        console.log(`${C.yellow}⚠️  上游报告该 Provider 的认证被拒绝: Key 可能无效或无权限。${C.reset}`);
+      }
+      console.log(`${C.dim}注意: 列表只代表上游登记的模型，不代表你的账号有权调用；请用「连通性测试」确认。${C.reset}\n`);
+      continue;
+    }
+    return { model: choice.value.slice(2) };
+  }
+}
+
+async function configureApiKeyMethod(f) {
+  if (!(await ensurePluginInteractive(f))) { console.log(`${C.yellow}已取消${C.reset}\n`); return false; }
+  const key = await input({ prompt: `请输入 ${f.provider.label} API Key`, hidden: true });
+  if (!key) { console.log(`\n${C.yellow}已取消${C.reset}\n`); return false; }
+  console.log(`\n${C.cyan}正在写入凭据 (通过 OpenClaw 官方命令，Key 保存在认证库，不写入 openclaw.json)...${C.reset}`);
+  const r = providers.applyApiKey(f.ref, key, { keepDefault: true, pluginConfirmed: true });
+  if (!r.ok) {
+    console.log(`${C.red}❌ 配置失败: ${r.reason}${C.reset}\n`);
+    return false;
+  }
+  console.log(`${C.green}✅ ${f.provider.label} 凭据已保存${C.reset}`);
+  printResultNotes(r);
+  await chooseDefaultAfterAuth(f.method.provider, providers.curatedModels(f.method), f.method.defaultModel);
+  return true;
+}
+
+async function chooseDefaultAfterAuth(providerId, curated, defaultModel) {
+  const pick = await pickModel(providerId, curated, { title: `将哪个 ${providerId} 模型设为默认?`, allowKeep: true, defaultModel });
+  if (!pick || pick.keep) {
+    console.log(`${C.dim}默认模型保持为 ${getCurrentModel() || '未设置'}${C.reset}\n`);
+    return;
+  }
+  const ref = `${providerId}/${pick.model}`;
+  const s = providers.setDefault(ref);
+  if (s.ok) console.log(`${C.green}✅ 默认模型已设为 ${ref}${C.reset}\n`);
+  else console.log(`${C.red}❌ 设置默认模型失败: ${s.reason}${C.reset}\n`);
+}
+
+async function configureCustomMethod(f) {
+  const m = f.method;
+  const id = await input({ prompt: 'Provider ID (小写字母/数字/连字符)', defaultValue: m.customProviderId || (m.compatibility === 'anthropic' ? 'custom-anthropic' : 'custom') });
+  if (!id) { console.log(`${C.yellow}已取消${C.reset}\n`); return false; }
+  const baseUrl = await input({ prompt: 'API Base URL', defaultValue: m.baseUrl || m.baseUrlDefault || '', placeholder: 'https://api.example.com/v1' });
+  if (!baseUrl) { console.log(`${C.yellow}已取消${C.reset}\n`); return false; }
+  const model = await input({ prompt: '模型 ID', defaultValue: '', placeholder: m.modelHint || '' });
+  if (!model) { console.log(`${C.yellow}已取消${C.reset}\n`); return false; }
+  const image = await confirm({ prompt: '该模型支持图片输入吗?', defaultYes: false });
+  const key = await input({ prompt: m.keyOptional ? 'API Key (可留空)' : 'API Key', hidden: true, defaultValue: '' });
+  if (key === null) { console.log(`\n${C.yellow}已取消${C.reset}\n`); return false; }
+  if (!key && !m.keyOptional) {
+    const cont = await confirm({ prompt: '\n未填写 API Key，若该 Provider 已存在将沿用原 Key，否则不带 Key 接入。继续?', defaultYes: false });
+    if (!cont) return false;
+  }
+  const setDef = await confirm({ prompt: '\n设为默认模型?', defaultYes: true });
+  console.log(`\n${C.cyan}正在写入...${C.reset}`);
+  const r = providers.applyCustom({ providerId: String(id).trim(), baseUrl, model: String(model).trim(), compatibility: m.compatibility, image, keyOptional: true }, key || '', { setDefault: setDef });
+  if (!r.ok) { console.log(`${C.red}❌ 配置失败: ${r.reason}${C.reset}\n`); return false; }
+  console.log(`${C.green}✅ ${r.appended ? '已向现有 Provider 追加模型' : '自定义 Provider 已添加'}: ${r.provider}/${String(model).trim()}${C.reset}`);
+  console.log(`${C.dim}   注意: 按上游设计，自定义 Provider 的 Key 明文保存在 openclaw.json${C.reset}`);
+  printResultNotes(r);
+  console.log(`${C.dim}   当前默认模型: ${r.primary || '未设置'}${C.reset}\n`);
+  return true;
+}
+
+async function configureOllamaMethod(f) {
+  const url = await input({ prompt: 'Ollama 地址', defaultValue: f.method.baseUrlDefault || 'http://127.0.0.1:11434' });
+  if (!url) { console.log(`${C.yellow}已取消${C.reset}\n`); return false; }
+  const base = /^https?:\/\//.test(url) ? url.replace(/\/+$/, '').replace(/\/v1$/, '') : `http://${url.replace(/\/+$/, '')}`;
+  let names = [];
+  try {
+    const out = execFileSync('curl', ['-sf', '--connect-timeout', '3', '--max-time', '6', `${base}/api/tags`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    names = (JSON.parse(out).models || []).map((x) => x.name).filter(Boolean);
+    console.log(`${C.green}✅ Ollama 已连接，发现 ${names.length} 个本地模型${C.reset}`);
+  } catch {
+    console.log(`${C.yellow}⚠️  无法连接 ${base}，上游写入时也会检测，不可达将被拒绝${C.reset}`);
+  }
+  let model = '';
+  if (names.length) {
+    const items = names.map((n, i) => ({ key: String(i + 1), label: n, desc: '', value: n }));
+    items.push({ key: 'z', label: '手动输入模型名', desc: '', value: '__manual__' });
+    const c = await selectMenu({ title: 'Ollama 模型', showSearch: true, items });
+    if (!c) return false;
+    model = c.value === '__manual__' ? await input({ prompt: '模型名', defaultValue: '' }) : c.value;
+  } else {
+    model = await input({ prompt: '模型名', placeholder: 'qwen3:8b' });
+  }
+  if (!model) { console.log(`${C.yellow}已取消${C.reset}\n`); return false; }
+  const setDef = await confirm({ prompt: '设为默认模型?', defaultYes: true });
+  console.log(`\n${C.cyan}正在写入...${C.reset}`);
+  const r = providers.applyOllama(base, String(model).trim(), { setDefault: setDef });
+  if (!r.ok) { console.log(`${C.red}❌ 配置失败: ${r.reason}${C.reset}\n`); return false; }
+  console.log(`${C.green}✅ Ollama 已配置${C.reset}`);
+  printResultNotes(r);
+  console.log(`${C.dim}   当前默认模型: ${r.primary || '未设置'}${C.reset}\n`);
+  return true;
+}
+
+async function configureOAuthMethod(f) {
+  console.log(`${C.cyan}即将启动 OpenClaw 官方登录流程，请按屏幕提示在浏览器中完成授权。${C.reset}\n`);
+  const ok = await confirm({ prompt: '开始登录?', defaultYes: true });
+  if (!ok) return false;
+  const r = providers.login(f.ref);
+  if (!r.ok) { console.log(`\n${C.yellow}${r.reason}${C.reset}\n`); return false; }
+  console.log(`\n${C.green}✅ 登录完成${C.reset}`);
+  await chooseDefaultAfterAuth(f.method.provider, providers.curatedModels(f.method), '');
+  return true;
+}
+
+async function configureMethod(ref) {
+  resetRenderCount();
+  const f = providers.findMethod(ref);
+  if (!f) { console.log(`${C.red}未知的接入方式: ${ref}${C.reset}`); return false; }
+  printMethodIntro(f);
+  switch (f.method.type) {
+    case 'api-key': return configureApiKeyMethod(f);
+    case 'custom': return configureCustomMethod(f);
+    case 'local': return configureOllamaMethod(f);
+    case 'oauth': return configureOAuthMethod(f);
+    default:
+      console.log(`${C.red}不支持的接入类型: ${f.method.type}${C.reset}`);
       return false;
-    }
   }
+}
 
-  if (modeChoice.value === 'bailian') {
-    console.log(`\n${C.bold}百炼按量付费配置${C.reset}`);
-    console.log(`${C.yellow}获取 API Key: https://dashscope.console.aliyun.com/apiKey${C.reset}`);
-    console.log(`${C.dim}Base URL: https://dashscope.aliyuncs.com/compatible-mode/v1${C.reset}\n`);
-
-    const apiKey = await input({ prompt: '请输入百炼 API Key (sk-...)', placeholder: 'sk-...' });
-    if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-    const modelChoice = await select({
-      title: '百炼模型选择',
-      showSearch: false,
-      items: [
-        { key: 'a', label: 'qwen-max', desc: '千问Max 旗舰模型 (推荐)', value: 'qwen-max' },
-        { key: 'b', label: 'qwen-plus', desc: '千问Plus 均衡之选', value: 'qwen-plus' },
-        { key: 'c', label: 'qwen-flash', desc: '千问Flash 速度最快', value: 'qwen-flash' },
-        { key: 'd', label: 'qwen-turbo', desc: '千问Turbo 经济实惠', value: 'qwen-turbo' },
-        { key: 'e', label: 'qwen-long', desc: '千问Long 超长上下文', value: 'qwen-long' },
-        { key: 'f', label: 'qwen3-coder-plus', desc: '代码专用旗舰', value: 'qwen3-coder-plus' },
-        { key: 'g', label: 'qwq-plus', desc: 'QwQ推理模型', value: 'qwq-plus' },
-        { key: 'h', label: '手动输入模型名', desc: '', value: 'custom' },
-      ],
-    });
-    if (!modelChoice) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-    let modelName = modelChoice.value;
-    if (modelChoice.value === 'custom') {
-      modelName = await input({ prompt: '请输入模型名称', defaultValue: 'qwen-max' });
-      if (!modelName) return false;
-    }
-
-    authSetApikey('dashscope', apiKey);
-    registerCustomProvider('dashscope', 'https://dashscope.aliyuncs.com/compatible-mode/v1', apiKey, modelName, modelName);
-    registerAndSetModel(`dashscope/${modelName}`);
-    console.log(`\n${C.green}✅ 通义千问已配置 (按量付费)，活跃模型: dashscope/${modelName}${C.reset}\n`);
-    return true;
+async function handleModelStatus() {
+  resetRenderCount();
+  console.log(`\n${C.cyan}正在读取模型与认证状态...${C.reset}`);
+  const s = providers.status();
+  if (!s.ok) console.log(`${C.red}读取失败: ${s.reason}${C.reset}`);
+  console.log(`\n${C.bold}默认模型:${C.reset} ${s.defaultModel ? C.green + s.defaultModel : C.yellow + '未设置'}${C.reset}`);
+  console.log(`${C.bold}备用模型:${C.reset} ${s.fallbacks.length ? s.fallbacks.join(', ') : C.dim + '无' + C.reset}`);
+  console.log(`\n${C.bold}已保存的凭据:${C.reset}`);
+  if (!s.profiles.length) console.log(`  ${C.dim}无${C.reset}`);
+  for (const p of s.profiles) console.log(`  • ${p.id}  ${C.dim}(${p.provider}, ${p.type})${C.reset}`);
+  console.log(`\n${C.bold}Provider 配置:${C.reset}`);
+  if (!s.custom.length) console.log(`  ${C.dim}无${C.reset}`);
+  for (const c of s.custom) {
+    console.log(`  • ${c.id}  ${C.dim}${c.baseUrl || ''} ${c.api || ''}${c.hasKey ? ' [配置内含 Key]' : ''}${C.reset}`);
+    if (c.models.length) console.log(`    ${C.dim}模型: ${c.models.join(', ')}${C.reset}`);
   }
-
-  if (modeChoice.value === 'codingplan') {
-    console.log(`\n${C.bold}Coding Plan 套餐配置${C.reset}`);
-    console.log(`${C.yellow}订阅套餐: https://bailian.console.aliyun.com/cn-beijing/?tab=model#/efm/coding_plan${C.reset}`);
-    console.log(`${C.dim}Base URL: https://coding.dashscope.aliyuncs.com/v1${C.reset}\n`);
-
-    const apiKey = await input({ prompt: '请输入 Coding Plan 专属 API Key (sk-sp-...)', placeholder: 'sk-sp-...' });
-    if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-    const modelChoice = await select({
-      title: 'Coding Plan 模型选择',
-      showSearch: false,
-      items: [
-        { key: 'a', label: 'qwen3.5-plus', desc: 'Qwen3.5 Plus (推荐, 100万上下文)', value: 'qwen3.5-plus' },
-        { key: 'b', label: 'qwen3-coder-plus', desc: 'Qwen3 Coder Plus', value: 'qwen3-coder-plus' },
-        { key: 'c', label: 'qwen3-coder-next', desc: 'Qwen3 Coder Next', value: 'qwen3-coder-next' },
-        { key: 'd', label: 'qwen3-max-2026-01-23', desc: 'Qwen3 Max', value: 'qwen3-max-2026-01-23' },
-        { key: 'e', label: 'MiniMax-M2.5', desc: 'MiniMax M2.5', value: 'MiniMax-M2.5' },
-        { key: 'f', label: 'glm-5', desc: '智谱 GLM-5', value: 'glm-5' },
-        { key: 'g', label: 'kimi-k2.5', desc: 'Kimi K2.5', value: 'kimi-k2.5' },
-        { key: 'h', label: '手动输入模型名', desc: '', value: 'custom' },
-      ],
-    });
-    if (!modelChoice) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-    let modelName = modelChoice.value;
-    if (modelChoice.value === 'custom') {
-      modelName = await input({ prompt: '请输入模型名称', defaultValue: 'qwen3.5-plus' });
-      if (!modelName) return false;
-    }
-
-    console.log(`\n${C.cyan}正在注册 Coding Plan 提供商 (含全部可用模型)...${C.reset}`);
-    authSetApikey('bailian', apiKey);
-    registerCodingPlanProvider(apiKey);
-    registerAndSetModel(`bailian/${modelName}`);
-    console.log(`\n${C.green}✅ Coding Plan 已配置，活跃模型: bailian/${modelName}${C.reset}`);
-    console.log(`${C.dim}提示: 套餐内全部模型已注册，可随时在 WebChat 中通过 /model 切换${C.reset}\n`);
-    return true;
+  if (s.issues.length) {
+    console.log(`\n${C.yellow}${C.bold}发现问题:${C.reset}`);
+    for (const i of s.issues) console.log(`  ${C.yellow}• ${i}${C.reset}`);
   }
+  console.log(`\n${C.dim}以上是本地凭据状态，不代表调用一定成功；请用「连通性测试」确认。${C.reset}\n`);
+  await pause();
+}
 
+async function pickConfiguredModel(title) {
+  const current = getCurrentModel();
+  const refs = providers.configuredModels();
+  const items = refs.map((r, i) => ({ key: i < 9 ? String(i + 1) : undefined, label: r, desc: r === current ? `${C.green}(当前默认)${C.reset}` : '', value: r }));
+  items.push({ label: '', disabled: true });
+  items.push({ key: 'z', label: '手动输入 provider/model', desc: '', value: '__manual__' });
+  items.push({ key: '0', label: '取消', desc: '', value: 'back' });
+  const c = await selectMenu({ title, showSearch: true, items });
+  if (!c || c.value === 'back') return null;
+  if (c.value === '__manual__') {
+    const v = await input({ prompt: '模型引用 (provider/model)', defaultValue: '' });
+    return v ? String(v).trim() : null;
+  }
+  return c.value;
+}
+
+async function handleSetDefaultModel() {
+  resetRenderCount();
+  console.log(`\n${C.bold}切换默认模型${C.reset}  当前: ${C.green}${getCurrentModel() || '未设置'}${C.reset}\n`);
+  const ref = await pickConfiguredModel('选择默认模型');
+  if (!ref) return false;
+  const r = providers.setDefault(ref);
+  if (r.ok) { console.log(`\n${C.green}✅ 默认模型已切换为 ${ref}${C.reset}\n`); return true; }
+  console.log(`\n${C.red}❌ 切换失败: ${r.reason}${C.reset}\n`);
   return false;
 }
 
-async function configureSiliconFlow() {
-  resetRenderCount();
-  console.log(`\n${C.bold}硅基流动 SiliconFlow 配置${C.reset}`);
-  console.log(`${C.yellow}获取 API Key: https://cloud.siliconflow.cn/account/ak${C.reset}`);
-  console.log(`${C.yellow}国内推理平台，支持多种开源模型${C.reset}\n`);
-
-  const apiKey = await input({ prompt: '请输入 SiliconFlow API Key', placeholder: '' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  // SiliconFlow 不是 OpenClaw 内置/官方插件 provider，走 OpenAI 兼容接入，
-  // 因此 `openclaw models list --provider siliconflow` 拿不到列表，
-  // 也无法用上游 catalog 核实模型 ID。
-  //
-  // 此处不再维护硬编码清单: 原列表里的 Qwen2.5-7B/72B、Yi-1.5-34B-Chat-16K、
-  // glm-4-9b-chat 均已明显过期，而我们无法自动判断哪些仍然有效。
-  // 让用户从官方模型广场复制当前 ID 更可靠，也不会随时间腐坏。
-  console.log(`\n${C.cyan}请从官方模型广场复制模型 ID:${C.reset}`);
-  console.log(`  ${C.cyan}https://cloud.siliconflow.cn/models${C.reset}`);
-  console.log(`${C.dim}格式形如 deepseek-ai/DeepSeek-V3.2；Pro/ 前缀的模型仅支持充值余额支付${C.reset}\n`);
-
-  const modelName = await input({ prompt: '请输入模型 ID', placeholder: 'deepseek-ai/DeepSeek-V3.2' });
-  if (!modelName) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  authSetApikey('siliconflow', apiKey);
-  registerCustomProvider('siliconflow', 'https://api.siliconflow.cn/v1', apiKey, modelName, modelName);
-  registerAndSetModel(`siliconflow/${modelName}`);
-  console.log(`\n${C.green}✅ SiliconFlow 已配置，活跃模型: siliconflow/${modelName}${C.reset}\n`);
-  return true;
-}
-
-async function configureTencent() {
-  resetRenderCount();
-  console.log(`\n${C.bold}腾讯云大模型 Coding Plan 套餐配置${C.reset}`);
-  console.log(`${C.yellow}订阅/管理套餐: https://hunyuan.cloud.tencent.com/#/app/subscription${C.reset}`);
-  console.log(`${C.dim}文档: https://cloud.tencent.com/document/product/1772/128947${C.reset}\n`);
-
-  const apiKey = await input({ prompt: '请输入 Coding Plan API Key (sk-sp-...)', placeholder: 'sk-sp-...' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  const modelChoice = await select({
-    title: '腾讯云 Coding Plan 模型选择',
-    showSearch: false,
-    items: [
-      { key: 'a', label: 'tc-code-latest', desc: '自动路由 (推荐)', value: 'tc-code-latest' },
-      { key: 'b', label: 'hunyuan-t1', desc: '混元 T1 深度推理', value: 'hunyuan-t1' },
-      { key: 'c', label: 'hunyuan-2.0-thinking', desc: '混元 2.0 Thinking', value: 'hunyuan-2.0-thinking' },
-      { key: 'd', label: 'hunyuan-turbos', desc: '混元 TurboS 旗舰', value: 'hunyuan-turbos' },
-      { key: 'e', label: 'hunyuan-2.0-instruct', desc: '混元 2.0 Instruct', value: 'hunyuan-2.0-instruct' },
-      { key: 'f', label: 'glm-5', desc: '智谱 GLM-5', value: 'glm-5' },
-      { key: 'g', label: 'kimi-k2.5', desc: 'Moonshot Kimi K2.5', value: 'kimi-k2.5' },
-      { key: 'h', label: 'minimax-m2.5', desc: 'MiniMax M2.5', value: 'minimax-m2.5' },
-      { key: 'z', label: '手动输入模型名', desc: '', value: 'custom' },
-    ],
-  });
-  if (!modelChoice) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  let modelName = modelChoice.value;
-  if (modelChoice.value === 'custom') {
-    modelName = await input({ prompt: '请输入模型名称', defaultValue: 'tc-code-latest' });
-    if (!modelName) return false;
-  }
-
-  console.log(`\n${C.cyan}正在注册腾讯云 Coding Plan 提供商 (含全部套餐模型)...${C.reset}`);
-  authSetApikey('lkeap', apiKey);
-  registerLkeapCodingPlanProvider(apiKey);
-  registerAndSetModel(`lkeap/${modelName}`);
-  console.log(`\n${C.green}✅ 腾讯云 Coding Plan 已配置，活跃模型: lkeap/${modelName}${C.reset}`);
-  console.log(`${C.dim}提示: 套餐内全部模型已注册，可随时在 WebChat 中通过 /model 切换${C.reset}\n`);
-  return true;
-}
-
-async function configureBaidu() {
-  resetRenderCount();
-  console.log(`\n${C.bold}百度千帆大模型配置${C.reset}`);
-  console.log(`${C.yellow}获取 API Key: https://console.bce.baidu.com/qianfan/ais/console/onlineService${C.reset}\n`);
-
-  const apiKey = await input({ prompt: '请输入百度千帆 API Key (Access Token)', placeholder: '' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  const modelName = await selectProviderModel('qianfan', '百度千帆模型选择', 'ernie-5.0-thinking-preview');
-  if (!modelName) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  authSetApikey('qianfan', apiKey);
-  registerCustomProvider('qianfan', 'https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop', apiKey, modelName, modelName);
-  registerAndSetModel(`qianfan/${modelName}`);
-  console.log(`\n${C.green}✅ 百度千帆已配置，活跃模型: qianfan/${modelName}${C.reset}\n`);
-  return true;
-}
-
-async function configureZhipu() {
-  resetRenderCount();
-  console.log(`\n${C.bold}智谱 GLM / Z.AI 配置${C.reset}\n`);
-
-  const methodChoice = await select({
-    title: '认证方式',
-    showSearch: false,
-    items: [
-      { key: 'a', label: 'CN (open.bigmodel.cn)', desc: `${C.green}★ 国内用户推荐${C.reset}`, value: 'cn' },
-      { key: 'b', label: 'Coding-Plan-CN', desc: '智谱 Coding Plan 套餐', value: 'coding-plan-cn' },
-      { key: 'c', label: 'Global (api.z.ai)', desc: '全球版', value: 'global' },
-      { key: 'd', label: '手动输入', desc: '', value: 'custom' },
-    ],
-  });
-  if (!methodChoice) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  let baseUrl = 'https://open.bigmodel.cn/api/paas/v4';
-  switch (methodChoice.value) {
-    case 'cn':
-      console.log(`${C.yellow}获取 API Key: https://open.bigmodel.cn/api-key${C.reset}`);
-      break;
-    case 'coding-plan-cn':
-      baseUrl = 'https://open.bigmodel.cn/api/coding/paas/v4';
-      console.log(`${C.yellow}Coding Plan 套餐 API Key${C.reset}`);
-      break;
-    case 'global':
-      baseUrl = 'https://api.z.ai/api/paas/v4';
-      console.log(`${C.yellow}全球版 API Key${C.reset}`);
-      break;
-    case 'custom':
-      const customUrl = await input({ prompt: '请输入 Base URL', defaultValue: 'https://open.bigmodel.cn/api/paas/v4' });
-      if (customUrl) baseUrl = customUrl;
-      break;
-  }
-
-  const apiKey = await input({ prompt: '请输入智谱 API Key', placeholder: '' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  const modelName = await selectProviderModel('zai', '智谱 GLM 模型选择', 'glm-5.2');
-  if (!modelName) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  // 智谱 GLM 使用原生 zai provider (OpenClaw 内置支持)
-  registerCustomProvider('zai', baseUrl, apiKey, modelName, modelName, 128000, 4096);
-  authSetApikey('zai', apiKey);
-  registerAndSetModel(`zai/${modelName}`);
-  console.log(`\n${C.green}✅ 智谱 GLM 已配置，活跃模型: zai/${modelName}${C.reset}`);
-  console.log(`${C.dim}   Base URL: ${baseUrl}${C.reset}\n`);
-  return true;
-}
-
-async function configureOllama() {
-  resetRenderCount();
-  console.log(`\n${C.bold}Ollama 本地模型配置${C.reset}`);
-  console.log(`${C.yellow}Ollama 在本地或局域网运行大模型，无需 API Key${C.reset}`);
-  console.log(`${C.yellow}安装 Ollama: https://ollama.com${C.reset}\n`);
-
-  const modeChoice = await select({
-    title: '连接方式',
-    showSearch: false,
-    items: [
-      { key: 'a', label: '本机运行', desc: 'localhost:11434', value: 'local' },
-      { key: 'b', label: '局域网其他设备', desc: '', value: 'remote' },
-    ],
-  });
-  if (!modeChoice) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  let ollamaUrl = 'http://127.0.0.1:11434';
-  if (modeChoice.value === 'remote') {
-    const host = await input({ prompt: 'Ollama 地址 (如 192.168.1.100:11434)', placeholder: '' });
-    if (!host) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-    ollamaUrl = host.startsWith('http') ? host : `http://${host}`;
-    ollamaUrl = ollamaUrl.replace(/\/v1$/, '').replace(/\/$/, '');
-  }
-
-  // 尝试检测 Ollama 连通性
-  console.log(`\n${C.cyan}检测 Ollama 连通性...${C.reset}`);
-  let modelList = [];
-  try {
-    const stdout = execSync(`curl -sf --connect-timeout 3 --max-time 5 ${ollamaUrl}/api/tags`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    const data = JSON.parse(stdout);
-    modelList = data.models || [];
-    console.log(`${C.green}✅ Ollama 已连接${C.reset}`);
-  } catch {
-    console.log(`${C.yellow}⚠️  无法连接 Ollama (${ollamaUrl})${C.reset}`);
-    const continueAnyway = await confirm({ prompt: '仍要继续配置?', defaultYes: false });
-    if (!continueAnyway) return false;
-  }
-
-  let modelName = '';
-  if (modelList.length > 0) {
-    const items = modelList.map((m, i) => ({
-      key: String(i + 1),
-      label: m.name,
-      desc: '',
-      value: m.name,
-    }));
-    items.push({ key: 'm', label: '手动输入模型名', desc: '', value: 'custom' });
-
-    const modelChoice = await select({
-      title: '已安装的模型',
+async function handleFallbacks() {
+  let changed = false;
+  while (true) {
+    resetRenderCount();
+    const l = providers.fallbacks('list');
+    const list = l.ok ? l.fallbacks : [];
+    if (!l.ok) console.log(`${C.red}读取备用模型失败: ${l.reason}${C.reset}`);
+    const c = await selectMenu({
+      title: '管理备用模型 (fallback)',
+      header: `${C.dim}默认模型不可用时按顺序尝试: ${list.length ? list.join(' → ') : '无'}${C.reset}`,
       showSearch: false,
-      items,
+      items: [
+        { key: '1', label: '添加备用模型', desc: '', value: 'add' },
+        { key: '2', label: '移除备用模型', desc: '', value: 'remove' },
+        { key: '3', label: '清空备用模型', desc: '', value: 'clear' },
+        { label: '', disabled: true },
+        { key: '0', label: '返回', desc: '', value: 'back' },
+      ],
     });
+    if (!c || c.value === 'back') return changed;
+    let r = null;
+    if (c.value === 'add') {
+      const ref = await pickConfiguredModel('选择要添加的备用模型');
+      if (ref) r = providers.fallbacks('add', ref);
+    } else if (c.value === 'remove') {
+      if (!list.length) { console.log(`${C.yellow}没有备用模型${C.reset}`); continue; }
+      const p = await selectMenu({ title: '移除哪个?', showSearch: false, items: list.map((x, i) => ({ key: String(i + 1), label: x, value: x })) });
+      if (p) r = providers.fallbacks('remove', p.value);
+    } else if (c.value === 'clear') {
+      if (await confirm({ prompt: '确认清空所有备用模型?', defaultYes: false })) r = providers.fallbacks('clear');
+    }
+    if (r) {
+      if (r.ok) { console.log(`${C.green}✅ 已更新${C.reset}`); changed = true; }
+      else console.log(`${C.red}❌ 失败: ${r.reason}${C.reset}`);
+    }
+  }
+}
 
-    if (!modelChoice) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-    modelName = modelChoice.value === 'custom'
-      ? await input({ prompt: '请输入模型名称', defaultValue: 'llama3.3' })
-      : modelChoice.value;
+async function handleProbe() {
+  resetRenderCount();
+  console.log(`\n${C.cyan}正在读取已配置的 Provider...${C.reset}`);
+  const s = providers.status();
+  const ids = [...new Set([...s.profiles.map((p) => p.provider), ...s.custom.map((c) => c.id)])].sort();
+  if (!ids.length) { console.log(`${C.yellow}尚未配置任何 Provider${C.reset}\n`); await pause(); return; }
+  const c = await selectMenu({ title: '测试哪个 Provider?', showSearch: true, items: ids.map((id, i) => ({ key: i < 9 ? String(i + 1) : undefined, label: id, value: id })) });
+  if (!c) return;
+  console.log(`\n${C.yellow}连通性测试会向 ${c.value} 发送真实请求 (每个模型约 8 个 token)，可能产生少量费用或触发限流。${C.reset}`);
+  if (!(await confirm({ prompt: '继续?', defaultYes: true }))) return;
+  console.log(`${C.cyan}测试中 (约 5~60 秒)...${C.reset}`);
+  const r = providers.probe(c.value);
+  if (!r.ok) {
+    console.log(`${C.red}❌ 无法完成测试: ${r.reason}${C.reset}\n`);
   } else {
-    modelName = await input({ prompt: '请输入模型名称', placeholder: 'llama3.3, qwen2.5...' });
+    for (const x of r.results) {
+      const color = x.status === 'ok' ? C.green : C.red;
+      console.log(`  ${color}${x.status === 'ok' ? '✅' : '❌'} ${x.model || c.value}  ${x.statusText}${x.latencyMs ? ` (${x.latencyMs} ms)` : ''}${C.reset}`);
+      if (x.error) console.log(`     ${C.dim}${x.error}${C.reset}`);
+    }
+    console.log('');
   }
-
-  if (!modelName) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  // 注册 Ollama 提供商
-  const config = readConfig();
-  if (!config.models) config.models = {};
-  if (!config.models.providers) config.models.providers = {};
-  config.models.mode = 'merge';
-  config.models.providers['ollama'] = {
-    baseUrl: ollamaUrl,
-    apiKey: 'ollama-local',
-    api: 'ollama',
-    models: [{
-      id: modelName,
-      name: modelName,
-      reasoning: false,
-      input: ['text'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 128000,
-      maxTokens: 32000,
-    }]
-  };
-  writeConfig(config);
-
-  authSetApikey('ollama', 'ollama-local', 'ollama:local');
-  registerAndSetModel(`ollama/${modelName}`);
-  console.log(`\n${C.green}✅ Ollama 已配置，活跃模型: ollama/${modelName}${C.reset}`);
-  console.log(`${C.cyan}   Ollama 地址: ${ollamaUrl}${C.reset}\n`);
-  return true;
+  await pause();
 }
 
-async function configureCustomAPI() {
+async function handleRemove() {
   resetRenderCount();
-  console.log(`\n${C.bold}自定义 OpenAI 兼容 API 配置${C.reset}`);
-  console.log(`${C.yellow}支持任何兼容 OpenAI API 格式的服务商${C.reset}\n`);
-
-  const baseUrl = await input({ prompt: 'API Base URL (如 https://api.example.com/v1)', placeholder: '' });
-  if (!baseUrl) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  const apiKey = await input({ prompt: 'API Key', placeholder: 'sk-...' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  const modelName = await input({ prompt: '模型名称', placeholder: '' });
-  if (!modelName) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  authSetApikey('openai-compatible', apiKey, 'openai-compatible:manual');
-  registerCustomProvider('openai-compatible', baseUrl.replace(/\/$/, ''), apiKey, modelName, modelName);
-  registerAndSetModel(`openai-compatible/${modelName}`);
-  console.log(`\n${C.green}✅ 自定义 API 已配置，活跃模型: openai-compatible/${modelName}${C.reset}\n`);
-  return true;
-}
-
-async function configureCustomAnthropic() {
-  resetRenderCount();
-  console.log(`\n${C.bold}自定义 Anthropic 兼容 API 配置${C.reset}`);
-  console.log(`${C.yellow}支持任何兼容 Anthropic Messages API 格式的服务商${C.reset}\n`);
-
-  const baseUrl = await input({ prompt: 'API Base URL', placeholder: 'https://api.anthropic.com' });
-  if (!baseUrl) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  const apiKey = await input({ prompt: 'API Key', placeholder: 'sk-ant-...' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  // 复用 anthropic 的精选预设作为候选 (第三方兼容服务通常沿用同名模型 ID)，
-  // 但保留手动输入出口: 自建/代理服务的模型名可能完全不同。
-  const modelName = await selectProviderModel('anthropic', '模型选择 (可手动输入)', 'claude-sonnet-5');
-  if (!modelName) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  const config = readConfig();
-  if (!config.models) config.models = {};
-  if (!config.models.providers) config.models.providers = {};
-  config.models.mode = 'merge';
-  config.models.providers['anthropic-compatible'] = {
-    baseUrl: baseUrl.replace(/\/$/, ''),
-    apiKey: apiKey,
-    api: 'anthropic-messages',
-    models: [{
-      id: modelName,
-      name: modelName,
-      reasoning: false,
-      input: ['text', 'image'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 200000,
-      maxTokens: 16000,
-    }]
-  };
-  writeConfig(config);
-
-  authSetApikey('anthropic-compatible', apiKey, 'anthropic-compatible:manual');
-  registerAndSetModel(`anthropic-compatible/${modelName}`);
-  console.log(`\n${C.green}✅ 自定义 Anthropic API 已配置，活跃模型: anthropic-compatible/${modelName}${C.reset}\n`);
-  return true;
-}
-
-async function configureYiwanAIFanAPI() {
-  resetRenderCount();
-  const providerName = 'yiwanai';
-  const baseUrl = 'https://api.910501.xyz/v1';
-  const modelName = 'gpt-5.5';
-
-  console.log(`\n${C.bold}一万AI分享 粉丝专享 API 配置${C.reset}`);
-  console.log(`${C.yellow}OpenAI 兼容模式；Base URL 和模型已内置，只需要填写 API Key。${C.reset}`);
-  console.log(`${C.dim}Base URL: ${baseUrl}${C.reset}`);
-  console.log(`${C.dim}Model: ${modelName}${C.reset}\n`);
-
-  const apiKey = await input({ prompt: 'API Key', placeholder: 'sk-...' });
-  if (!apiKey) { console.log(`${C.yellow}已取消${C.reset}`); return false; }
-
-  authSetApikey(providerName, apiKey, `${providerName}:fan`);
-  registerCustomProvider(providerName, baseUrl, apiKey, modelName, modelName, 1000000, 32000);
-  const config = readConfig();
-  const provider = config.models?.providers?.[providerName];
-  if (provider?.models?.[0]) {
-    provider.models[0].reasoning = true;
+  const s = providers.status();
+  const items = [];
+  for (const p of s.profiles) items.push({ label: `删除凭据 ${p.id}`, desc: `${p.provider} / ${p.type}`, value: `auth:${p.id}` });
+  for (const c of s.custom) items.push({ label: `删除 Provider 配置 ${c.id}`, desc: c.baseUrl, value: `prov:${c.id}` });
+  if (!items.length) { console.log(`\n${C.yellow}没有可删除的凭据或 Provider${C.reset}\n`); await pause(); return false; }
+  items.forEach((it, i) => { if (i < 9) it.key = String(i + 1); });
+  items.push({ label: '', disabled: true });
+  items.push({ key: '0', label: '返回', desc: '', value: 'back' });
+  const c = await selectMenu({ title: '删除凭据 / Provider', showSearch: true, items });
+  if (!c || c.value === 'back') return false;
+  const [kind, id] = [c.value.slice(0, c.value.indexOf(':')), c.value.slice(c.value.indexOf(':') + 1)];
+  console.log(`\n${C.red}将删除 ${id}${kind === 'prov' ? ' 的 Provider 配置及其模型白名单 (默认模型使用中时会拒绝)' : ' 这条凭据'}，此操作不可撤销。${C.reset}`);
+  if (!(await confirm({ prompt: '确认删除?', defaultYes: false }))) return false;
+  const r = kind === 'auth' ? providers.removeAuth(id) : providers.removeProvider(id);
+  if (r.ok) {
+    console.log(`${C.green}✅ 已删除${C.reset}`);
+    if (r.removedFallbacks && r.removedFallbacks.length) console.log(`${C.dim}   同时移除了备用模型: ${r.removedFallbacks.join(', ')}${C.reset}`);
+    console.log('');
+    return true;
   }
-  writeConfig(config);
-  registerAndSetModel(`${providerName}/${modelName}`);
-  console.log(`\n${C.green}✅ 一万AI分享粉丝专享 API 已配置，活跃模型: ${providerName}/${modelName}${C.reset}\n`);
-  return true;
+  console.log(`${C.red}❌ 删除失败: ${r.reason}${C.reset}\n`);
+  return false;
 }
 
 async function launchWizard() {
@@ -1558,115 +1119,43 @@ async function launchWizard() {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 模型配置处理入口
-// ═══════════════════════════════════════════════════════════════════════════
-
 async function handleModelConfig() {
   while (true) {
     const choice = await showModelMenu();
     if (!choice || choice.value === 'back') break;
-
     resetRenderCount();
-    let configured = false;
-
-    switch (choice.value) {
-      case 'wizard': {
-        const ok = await launchWizard();
-        if (ok) await askRestart();
-        break;
+    let changed = false;
+    try {
+      if (choice.value === 'quick') {
+        const ref = await pickQuickMethod();
+        if (ref) changed = await configureMethod(ref);
+      } else if (choice.value.startsWith('group:')) {
+        const ref = await pickMethodFromGroup(choice.value.slice(6));
+        if (ref) changed = await configureMethod(ref);
+      } else if (choice.value === 'status') {
+        await handleModelStatus();
+      } else if (choice.value === 'set-default') {
+        changed = await handleSetDefaultModel();
+      } else if (choice.value === 'fallbacks') {
+        changed = await handleFallbacks();
+      } else if (choice.value === 'probe') {
+        await handleProbe();
+      } else if (choice.value === 'remove') {
+        changed = await handleRemove();
+      } else if (choice.value === 'wizard') {
+        changed = await launchWizard();
       }
-      case 'openai': configured = await configureOpenAI(); break;
-      case 'anthropic': configured = await configureAnthropic(); break;
-      case 'google': configured = await configureGoogle(); break;
-      case 'openrouter': configured = await configureOpenRouter(); break;
-      case 'copilot': configured = await configureCopilot(); break;
-      case 'xai': configured = await configureXAI(); break;
-      case 'qwen': configured = await configureQwen(); break;
-      case 'siliconflow': configured = await configureSiliconFlow(); break;
-      case 'tencent': configured = await configureTencent(); break;
-      case 'baidu': configured = await configureBaidu(); break;
-      case 'zhipu': configured = await configureZhipu(); break;
-      case 'ollama': configured = await configureOllama(); break;
-      case 'custom': configured = await configureCustomAPI(); break;
-      case 'custom-anthropic': configured = await configureCustomAnthropic(); break;
-      case 'yiwanai-fan': configured = await configureYiwanAIFanAPI(); break;
+    } catch (e) {
+      console.log(`${C.red}操作失败: ${e.message}${C.reset}\n`);
+      await pause();
     }
-
-    if (configured) await askRestart();
+    if (changed) await askRestart();
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 设置活动模型 (对应 set_active_model)
-// ═══════════════════════════════════════════════════════════════════════════
-
+// 主菜单「设置活动模型」入口与模型管理中的「切换默认模型」共用实现
 async function handleSetActiveModel() {
-  resetRenderCount();
-  console.log(`\n${C.bold}设定当前活跃模型${C.reset}\n`);
-
-  const currentModel = getCurrentModel();
-  console.log(`  当前活跃模型: ${C.green}${C.bold}${currentModel || '未设置'}${C.reset}\n`);
-
-  try {
-    const result = await ocCmd('models', 'list', '--json');
-    const modelsData = JSON.parse(result.stdout);
-    const models = modelsData.models || [];
-
-    if (models.length > 0) {
-      const items = models.map((m, i) => ({
-        key: String(i + 1),
-        label: m.key,
-        desc: m.name && m.name !== m.key ? `(${m.name})` : '',
-        value: m.key,
-        selected: m.key === currentModel,
-      }));
-
-      items.push({ label: '', disabled: true });
-      items.push({ key: 'm', label: '手动输入模型 ID', desc: '', value: 'manual' });
-      items.push({ key: '0', label: '返回', desc: '', value: 'back' });
-
-      const choice = await select({
-        title: '已配置的模型',
-        showSearch: true,
-        items,
-      });
-
-      if (!choice || choice.value === 'back') return;
-
-      if (choice.value === 'manual') {
-        const manualModel = await input({
-          prompt: '请输入模型 ID',
-          placeholder: 'openai/gpt-5.6-sol',
-          defaultValue: currentModel || '',
-        });
-        if (manualModel) {
-          registerAndSetModel(manualModel);
-          console.log(`\n${C.green}✅ 活跃模型已设为: ${manualModel}${C.reset}\n`);
-          await askRestart();
-        }
-      } else {
-        registerAndSetModel(choice.value);
-        console.log(`\n${C.green}✅ 活跃模型已切换为: ${choice.value}${C.reset}\n`);
-        await askRestart();
-      }
-    } else {
-      console.log(`${C.yellow}尚未配置任何模型。${C.reset}`);
-      console.log(`${C.yellow}请先通过「配置 AI 模型提供商」添加模型。${C.reset}\n`);
-
-      const manualModel = await input({
-        prompt: '直接输入模型 ID 设置 (留空返回)',
-        defaultValue: '',
-      });
-      if (manualModel) {
-        registerAndSetModel(manualModel);
-        console.log(`\n${C.green}✅ 活跃模型已设为: ${manualModel}${C.reset}\n`);
-        await askRestart();
-      }
-    }
-  } catch (e) {
-    console.log(`${C.red}获取模型列表失败: ${e.message}${C.reset}\n`);
-  }
+  if (await handleSetDefaultModel()) await askRestart();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1744,7 +1233,8 @@ async function handleChannels() {
         const cfg = readConfig();
         if (!cfg.channels) cfg.channels = {};
         if (!cfg.channels.discord) cfg.channels.discord = {};
-        cfg.channels.discord.botToken = token;
+        cfg.channels.discord.token = token;
+        delete cfg.channels.discord.botToken;
         writeConfig(cfg);
 
         console.log(`\n${C.green}✅ Discord Bot Token 已保存${C.reset}\n`);
@@ -1972,7 +1462,7 @@ async function handleShowConfig() {
   console.log(`${C.green}│${C.reset}  ${C.bold}渠道配置状态${C.reset}`);
 
   const tgToken = jsonGet('channels.telegram.botToken');
-  const dcToken = jsonGet('channels.discord.botToken');
+  const dcToken = jsonGet('channels.discord.token') || jsonGet('channels.discord.botToken');
   const fsAppId = jsonGet('channels.feishu.appId');
   const skToken = jsonGet('channels.slack.botToken');
   const qqAppId = jsonGet('channels.qqbot.appId');
@@ -2368,7 +1858,6 @@ async function handleReset() {
           jsonSet('gateway.port', 18789);
           jsonSet('gateway.bind', 'lan');
           jsonSet('gateway.mode', 'local');
-          jsonSet('gateway.controlUi.allowInsecureAuth', true);
           jsonSet('gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback', true);
           jsonSet('gateway.tailscale.mode', 'off');
           console.log(`\n${C.green}✅ 网关设置已恢复默认${C.reset}\n`);
@@ -2380,16 +1869,22 @@ async function handleReset() {
         console.log(`\n${C.red}⚠️  将清除: 所有模型配置、API Key、活跃模型设置${C.reset}\n`);
         const ok = await confirm({ prompt: '确认清除所有模型配置?', defaultYes: false });
         if (ok) {
+          // 凭据保存在上游认证库 (state/openclaw.sqlite)，通过官方 logout 逐条注销；
+          // auth-profiles.json 已在 2026.9.x 退役，不再读写
+          const failed = [];
+          for (const p of providers.status().profiles) {
+            const r = providers.removeAuth(p.id);
+            if (!r.ok) failed.push(`${p.id}: ${r.reason}`);
+          }
           const cfg = readConfig();
           delete cfg.models;
           if (cfg.agents?.defaults?.model) delete cfg.agents.defaults.model;
           if (cfg.agents?.defaults?.models) delete cfg.agents.defaults.models;
           writeConfig(cfg);
-          // 清除 auth-profiles.json
-          const authFile = `${OC_STATE_DIR}/agents/main/agent/auth-profiles.json`;
-          try {
-            fs.writeFileSync(authFile, JSON.stringify({ version: 1, profiles: {}, usageStats: {} }, null, 2));
-          } catch {}
+          if (failed.length) {
+            console.log(`\n${C.yellow}以下凭据未能注销:${C.reset}`);
+            failed.forEach((f) => console.log(`  ${C.yellow}• ${f}${C.reset}`));
+          }
           console.log(`\n${C.green}✅ 模型配置已清除${C.reset}`);
           console.log(`${C.yellow}请通过菜单 [1] 重新配置 AI 模型${C.reset}\n`);
           await askRestart();
@@ -2447,7 +1942,6 @@ async function handleReset() {
         jsonSet('gateway.mode', 'local');
         jsonSet('gateway.auth.mode', 'token');
         jsonSet('gateway.auth.token', newToken);
-        jsonSet('gateway.controlUi.allowInsecureAuth', true);
         jsonSet('gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback', true);
         jsonSet('gateway.tailscale.mode', 'off');
         jsonSet('acp.dispatch.enabled', false);
@@ -2642,7 +2136,8 @@ async function main() {
   }
 }
 
-main().catch(e => {
+// 菜单引擎读过 stdin 后它仍处于 flowing 状态，不暂停的话进程不会退出，Web 终端会停在「再见」
+main().then(() => process.stdin.pause()).catch(e => {
   if (e instanceof ConfigParseError) {
     // 配置损坏: 给出可直接执行的恢复步骤，而不是丢一句解析错误了事
     console.error(`\n${C.red}配置读取失败:${C.reset} ${e.message}\n`);

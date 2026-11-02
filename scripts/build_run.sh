@@ -85,8 +85,10 @@ install_files() {
 	cp "$PKG_DIR/root/usr/share/openclaw/oc-config.sh" "$dest/usr/share/openclaw/"
 	chmod +x "$dest/usr/share/openclaw/oc-config.sh"
 	cp "$PKG_DIR/root/usr/share/openclaw/"*.js "$dest/usr/share/openclaw/"
-	# 精选模型预设 (shell 与 JS 共读的唯一数据源)
-	cp "$PKG_DIR/root/usr/share/openclaw/model-presets.json" "$dest/usr/share/openclaw/"
+	# 共享数据文件: *.js 通配不会带上 .json，必须逐个显式复制
+	# provider-catalog.json: Shell 与 JS 菜单共读的提供商目录; openclaw-compat.json: 通道与已验证版本
+	cp "$PKG_DIR/root/usr/share/openclaw/provider-catalog.json" "$dest/usr/share/openclaw/"
+	cp "$PKG_DIR/root/usr/share/openclaw/openclaw-compat.json" "$dest/usr/share/openclaw/"
 
 	# Web PTY UI (recursive copy)
 	cp -r "$PKG_DIR/root/usr/share/openclaw/ui" "$dest/usr/share/openclaw/"

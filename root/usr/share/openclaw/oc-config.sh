@@ -133,109 +133,6 @@ oc_doctor_as_openclaw() {
 	fi
 }
 
-# ── 精选模型预设 (与 JS 侧共读同一份数据源) ──
-# 见 root/usr/share/openclaw/model-presets.json。
-# 三层架构: 精选预设 -> 动态发现 (openclaw models list --provider) -> 手动输入。
-OC_MODEL_PRESETS="${OC_MODEL_PRESETS:-/usr/share/openclaw/model-presets.json}"
-OC_MODEL_DISCOVERY_TIMEOUT="${OC_MODEL_DISCOVERY_TIMEOUT:-6}"
-
-# oc_preset_models <provider> — 输出该 provider 的精选模型，每行 "model<TAB>desc"
-oc_preset_models() {
-	[ -f "$OC_MODEL_PRESETS" ] || return 0
-	[ -x "$NODE_BIN" ] || return 0
-	_OC_PP="$1" _OC_PF="$OC_MODEL_PRESETS" "$NODE_BIN" -e '
-		const fs=require("fs");
-		try{
-			const j=JSON.parse(fs.readFileSync(process.env._OC_PF,"utf8"));
-			const p=(j.providers||{})[process.env._OC_PP];
-			if(!p||!Array.isArray(p.models))process.exit(0);
-			for(const m of p.models){
-				if(m&&m.model)console.log(m.model+"\t"+(m.desc||""));
-			}
-		}catch(e){}
-	' 2>/dev/null
-}
-
-# oc_discover_models <provider> — 动态发现当前可用模型 (失败/超时输出空)
-# 上游行为: models list --all 不是各 provider 的超集，必须按 provider 查询；
-# 未安装对应插件时返回 "No models found."，属正常情况。
-# 带 timeout: 避免在 OpenWrt 上把菜单卡死。
-oc_discover_models() {
-	local provider="$1"
-	[ -x "$NODE_BIN" ] || return 0
-	[ -n "$OC_ENTRY" ] || return 0
-	timeout "$OC_MODEL_DISCOVERY_TIMEOUT" "$NODE_BIN" "$OC_ENTRY" models list \
-		--provider "$provider" --plain 2>/dev/null \
-		| sed -n "s|^${provider}/||p" \
-		| grep -v '^[[:space:]]*$'
-}
-
-# oc_pick_model <provider> <默认模型> — 交互式选择模型，结果写入全局 OC_PICKED_MODEL
-# 菜单: 精选预设 (数字) / d 动态发现 / m 手动输入
-oc_pick_model() {
-	local provider="$1" fallback="$2"
-	local list idx line model desc choice
-	OC_PICKED_MODEL=""
-
-	list="$(oc_preset_models "$provider")"
-
-	echo ""
-	if [ -n "$list" ]; then
-		echo -e "  ${CYAN}精选模型:${NC}"
-		idx=1
-		printf '%s\n' "$list" | while IFS="$(printf '\t')" read -r model desc; do
-			[ -n "$model" ] || continue
-			echo -e "    ${CYAN}${idx})${NC} ${model}${desc:+  — ${desc}}"
-			idx=$((idx + 1))
-		done
-	else
-		echo -e "  ${YELLOW}该 Provider 无内置精选列表${NC}"
-	fi
-	echo -e "    ${CYAN}d)${NC} 从 OpenClaw 获取完整模型列表"
-	echo -e "    ${CYAN}m)${NC} 手动输入模型 ID"
-	echo ""
-	prompt_with_default "请选择模型" "1" choice
-
-	case "$choice" in
-		d|D)
-			echo -e "  ${CYAN}正在获取模型列表...${NC}"
-			local found
-			found="$(oc_discover_models "$provider")"
-			if [ -z "$found" ]; then
-				echo -e "  ${YELLOW}未获取到模型列表 (可能需先安装插件或配置 API Key)${NC}"
-				prompt_with_default "请手动输入模型 ID" "$fallback" OC_PICKED_MODEL
-			else
-				echo ""
-				idx=1
-				printf '%s\n' "$found" | while read -r model; do
-					[ -n "$model" ] || continue
-					echo -e "    ${CYAN}${idx})${NC} ${model}"
-					idx=$((idx + 1))
-				done
-				echo ""
-				prompt_with_default "请输入序号或直接输入模型 ID" "1" choice
-				case "$choice" in
-					''|*[!0-9]*) OC_PICKED_MODEL="$choice" ;;
-					*) OC_PICKED_MODEL="$(printf '%s\n' "$found" | sed -n "${choice}p")" ;;
-				esac
-			fi
-			;;
-		m|M)
-			prompt_with_default "请输入模型 ID" "$fallback" OC_PICKED_MODEL
-			;;
-		''|*[!0-9]*)
-			# 非数字直接当作手动输入的模型 ID
-			OC_PICKED_MODEL="$choice"
-			;;
-		*)
-			OC_PICKED_MODEL="$(printf '%s\n' "$list" | sed -n "${choice}p" | cut -f1)"
-			;;
-	esac
-
-	[ -n "$OC_PICKED_MODEL" ] || OC_PICKED_MODEL="$fallback"
-	[ -n "$OC_PICKED_MODEL" ]
-}
-
 # ── JSON 读写 (使用 Node.js) ──
 json_get() {
 	if [ ! -f "$CONFIG_FILE" ]; then echo ""; return; fi
@@ -266,8 +163,6 @@ oc_schema_type_for_key() {
 		gateway.channelStaleEventThresholdMinutes|gateway.channelMaxRestartsPerHour)
 			echo "number" ;;
 		acp.dispatch.enabled|update.checkOnStart|plugins.enabled)
-			echo "boolean" ;;
-		gateway.controlUi.allowInsecureAuth)
 			echo "boolean" ;;
 		gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback)
 			echo "boolean" ;;
@@ -609,190 +504,6 @@ ensure_qqbot_plugin_allowed() {
 	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 }
 
-# ── 模型认证: 将 API Key 写入 auth-profiles.json (而非 openclaw.json) ──
-# 用法: auth_set_apikey <provider> <api_key> [profile_id]
-# 例: auth_set_apikey openai sk-xxx
-#     auth_set_apikey anthropic sk-ant-xxx
-#     auth_set_apikey openai-compatible sk-xxx custom:manual
-auth_set_apikey() {
-	local provider="$1" api_key="$2" profile_id="${3:-${1}:manual}"
-	local auth_dir="${OC_STATE_DIR}/agents/main/agent"
-	local auth_file="${auth_dir}/auth-profiles.json"
-	mkdir -p "$auth_dir"
-	chown -R openclaw:openclaw "${OC_STATE_DIR}/agents" 2>/dev/null || true
-	_AP_PROVIDER="$provider" _AP_KEY="$api_key" _AP_PROFILE="$profile_id" "$NODE_BIN" -e "
-		const fs=require('fs'),f=process.env._AP_FILE||'${auth_file}';
-		let d={version:1,profiles:{},usageStats:{}};
-		try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){}
-		if(!d.profiles)d.profiles={};
-		d.profiles[process.env._AP_PROFILE]={
-			type:'api_key',
-			provider:process.env._AP_PROVIDER,
-			key:process.env._AP_KEY
-		};
-		fs.writeFileSync(f,JSON.stringify(d,null,2));
-	" 2>/dev/null
-	chown openclaw:openclaw "$auth_file" 2>/dev/null || true
-}
-
-# ── GitHub Copilot Token 写入 auth-profiles.json (type:token) ──
-# GitHub Copilot 使用 token 类型而非 api_key，OpenClaw 会自动兑换 Copilot session token
-# 用法: auth_set_copilot_token <github_token>
-auth_set_copilot_token() {
-	local github_token="$1"
-	local auth_dir="${OC_STATE_DIR}/agents/main/agent"
-	local auth_file="${auth_dir}/auth-profiles.json"
-	mkdir -p "$auth_dir"
-	chown -R openclaw:openclaw "${OC_STATE_DIR}/agents" 2>/dev/null || true
-	_AP_TOKEN="$github_token" "$NODE_BIN" -e "
-		const fs=require('fs'),f='${auth_file}';
-		let d={version:1,profiles:{},usageStats:{}};
-		try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){}
-		if(!d.profiles)d.profiles={};
-		d.profiles['github-copilot:github']={
-			type:'token',
-			provider:'github-copilot',
-			token:process.env._AP_TOKEN
-		};
-		fs.writeFileSync(f,JSON.stringify(d,null,2));
-	" 2>/dev/null
-	chown openclaw:openclaw "$auth_file" 2>/dev/null || true
-}
-
-# ── 注册模型到 agents.defaults.models 并设为默认 ──
-# 用法: register_and_set_model <model_id>
-# 例: register_and_set_model openai/gpt-5.2
-#     register_and_set_model anthropic/claude-sonnet-4
-# 注意: 模型 ID 可能含 "." (如 gpt-5.2)，不能用 json_set (以 . 分割路径)
-register_and_set_model() {
-	local model_id="$1"
-	_RSM_MID="$model_id" "$NODE_BIN" -e "
-		const fs=require('fs');
-		let d={};
-		try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
-		if(!d.agents)d.agents={};
-		if(!d.agents.defaults)d.agents.defaults={};
-		if(!d.agents.defaults.models)d.agents.defaults.models={};
-		if(!d.agents.defaults.model)d.agents.defaults.model={};
-		const mid=process.env._RSM_MID;
-		d.agents.defaults.models[mid]={};
-		d.agents.defaults.model.primary=mid;
-		fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
-	" 2>/dev/null
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-}
-
-# ── 注册自定义提供商 (需要 baseUrl 的 OpenAI 兼容提供商) ──
-# 用法: register_custom_provider <provider_name> <base_url> <api_key> <model_id> [model_display_name] [context_window] [max_tokens]
-# 例: register_custom_provider dashscope https://dashscope.aliyuncs.com/compatible-mode/v1 sk-xxx qwen-max "Qwen Max"
-# 例: register_custom_provider bailian https://coding.dashscope.aliyuncs.com/v1 sk-sp-xxx qwen3.5-plus "qwen3.5-plus" 1000000 65536
-register_custom_provider() {
-	local provider_name="$1" base_url="$2" api_key="$3" model_id="$4" model_display="${5:-$4}"
-	local ctx_window="${6:-128000}" max_tok="${7:-32000}"
-	_RCP_PROV="$provider_name" _RCP_URL="$base_url" _RCP_KEY="$api_key" _RCP_MID="$model_id" _RCP_MNAME="$model_display" _RCP_CTX="$ctx_window" _RCP_MAXTOK="$max_tok" "$NODE_BIN" -e "
-		const fs=require('fs');
-		let d={};
-		try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
-		if(!d.models)d.models={};
-		if(!d.models.providers)d.models.providers={};
-		d.models.mode='merge';
-		const prov=process.env._RCP_PROV;
-		d.models.providers[prov]={
-			baseUrl:process.env._RCP_URL,
-			apiKey:process.env._RCP_KEY,
-			api:'openai-completions',
-			models:[{
-				id:process.env._RCP_MID,
-				name:process.env._RCP_MNAME,
-				reasoning:false,
-				input:['text','image'],
-				cost:{input:0,output:0,cacheRead:0,cacheWrite:0},
-				contextWindow:parseInt(process.env._RCP_CTX)||128000,
-				maxTokens:parseInt(process.env._RCP_MAXTOK)||32000
-			}]
-		};
-		fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
-	" 2>/dev/null
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-}
-
-# ── 注册 Coding Plan 提供商 (多模型批量注册) ──
-# 用法: register_codingplan_provider <api_key>
-# 按阿里云官方文档注册 bailian 提供商，包含所有 Coding Plan 套餐支持的模型
-register_codingplan_provider() {
-	local api_key="$1"
-	_RCP_KEY="$api_key" "$NODE_BIN" -e "
-		const fs=require('fs');
-		let d={};
-		try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
-		if(!d.models)d.models={};
-		if(!d.models.providers)d.models.providers={};
-		d.models.mode='merge';
-		d.models.providers['bailian']={
-			baseUrl:'https://coding.dashscope.aliyuncs.com/v1',
-			apiKey:process.env._RCP_KEY,
-			api:'openai-completions',
-			models:[
-				{id:'qwen3.5-plus',name:'qwen3.5-plus',reasoning:false,input:['text','image'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:1000000,maxTokens:65536},
-				{id:'qwen3-coder-plus',name:'qwen3-coder-plus',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:1000000,maxTokens:65536},
-				{id:'qwen3-coder-next',name:'qwen3-coder-next',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:262144,maxTokens:65536},
-				{id:'qwen3-max-2026-01-23',name:'qwen3-max-2026-01-23',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:262144,maxTokens:65536},
-				{id:'MiniMax-M2.5',name:'MiniMax-M2.5',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:204800,maxTokens:131072},
-				{id:'glm-5',name:'glm-5',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:202752,maxTokens:16384},
-				{id:'glm-4.7',name:'glm-4.7',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:202752,maxTokens:16384},
-				{id:'kimi-k2.5',name:'kimi-k2.5',reasoning:false,input:['text','image'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:262144,maxTokens:32768}
-			]
-		};
-		if(!d.agents)d.agents={};
-		if(!d.agents.defaults)d.agents.defaults={};
-		if(!d.agents.defaults.models)d.agents.defaults.models={};
-		['qwen3.5-plus','qwen3-coder-plus','qwen3-coder-next','qwen3-max-2026-01-23','MiniMax-M2.5','glm-5','glm-4.7','kimi-k2.5'].forEach(m=>{
-			d.agents.defaults.models['bailian/'+m]={};
-		});
-		fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
-	" 2>/dev/null
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-}
-
-# ── 注册腾讯云 Coding Plan 提供商 (多模型批量注册) ──
-# 用法: register_lkeap_codingplan_provider <api_key>
-# 按腾讯云官方文档 (https://cloud.tencent.com/document/product/1772/128949) 注册
-# provider name: lkeap, Base URL: https://api.lkeap.cloud.tencent.com/coding/v3
-register_lkeap_codingplan_provider() {
-	local api_key="$1"
-	_RCP_KEY="$api_key" "$NODE_BIN" -e "
-		const fs=require('fs');
-		let d={};
-		try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
-		if(!d.models)d.models={};
-		if(!d.models.providers)d.models.providers={};
-		d.models.mode='merge';
-		d.models.providers['lkeap']={
-			baseUrl:'https://api.lkeap.cloud.tencent.com/coding/v3',
-			apiKey:process.env._RCP_KEY,
-			api:'openai-completions',
-			models:[
-				{id:'tc-code-latest',name:'Auto (智能匹配最优模型)',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:128000,maxTokens:8192},
-				{id:'hunyuan-2.0-instruct',name:'Tencent HY 2.0 Instruct',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:128000,maxTokens:16000},
-				{id:'hunyuan-2.0-thinking',name:'Tencent HY 2.0 Think',reasoning:true,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:128000,maxTokens:64000},
-				{id:'hunyuan-t1',name:'Hunyuan-T1',reasoning:true,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:32000,maxTokens:64000},
-				{id:'hunyuan-turbos',name:'Hunyuan-TurboS',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:32000,maxTokens:16000},
-				{id:'minimax-m2.5',name:'MiniMax-M2.5',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:204800,maxTokens:131072},
-				{id:'kimi-k2.5',name:'Kimi-K2.5',reasoning:false,input:['text','image'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:262144,maxTokens:32768},
-				{id:'glm-5',name:'GLM-5',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:202752,maxTokens:8192}
-			]
-		};
-		if(!d.agents)d.agents={};
-		if(!d.agents.defaults)d.agents.defaults={};
-		if(!d.agents.defaults.models)d.agents.defaults.models={};
-		['tc-code-latest','hunyuan-2.0-instruct','hunyuan-2.0-thinking','hunyuan-t1','hunyuan-turbos','minimax-m2.5','kimi-k2.5','glm-5'].forEach(m=>{
-			d.agents.defaults.models['lkeap/'+m]={};
-		});
-		fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
-	" 2>/dev/null
-	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-}
-
 # ── 辅助函数 ──
 
 # 清理输入: 去除 ANSI 转义序列、不可见字符，只保留 ASCII 可打印字符
@@ -907,7 +618,8 @@ show_current_config() {
 	fi
 
 	local tg_token=$(json_get channels.telegram.botToken)
-	local dc_token=$(json_get channels.discord.botToken)
+	local dc_token=$(json_get channels.discord.token)
+	[ -n "$dc_token" ] || dc_token=$(json_get channels.discord.botToken)
 	local fs_appid=$(json_get channels.feishu.appId)
 	local sk_token=$(json_get channels.slack.botToken)
 	local qq_appid=$(json_get channels.qqbot.appId)
@@ -956,680 +668,418 @@ show_current_config() {
 	echo -e "  内存: ${mem_total} MB"
 }
 
-# ══════════════════════════════════════════════════════════════
-# 配置 AI 模型
-# ══════════════════════════════════════════════════════════════
-configure_model() {
-	while true; do
-		local configured=0
-		echo ""
-		echo -e "  ${BOLD}🤖 配置 AI 模型和提供商${NC}"
-		echo ""
-		echo -e "  ${GREEN}${BOLD}🌟 ── 推荐 ──${NC}"
-		echo -e "  ${CYAN}w)${NC} 🌟 官方完整模型配置向导  ${GREEN}(推荐，支持所有提供商)${NC}"
-		echo ""
-		echo -e "  ${BOLD}🌍 ── 国外模型提供商 ──${NC}"
-		echo -e "  ${CYAN}a)${NC} OpenAI"
-		echo -e "  ${CYAN}b)${NC} Anthropic"
-		echo -e "  ${CYAN}c)${NC} Google Gemini"
-		echo -e "  ${CYAN}d)${NC} OpenRouter (聚合多家模型)"
-		echo -e "  ${CYAN}e)${NC} GitHub Copilot (需要 Copilot 订阅)"
-		echo -e "  ${CYAN}f)${NC} xAI Grok"
-		echo ""
-		echo -e "  ${BOLD}🇨🇳 ── 国内模型提供商 ──${NC}"
-		echo -e "  ${CYAN}g)${NC} 阿里云通义千问 Qwen"
-		echo -e "  ${CYAN}h)${NC} 硅基流动 SiliconFlow"
-		echo -e "  ${CYAN}i)${NC} 腾讯云 Coding Plan"
-		echo -e "  ${CYAN}j)${NC} 百度千帆"
-		echo -e "  ${CYAN}k)${NC} 智谱 GLM / Z.AI"
-		echo ""
-		echo -e "  ${BOLD}🏠 ── 本地模型 / 自定义 API ──${NC}"
-		echo -e "  ${CYAN}l)${NC} Ollama (本地模型，无需 API Key)"
-		echo -e "  ${CYAN}m)${NC} 自定义 OpenAI 兼容 API"
-		echo -e "  ${CYAN}n)${NC} 自定义 Anthropic 兼容 API"
-		echo -e "  ${CYAN}o)${NC} 一万AI分享 粉丝专享 API"
-		echo ""
-		echo -e "  ${CYAN}q)${NC} 返回"
-		echo ""
-		prompt_with_default "请选择" "w" choice
+# ══════════════════════════════════════════════════════════════════════════
+# AI 模型配置 (传统菜单)
+#
+# 业务逻辑全部在 oc-providers.js，与交互式菜单共用同一后端和同一份
+# provider-catalog.json；本节只做文本菜单。菜单项、按键与流程和
+# oc-config-interactive.js 的 showModelMenu / handleModelConfig 一一对应。
+# Key 通过管道 (printf 为 shell 内建，不产生进程参数) 交给后端，不进入 argv。
+# ══════════════════════════════════════════════════════════════════════════
 
+OC_PROVIDERS_JS="${OC_PROVIDERS_JS:-/usr/share/openclaw/oc-providers.js}"
+
+ocp() {
+	OC_ENTRY="$OC_ENTRY" NODE_BIN="$NODE_BIN" NODE_BASE="$NODE_BASE" OC_GLOBAL="$OC_GLOBAL" OC_DATA="$OC_DATA" \
+		OPENCLAW_STATE_DIR="$OC_STATE_DIR" OPENCLAW_CONFIG_PATH="$CONFIG_FILE" \
+		"$NODE_BIN" "$OC_PROVIDERS_JS" "$@"
+}
+
+# 取 TSV 输出中某个键的值: ocp_field <输出> <键>
+ocp_field() {
+	printf '%s\n' "$1" | awk -F '\t' -v k="$2" '$1==k { sub(/^[^\t]*\t/, ""); print; exit }'
+}
+
+# 打印后端结果 (OK / ERROR / NOTE / PRIMARY)，成功返回 0
+ocp_report() {
+	local out="$1" ok_msg="$2"
+	if printf '%s\n' "$out" | grep -q '^OK'; then
+		[ -n "$ok_msg" ] && echo -e "  ${GREEN}✅ ${ok_msg}${NC}"
+		printf '%s\n' "$out" | awk -F '\t' '$1=="NOTE" { print "     " $2 }'
+		return 0
+	fi
+	local reason
+	reason=$(ocp_field "$out" ERROR)
+	echo -e "  ${RED}❌ 失败: ${reason:-未知错误}${NC}"
+	return 1
+}
+
+# 读取密钥 (不回显)，结果写入 OC_SECRET
+oc_read_secret() {
+	printf "  ${CYAN}%s:${NC} " "$1" >&2
+	stty -echo 2>/dev/null
+	IFS= read -r OC_SECRET
+	stty echo 2>/dev/null
+	echo "" >&2
+	OC_SECRET=$(printf '%s' "$OC_SECRET" | tr -cd ' -~' | sed 's/\[[0-9;]*[a-zA-Z~]//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+}
+
+oc_current_model() {
+	json_get agents.defaults.model.primary 2>/dev/null
+}
+
+# 从列表中按序号选择: oc_pick_from_list <多行列表> <标题>，结果写入 OC_PICKED (取消为空)
+oc_pick_from_list() {
+	local list="$1" title="$2" idx=1 line choice
+	OC_PICKED=""
+	echo ""
+	[ -n "$title" ] && echo -e "  ${BOLD}${title}${NC}"
+	printf '%s\n' "$list" | while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		echo -e "  ${CYAN}${idx})${NC} ${line}"
+		idx=$((idx + 1))
+	done
+	echo -e "  ${CYAN}0)${NC} 返回"
+	echo ""
+	prompt_with_default "请选择" "0" choice
+	case "$choice" in
+		''|0|*[!0-9]*) return 1 ;;
+	esac
+	OC_PICKED=$(printf '%s\n' "$list" | sed '/^$/d' | sed -n "${choice}p")
+	[ -n "$OC_PICKED" ]
+}
+
+oc_verify_line() {
+	local out installed verified with
+	out=$(ocp verify 2>/dev/null)
+	installed=$(ocp_field "$out" installed)
+	verified=$(ocp_field "$out" verified)
+	with=$(ocp_field "$out" verifiedWith)
+	if [ -z "$installed" ]; then
+		echo -e "  ${YELLOW}OpenClaw 未安装${NC}"
+	elif [ "$verified" = "1" ]; then
+		echo -e "  ${DIM}OpenClaw ${installed} — provider 目录已在此版本核实${NC}"
+	else
+		echo -e "  ${YELLOW}OpenClaw ${installed} 不在 provider 目录核实范围 (${with})，配置项可能有出入${NC}"
+	fi
+}
+
+# 选择接入方式: oc_pick_method <group|quick>，结果写入 OC_REF
+oc_pick_method() {
+	local group="$1" rows labels
+	OC_REF=""
+	if [ "$group" = "quick" ]; then
+		rows=$(ocp quick 2>/dev/null)
+		labels=$(printf '%s\n' "$rows" | awk -F '\t' '{ print $2 }')
+		oc_pick_from_list "$labels" "常用 Provider 快速配置" || return 1
+		OC_REF=$(printf '%s\n' "$rows" | awk -F '\t' -v l="$OC_PICKED" '$2==l { print $1; exit }')
+	else
+		rows=$(ocp menu 2>/dev/null | awk -F '\t' -v g="$group" '$1==g')
+		labels=$(printf '%s\n' "$rows" | awk -F '\t' '{ print $4 ($6 != "" ? "  (需官方插件)" : "") }')
+		oc_pick_from_list "$labels" "$(printf '%s\n' "$rows" | head -1 | cut -f2)" || return 1
+		OC_REF=$(printf '%s\n' "$rows" | awk -F '\t' -v l="$OC_PICKED" '($4 ($6 != "" ? "  (需官方插件)" : ""))==l { print $3; exit }')
+	fi
+	[ -n "$OC_REF" ]
+}
+
+# 模型选择 (精选 + 动态发现 + 手动 + 保持当前)，结果写入 OC_PICKED_MODEL；
+# 返回 0 选中 / 1 取消 / 2 保持当前默认
+oc_pick_provider_model() {
+	local ref="$1" provider="$2" out discover="" rows choice cur
+	cur=$(oc_current_model)
+	OC_PICKED_MODEL=""
+	while true; do
+		out=$(ocp models "$ref" $discover 2>/dev/null)
+		rows=$(printf '%s\n' "$out" | awk -F '\t' '$1=="M" { printf "%s\t%s\n", $2, $4 }')
+		echo ""
+		echo -e "  ${BOLD}将哪个 ${provider} 模型设为默认?${NC}"
+		local idx=1
+		printf '%s\n' "$rows" | while IFS="$(printf '\t')" read -r mid mdesc; do
+			[ -n "$mid" ] || continue
+			echo -e "  ${CYAN}${idx})${NC} ${mid}${mdesc:+  ${DIM}${mdesc}${NC}}"
+			idx=$((idx + 1))
+		done
+		if [ -n "$discover" ]; then
+			local disc hint reason
+			disc=$(printf '%s\n' "$out" | awk -F '\t' '$1=="DISCOVERY" { print $2 }')
+			hint=$(printf '%s\n' "$out" | awk -F '\t' '$1=="DISCOVERY" { print $3 }')
+			reason=$(printf '%s\n' "$out" | awk -F '\t' '$1=="DISCOVERY" { print $4 }')
+			[ "$disc" = "none" ] && echo -e "  ${YELLOW}未获取到模型列表${reason:+: ${reason}}${NC}"
+			case "$hint" in *auth-rejected*) echo -e "  ${YELLOW}⚠️  上游报告该 Provider 的认证被拒绝: Key 可能无效或无权限${NC}" ;; esac
+			echo -e "  ${DIM}注意: 列表只代表上游登记的模型，不代表账号有权调用；请用「连通性测试」确认${NC}"
+		else
+			echo -e "  ${CYAN}r)${NC} 从 OpenClaw 获取完整模型列表"
+		fi
+		echo -e "  ${CYAN}z)${NC} 手动输入模型 ID"
+		[ -n "$cur" ] && echo -e "  ${CYAN}k)${NC} 保持当前默认模型不变 (${cur})"
+		echo -e "  ${CYAN}0)${NC} 取消"
+		echo ""
+		prompt_with_default "请选择" "k" choice
 		case "$choice" in
-			w)
+			r|R) echo -e "  ${CYAN}正在获取模型列表 (路由器上可能需要 10~60 秒)...${NC}"; discover="--discover"; continue ;;
+			z|Z) prompt_with_default "请输入模型 ID (不含 provider/ 前缀)" "$(ocp_field "$out" DEFAULT)" OC_PICKED_MODEL; [ -n "$OC_PICKED_MODEL" ] && return 0; continue ;;
+			k|K) [ -n "$cur" ] && return 2; continue ;;
+			0|'') return 1 ;;
+			*[!0-9]*) continue ;;
+			*) OC_PICKED_MODEL=$(printf '%s\n' "$rows" | sed '/^$/d' | sed -n "${choice}p" | cut -f1); [ -n "$OC_PICKED_MODEL" ] && return 0 ;;
+		esac
+	done
+}
+
+oc_choose_default_after_auth() {
+	local ref="$1" provider="$2" rc
+	oc_pick_provider_model "$ref" "$provider"; rc=$?
+	if [ $rc -eq 0 ]; then
+		ocp_report "$(ocp set-default "${provider}/${OC_PICKED_MODEL}")" "默认模型已设为 ${provider}/${OC_PICKED_MODEL}"
+	else
+		echo -e "  ${DIM}默认模型保持为 $(oc_current_model)${NC}"
+	fi
+}
+
+oc_configure_method() {
+	local ref="$1" info type label plugin provider out ps
+	info=$(ocp info "$ref" 2>/dev/null)
+	type=$(ocp_field "$info" type)
+	label=$(ocp_field "$info" label)
+	provider=$(ocp_field "$info" provider)
+	plugin=$(ocp_field "$info" plugin)
+	[ -n "$type" ] || { echo -e "  ${RED}未知的接入方式: ${ref}${NC}"; return 1; }
+
+	echo ""
+	echo -e "  ${BOLD}${label} — $(ocp_field "$info" method)${NC}"
+	[ -n "$(ocp_field "$info" keyUrl)" ] && echo -e "  ${YELLOW}获取 Key: $(ocp_field "$info" keyUrl)${NC}"
+	[ -n "$(ocp_field "$info" docs)" ] && echo -e "  ${DIM}文档: $(ocp_field "$info" docs)${NC}"
+	[ -n "$(ocp_field "$info" baseUrl)" ] && echo -e "  ${DIM}Base URL: $(ocp_field "$info" baseUrl)${NC}"
+	[ -n "$(ocp_field "$info" note)" ] && echo -e "  ${CYAN}说明: $(ocp_field "$info" note)${NC}"
+	[ -n "$(ocp_field "$info" keyHint)" ] && echo -e "  ${CYAN}提示: $(ocp_field "$info" keyHint)${NC}"
+	[ -n "$(ocp_field "$info" unverified)" ] && echo -e "  ${YELLOW}未实测: $(ocp_field "$info" unverified)${NC}"
+	echo ""
+
+	case "$type" in
+		api-key)
+			if [ -n "$plugin" ]; then
+				echo -e "  ${CYAN}检查官方插件 ${plugin}...${NC}"
+				ps=$(ocp plugin-status "$ref" 2>/dev/null)
+				if printf '%s\n' "$ps" | grep -q '^MISSING'; then
+					echo -e "  ${YELLOW}该 Provider 需要 OpenClaw 官方插件 ${plugin}，将通过 npm 下载安装 (版本与当前 OpenClaw 匹配)。${NC}"
+					prompt_with_default "是否安装该插件? (yes/no)" "yes" _yn
+					[ "$_yn" = "yes" ] || { echo -e "  ${YELLOW}已取消${NC}"; return 1; }
+					echo -e "  ${CYAN}正在安装 ${plugin} (可能需要 1~3 分钟)...${NC}"
+					ocp_report "$(ocp install-plugin "$ref")" "插件已安装" || return 1
+				elif printf '%s\n' "$ps" | grep -q '^ERROR'; then
+					echo -e "  ${YELLOW}插件状态查询失败: $(ocp_field "$ps" ERROR)${NC}"
+				fi
+			fi
+			oc_read_secret "请输入 ${label} API Key (输入不回显)"
+			[ -n "$OC_SECRET" ] || { echo -e "  ${YELLOW}已取消${NC}"; return 1; }
+			echo -e "  ${CYAN}正在写入凭据 (通过 OpenClaw 官方命令，Key 保存在认证库，不写入 openclaw.json)...${NC}"
+			out=$(printf '%s\n' "$OC_SECRET" | ocp apply-key "$ref" --keep-default --install-plugin)
+			OC_SECRET=""
+			ocp_report "$out" "${label} 凭据已保存" || return 1
+			oc_choose_default_after_auth "$ref" "$provider"
+			return 0
+			;;
+		custom)
+			local cid curl cmodel cimg cdef compat extra=""
+			compat=$(ocp_field "$info" compatibility)
+			local def_id="custom"; [ "$compat" = "anthropic" ] && def_id="custom-anthropic"
+			[ -n "$provider" ] && def_id="$provider"
+			prompt_with_default "Provider ID (小写字母/数字/连字符)" "$def_id" cid
+			prompt_with_default "API Base URL" "$(ocp_field "$info" baseUrl)" curl
+			[ -n "$curl" ] || { echo -e "  ${YELLOW}已取消${NC}"; return 1; }
+			prompt_with_default "模型 ID$( [ -n "$(ocp_field "$info" defaultModel)" ] && echo " (如 $(ocp_field "$info" defaultModel))")" "" cmodel
+			[ -n "$cmodel" ] || { echo -e "  ${YELLOW}已取消${NC}"; return 1; }
+			prompt_with_default "该模型支持图片输入吗? (yes/no)" "no" cimg
+			[ "$cimg" = "yes" ] && extra="--image"
+			oc_read_secret "API Key (输入不回显，可留空: Provider 已存在时沿用原 Key)"
+			prompt_with_default "设为默认模型? (yes/no)" "yes" cdef
+			[ "$cdef" = "yes" ] && extra="$extra --set-default"
+			echo -e "  ${CYAN}正在写入...${NC}"
+			out=$(printf '%s\n' "$OC_SECRET" | ocp apply-custom --id "$cid" --base-url "$curl" --model "$cmodel" --compat "$compat" --key-optional $extra)
+			OC_SECRET=""
+			ocp_report "$out" "自定义 Provider 已保存: ${cid}/${cmodel}" || return 1
+			echo -e "  ${DIM}注意: 按上游设计，自定义 Provider 的 Key 明文保存在 openclaw.json${NC}"
+			echo -e "  ${DIM}当前默认模型: $(oc_current_model)${NC}"
+			return 0
+			;;
+		local)
+			local ourl omodel odef tags
+			prompt_with_default "Ollama 地址" "$(ocp_field "$info" baseUrl)" ourl
+			case "$ourl" in http://*|https://*) ;; *) ourl="http://${ourl}" ;; esac
+			ourl="${ourl%/}"; ourl="${ourl%/v1}"
+			tags=$(curl -sf --connect-timeout 3 --max-time 6 "${ourl}/api/tags" 2>/dev/null | "$NODE_BIN" -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{for(const m of JSON.parse(s).models||[])if(m.name)console.log(m.name)}catch{}})' 2>/dev/null)
+			if [ -n "$tags" ]; then
+				echo -e "  ${GREEN}✅ Ollama 已连接${NC}"
+				if oc_pick_from_list "$tags" "已安装的模型 (0 返回后可手动输入)"; then omodel="$OC_PICKED"; fi
+			else
+				echo -e "  ${YELLOW}⚠️  无法连接 ${ourl}，上游写入时也会检测，不可达将被拒绝${NC}"
+			fi
+			[ -n "$omodel" ] || prompt_with_default "模型名" "" omodel
+			[ -n "$omodel" ] || { echo -e "  ${YELLOW}已取消${NC}"; return 1; }
+			prompt_with_default "设为默认模型? (yes/no)" "yes" odef
+			echo -e "  ${CYAN}正在写入...${NC}"
+			if [ "$odef" = "yes" ]; then out=$(ocp apply-ollama --base-url "$ourl" --model "$omodel" --set-default)
+			else out=$(ocp apply-ollama --base-url "$ourl" --model "$omodel"); fi
+			ocp_report "$out" "Ollama 已配置" || return 1
+			echo -e "  ${DIM}当前默认模型: $(oc_current_model)${NC}"
+			return 0
+			;;
+		oauth)
+			echo -e "  ${CYAN}即将启动 OpenClaw 官方登录流程，请按屏幕提示在浏览器中完成授权。${NC}"
+			prompt_with_default "开始登录? (yes/no)" "yes" _yn
+			[ "$_yn" = "yes" ] || return 1
+			# 不能接管道: 登录流程需要直接使用终端
+			ocp login "$ref" || { echo -e "  ${YELLOW}登录未完成${NC}"; return 1; }
+			echo -e "  ${GREEN}✅ 登录完成${NC}"
+			oc_choose_default_after_auth "$ref" "$provider"
+			return 0
+			;;
+	esac
+	echo -e "  ${RED}不支持的接入类型: ${type}${NC}"
+	return 1
+}
+
+oc_model_status() {
+	local out
+	echo -e "  ${CYAN}正在读取模型与认证状态...${NC}"
+	out=$(ocp status 2>/dev/null)
+	printf '%s\n' "$out" | grep -q '^ERROR' && echo -e "  ${RED}读取失败: $(ocp_field "$out" ERROR)${NC}"
+	echo ""
+	echo -e "  ${BOLD}默认模型:${NC} $(ocp_field "$out" DEFAULT)"
+	echo -e "  ${BOLD}备用模型:${NC} $(printf '%s\n' "$out" | awk -F '\t' '$1=="FALLBACK" { printf "%s%s", sep, $2; sep=", " }')"
+	echo ""
+	echo -e "  ${BOLD}已保存的凭据:${NC}"
+	printf '%s\n' "$out" | awk -F '\t' '$1=="PROFILE" { printf "    • %s  (%s, %s)\n", $2, $3, $4; n++ } END { if (!n) print "    无" }'
+	echo ""
+	echo -e "  ${BOLD}Provider 配置:${NC}"
+	printf '%s\n' "$out" | awk -F '\t' '$1=="PROVIDER" { printf "    • %s  %s %s%s\n", $2, $3, $4, ($5=="key" ? " [配置内含 Key]" : ""); if ($6 != "") printf "      模型: %s\n", $6; n++ } END { if (!n) print "    无" }'
+	if printf '%s\n' "$out" | grep -q '^ISSUE'; then
+		echo ""
+		echo -e "  ${YELLOW}${BOLD}发现问题:${NC}"
+		printf '%s\n' "$out" | awk -F '\t' '$1=="ISSUE" { print "    • " $2 }'
+	fi
+	echo ""
+	echo -e "  ${DIM}以上是本地凭据状态，不代表调用一定成功；请用「连通性测试」确认。${NC}"
+	prompt_with_default "按回车继续" "" _
+}
+
+# 从已登记模型中选择 (或手动输入)，结果写入 OC_PICKED
+oc_pick_configured_model() {
+	local list
+	list=$(ocp configured-models 2>/dev/null)
+	list=$(printf '%s\n%s\n' "$list" "[手动输入 provider/model]" | sed '/^$/d')
+	oc_pick_from_list "$list" "$1" || return 1
+	if [ "$OC_PICKED" = "[手动输入 provider/model]" ]; then
+		prompt_with_default "模型引用 (provider/model)" "" OC_PICKED
+	fi
+	[ -n "$OC_PICKED" ]
+}
+
+set_active_model() {
+	echo ""
+	echo -e "  ${BOLD}切换默认模型${NC}  当前: ${GREEN}$(oc_current_model)${NC}"
+	oc_pick_configured_model "选择默认模型" || return 1
+	ocp_report "$(ocp set-default "$OC_PICKED")" "默认模型已切换为 ${OC_PICKED}" && ask_restart
+}
+
+oc_manage_fallbacks() {
+	local out list choice changed=0
+	while true; do
+		out=$(ocp fallbacks list 2>/dev/null)
+		list=$(printf '%s\n' "$out" | awk -F '\t' '$1=="F" { print $2 }')
+		echo ""
+		echo -e "  ${BOLD}管理备用模型 (fallback)${NC}"
+		echo -e "  ${DIM}默认模型不可用时按顺序尝试: $(printf '%s\n' "$list" | sed '/^$/d' | awk '{ printf "%s%s", sep, $0; sep=" → " } END { if (!NR) printf "无" }')${NC}"
+		echo -e "  ${CYAN}1)${NC} 添加备用模型"
+		echo -e "  ${CYAN}2)${NC} 移除备用模型"
+		echo -e "  ${CYAN}3)${NC} 清空备用模型"
+		echo -e "  ${CYAN}0)${NC} 返回"
+		prompt_with_default "请选择" "0" choice
+		case "$choice" in
+			1) oc_pick_configured_model "选择要添加的备用模型" && ocp_report "$(ocp fallbacks add "$OC_PICKED")" "已更新" && changed=1 ;;
+			2) oc_pick_from_list "$list" "移除哪个?" && ocp_report "$(ocp fallbacks remove "$OC_PICKED")" "已更新" && changed=1 ;;
+			3) prompt_with_default "确认清空所有备用模型? (yes/no)" "no" _yn; [ "$_yn" = "yes" ] && ocp_report "$(ocp fallbacks clear)" "已清空" && changed=1 ;;
+			*) [ $changed -eq 1 ] && ask_restart; return 0 ;;
+		esac
+	done
+}
+
+oc_model_probe() {
+	local out ids
+	echo -e "  ${CYAN}正在读取已配置的 Provider...${NC}"
+	out=$(ocp status 2>/dev/null)
+	ids=$(printf '%s\n' "$out" | awk -F '\t' '$1=="PROFILE" { print $3 } $1=="PROVIDER" { print $2 }' | sort -u)
+	[ -n "$ids" ] || { echo -e "  ${YELLOW}尚未配置任何 Provider${NC}"; return 1; }
+	oc_pick_from_list "$ids" "测试哪个 Provider?" || return 1
+	echo -e "  ${YELLOW}连通性测试会向 ${OC_PICKED} 发送真实请求 (每个模型约 8 个 token)，可能产生少量费用或触发限流。${NC}"
+	prompt_with_default "继续? (yes/no)" "yes" _yn
+	[ "$_yn" = "yes" ] || return 1
+	echo -e "  ${CYAN}测试中 (约 5~60 秒)...${NC}"
+	out=$(ocp probe "$OC_PICKED" 2>/dev/null)
+	if printf '%s\n' "$out" | grep -q '^OK'; then
+		printf '%s\n' "$out" | awk -F '\t' '$1=="R" { mark = ($3=="ok") ? "✅" : "❌"; printf "    %s %s  %s%s\n", mark, $2, $4, ($5 > 0 ? " (" $5 " ms)" : ""); if ($6 != "") printf "       %s\n", $6 }'
+	else
+		echo -e "  ${RED}❌ 无法完成测试: $(ocp_field "$out" ERROR)${NC}"
+	fi
+	prompt_with_default "按回车继续" "" _
+}
+
+oc_model_remove() {
+	local out list kind id
+	out=$(ocp status 2>/dev/null)
+	list=$(printf '%s\n' "$out" | awk -F '\t' '$1=="PROFILE" { print "删除凭据 " $2 } $1=="PROVIDER" { print "删除 Provider 配置 " $2 }')
+	[ -n "$list" ] || { echo -e "  ${YELLOW}没有可删除的凭据或 Provider${NC}"; return 1; }
+	oc_pick_from_list "$list" "删除凭据 / Provider" || return 1
+	id="${OC_PICKED##* }"
+	case "$OC_PICKED" in 删除凭据*) kind=auth ;; *) kind=prov ;; esac
+	echo -e "  ${RED}将删除 ${id}，此操作不可撤销。${NC}"
+	prompt_with_default "确认删除? (yes/no)" "no" _yn
+	[ "$_yn" = "yes" ] || { echo -e "  ${CYAN}已取消${NC}"; return 1; }
+	if [ "$kind" = "auth" ]; then ocp_report "$(ocp remove-auth "$id")" "已删除"
+	else ocp_report "$(ocp remove-provider "$id")" "已删除"; fi
+}
+
+configure_model() {
+	local choice changed
+	while true; do
+		changed=0
+		echo ""
+		echo -e "  ${BOLD}🤖 AI 模型配置${NC}"
+		local cur; cur=$(oc_current_model)
+		if [ -n "$cur" ]; then echo -e "  ${GREEN}当前默认模型: ${cur}${NC}"; else echo -e "  ${YELLOW}尚未设置默认模型${NC}"; fi
+		oc_verify_line
+		echo ""
+		echo -e "  ${GREEN}${BOLD}── 快速配置 ──${NC}"
+		echo -e "  ${CYAN}q)${NC} 常用 Provider 快速配置  ${GREEN}(推荐)${NC}"
+		echo -e "  ${BOLD}── 按类别添加 ──${NC}"
+		echo -e "  ${CYAN}1)${NC} 官方 API (按量付费)"
+		echo -e "  ${CYAN}2)${NC} 订阅套餐 / Coding Plan / 账号登录"
+		echo -e "  ${CYAN}3)${NC} 聚合平台 / 自定义 API"
+		echo -e "  ${CYAN}4)${NC} 本地 / 局域网模型"
+		echo -e "  ${BOLD}── 模型管理 ──${NC}"
+		echo -e "  ${CYAN}5)${NC} 查看模型与认证状态"
+		echo -e "  ${CYAN}6)${NC} 切换默认模型"
+		echo -e "  ${CYAN}7)${NC} 管理备用模型 (fallback)"
+		echo -e "  ${CYAN}8)${NC} 连通性测试 (真实请求，验证账号能否调用)"
+		echo -e "  ${CYAN}9)${NC} 删除凭据 / Provider"
+		echo -e "  ${BOLD}── 其他 ──${NC}"
+		echo -e "  ${CYAN}w)${NC} 官方完整配置向导 (openclaw configure --section model)"
+		echo -e "  ${CYAN}0)${NC} 返回"
+		echo ""
+		prompt_with_default "请选择" "q" choice
+		case "$choice" in
+			q|Q) oc_pick_method quick && oc_configure_method "$OC_REF" && changed=1 ;;
+			1) oc_pick_method official && oc_configure_method "$OC_REF" && changed=1 ;;
+			2) oc_pick_method plan && oc_configure_method "$OC_REF" && changed=1 ;;
+			3) oc_pick_method aggregator && oc_configure_method "$OC_REF" && changed=1 ;;
+			4) oc_pick_method local && oc_configure_method "$OC_REF" && changed=1 ;;
+			5) oc_model_status ;;
+			6) set_active_model ;;
+			7) oc_manage_fallbacks ;;
+			8) oc_model_probe ;;
+			9) oc_model_remove && changed=1 ;;
+			w|W)
 				echo ""
 				echo -e "  ${CYAN}启动官方完整模型配置向导...${NC}"
 				echo -e "  ${YELLOW}提示: ↑↓ 移动, Tab/空格 选中, 回车 确认${NC}"
-				echo ""
-				echo -e "  ${CYAN}清理过时插件配置...${NC}"
 				enable_auth_plugins
-				echo ""
-				if oc_cmd configure --section model; then
-					configured=1
-				else
-					echo -e "  ${YELLOW}配置向导已退出${NC}"
-				fi
+				oc_cmd configure --section model && changed=1
 				;;
-		a)
-			echo ""
-			echo -e "  ${BOLD}OpenAI 配置${NC}"
-			echo -e "  ${YELLOW}获取 API Key: https://platform.openai.com/api-keys${NC}"
-			echo ""
-			prompt_with_default "请输入 OpenAI API Key (sk-...)" "" api_key
-			if [ -n "$api_key" ]; then
-				auth_set_apikey openai "$api_key"
-				echo ""
-				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
-				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
-				oc_pick_model openai "gpt-5.6-sol"
-				model_name="$OC_PICKED_MODEL"
-				register_and_set_model "openai/${model_name}"
-				echo -e "  ${GREEN}✅ OpenAI 已配置，活跃模型: openai/${model_name}${NC}"
-				configured=1
-			fi
-			;;
-		b)
-			echo ""
-			echo -e "  ${BOLD}Anthropic 配置${NC}"
-			echo -e "  ${YELLOW}获取 API Key: https://console.anthropic.com/settings/keys${NC}"
-			echo ""
-			prompt_with_default "请输入 Anthropic API Key (sk-ant-...)" "" api_key
-			if [ -n "$api_key" ]; then
-				auth_set_apikey anthropic "$api_key"
-				echo ""
-				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
-				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
-				oc_pick_model anthropic "claude-sonnet-5"
-				model_name="$OC_PICKED_MODEL"
-				register_and_set_model "anthropic/${model_name}"
-				echo -e "  ${GREEN}✅ Anthropic 已配置，活跃模型: anthropic/${model_name}${NC}"
-				configured=1
-			fi
-			;;
-		c)
-			echo ""
-			echo -e "  ${BOLD}Google Gemini 配置${NC}"
-			echo -e "  ${YELLOW}获取 API Key: https://aistudio.google.com/apikey${NC}"
-			echo ""
-			prompt_with_default "请输入 Google AI API Key" "" api_key
-			if [ -n "$api_key" ]; then
-				auth_set_apikey google "$api_key"
-				echo ""
-				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
-				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
-				oc_pick_model google "gemini-2.5-pro"
-				model_name="$OC_PICKED_MODEL"
-				register_and_set_model "google/${model_name}"
-				echo -e "  ${GREEN}✅ Google Gemini 已配置，活跃模型: google/${model_name}${NC}"
-				configured=1
-			fi
-			;;
-		d)
-			echo ""
-			echo -e "  ${BOLD}OpenRouter 配置${NC}"
-			echo -e "  ${YELLOW}获取 API Key: https://openrouter.ai/keys${NC}"
-			echo -e "  ${YELLOW}聚合多家模型，一个 Key 可调用所有主流模型${NC}"
-			echo ""
-			prompt_with_default "请输入 OpenRouter API Key" "" api_key
-			if [ -n "$api_key" ]; then
-				auth_set_apikey openrouter "$api_key"
-				echo ""
-				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
-				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
-				oc_pick_model openrouter "auto"
-				model_name="$OC_PICKED_MODEL"
-				register_and_set_model "openrouter/${model_name}"
-				echo -e "  ${GREEN}✅ OpenRouter 已配置，活跃模型: openrouter/${model_name}${NC}"
-				configured=1
-			fi
-			;;
-		e)
-			echo ""
-			echo -e "  ${BOLD}GitHub Copilot 配置${NC}"
-			echo -e "  ${YELLOW}需要有效的 GitHub Copilot 订阅 (Free/Pro/Business 均可)${NC}"
-			echo ""
-			echo -e "  ${CYAN}启动 GitHub Copilot OAuth 登录 (Device Flow)...${NC}"
-			echo -e "  ${DIM}请在浏览器中打开显示的 URL，输入授权码完成登录${NC}"
-			echo ""
-			if oc_cmd models auth login-github-copilot --yes; then
-				echo ""
-				echo -e "  ${GREEN}✅ GitHub Copilot OAuth 认证成功${NC}"
-				echo ""
-				echo -e "  ${CYAN}选择默认模型:${NC}"
-				echo ""
-				echo -e "  ${CYAN}── GPT 系列 ──${NC}"
-				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
-				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
-				oc_pick_model github-copilot "gpt-5.5"
-				model_name="github-copilot/$OC_PICKED_MODEL"
-				register_and_set_model "$model_name"
-				echo -e "  ${GREEN}✅ 活跃模型已设置: ${model_name}${NC}"
-				configured=1
-			else
-				echo -e "  ${YELLOW}OAuth 授权已退出或失败${NC}"
-			fi
-			;;
-		g)
-			echo ""
-			echo -e "  ${BOLD}阿里云通义千问 Qwen 配置${NC}"
-			echo ""
-			echo -e "  ${CYAN}配置方式:${NC}"
-			echo -e "    ${CYAN}a)${NC} 通过官方向导配置 (Qwen Portal OAuth)"
-			echo -e "    ${CYAN}b)${NC} 百炼按量付费 API Key (sk-xxx, 按 token 计费)"
-			echo -e "    ${CYAN}c)${NC} ${GREEN}Coding Plan 套餐${NC} (sk-sp-xxx, 按套餐抵扣额度) ${GREEN}★ 推荐${NC}"
-			echo ""
-			echo -e "  ${DIM}提示: Coding Plan 套餐和百炼按量付费的 API Key / Base URL 不互通，请勿混用${NC}"
-			echo ""
-			prompt_with_default "请选择" "c" qwen_mode
-			case "$qwen_mode" in
-				a)
-					echo ""
-					echo -e "  ${CYAN}启用 Qwen Portal Auth 插件...${NC}"
-					enable_auth_plugins
-					echo -e "  ${CYAN}启动 Qwen OAuth 授权...${NC}"
-					if oc_cmd models auth login --provider qwen-portal --set-default; then
-						configured=1
-					else
-						echo -e "  ${YELLOW}OAuth 授权已退出${NC}"
-					fi
-					;;
-				b)
-					echo ""
-					echo -e "  ${BOLD}百炼按量付费配置${NC}"
-					echo -e "  ${YELLOW}获取 API Key: https://dashscope.console.aliyun.com/apiKey${NC}"
-					echo -e "  ${DIM}Base URL: https://dashscope.aliyuncs.com/compatible-mode/v1${NC}"
-					echo ""
-					prompt_with_default "请输入百炼 API Key (sk-...)" "" api_key
-					if [ -n "$api_key" ]; then
-						echo ""
-						echo -e "  ${CYAN}── 千问商业版 ──${NC}"
-						# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
-						# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
-						oc_pick_model qwen "qwen3.5-plus"
-						model_name="$OC_PICKED_MODEL"
-						auth_set_apikey dashscope "$api_key"
-						register_custom_provider dashscope "https://dashscope.aliyuncs.com/compatible-mode/v1" "$api_key" "$model_name" "$model_name"
-						register_and_set_model "dashscope/${model_name}"
-						echo -e "  ${GREEN}✅ 通义千问已配置 (按量付费)，活跃模型: dashscope/${model_name}${NC}"
-						configured=1
-					fi
-					;;
-				c|*)
-					echo ""
-					echo -e "  ${BOLD}Coding Plan 套餐配置${NC}"
-					echo -e "  ${YELLOW}订阅套餐: https://bailian.console.aliyun.com/cn-beijing/?tab=model#/efm/coding_plan${NC}"
-					echo -e "  ${YELLOW}获取专属 API Key: 在上方页面获取 Coding Plan 专属 Key (sk-sp-...)${NC}"
-					echo -e "  ${DIM}Base URL: https://coding.dashscope.aliyuncs.com/v1${NC}"
-					echo -e "  ${DIM}文档: https://help.aliyun.com/zh/model-studio/openclaw-coding-plan${NC}"
-					echo ""
-					prompt_with_default "请输入 Coding Plan 专属 API Key (sk-sp-...)" "" api_key
-					if [ -n "$api_key" ]; then
-						echo ""
-						echo -e "  ${CYAN}可用模型:${NC}"
-						echo -e "    ${CYAN}a)${NC} qwen3.5-plus        — Qwen3.5 Plus (推荐, 100万上下文)"
-						echo -e "    ${CYAN}b)${NC} qwen3-coder-plus    — Qwen3 Coder Plus (代码专用, 100万上下文)"
-						echo -e "    ${CYAN}c)${NC} qwen3-coder-next    — Qwen3 Coder Next"
-						echo -e "    ${CYAN}d)${NC} qwen3-max-2026-01-23 — Qwen3 Max"
-						echo -e "    ${CYAN}e)${NC} MiniMax-M2.5        — MiniMax M2.5"
-						echo -e "    ${CYAN}f)${NC} glm-5               — 智谱 GLM-5"
-						echo -e "    ${CYAN}g)${NC} kimi-k2.5           — Kimi K2.5"
-						echo -e "    ${CYAN}h)${NC} 手动输入模型名"
-						echo ""
-						prompt_with_default "请选择默认模型" "a" model_choice
-						case "$model_choice" in
-							a) model_name="qwen3.5-plus" ;;
-							b) model_name="qwen3-coder-plus" ;;
-							c) model_name="qwen3-coder-next" ;;
-							d) model_name="qwen3-max-2026-01-23" ;;
-							e) model_name="MiniMax-M2.5" ;;
-							f) model_name="glm-5" ;;
-							g) model_name="kimi-k2.5" ;;
-							h) prompt_with_default "请输入模型名称" "qwen3.5-plus" model_name ;;
-							*) model_name="qwen3.5-plus" ;;
-						esac
-						echo ""
-						echo -e "  ${CYAN}正在注册 Coding Plan 提供商 (含全部可用模型)...${NC}"
-						auth_set_apikey bailian "$api_key"
-						register_codingplan_provider "$api_key"
-						register_and_set_model "bailian/${model_name}"
-						echo -e "  ${GREEN}✅ Coding Plan 已配置，活跃模型: bailian/${model_name}${NC}"
-						echo -e "  ${DIM}提示: 套餐内全部模型已注册，可随时在 WebChat 中通过 /model 切换${NC}"
-						configured=1
-					fi
-					;;
-			esac
-			;;
-		f)
-			echo ""
-			echo -e "  ${BOLD}xAI Grok 配置${NC}"
-			echo -e "  ${YELLOW}获取 API Key: https://console.x.ai${NC}"
-			echo ""
-			prompt_with_default "请输入 xAI API Key" "" api_key
-			if [ -n "$api_key" ]; then
-				echo ""
-				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
-				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
-				oc_pick_model xai "grok-4.3"
-				model_name="$OC_PICKED_MODEL"
-				auth_set_apikey xai "$api_key"
-				register_and_set_model "xai/${model_name}"
-				echo -e "  ${GREEN}✅ xAI Grok 已配置，活跃模型: xai/${model_name}${NC}"
-				configured=1
-			fi
-			;;
-		h)
-			echo ""
-			echo -e "  ${BOLD}硅基流动 SiliconFlow 配置${NC}"
-			echo -e "  ${YELLOW}获取 API Key: https://cloud.siliconflow.cn/account/ak${NC}"
-			echo -e "  ${YELLOW}国内推理平台，支持多种开源模型${NC}"
-			echo ""
-			prompt_with_default "请输入 SiliconFlow API Key" "" api_key
-			if [ -n "$api_key" ]; then
-				echo ""
-				echo -e "  ${CYAN}可用模型分类说明:${NC}"
-				echo -e "  ${YELLOW}* Pro模型 (带 Pro/ 前缀): 仅支持充值余额支付，并发与速率(Rate Limits)可变。${NC}"
-				echo -e "  ${YELLOW}* 非Pro模型 (无 Pro/ 前缀): 支持赠费余额（代金券）和充值余额支付，Rate Limits 固定。${NC}"
-				echo -e "  ${GREEN}【建议】如果您是代金券/赠送余额用户，请务必选择【非Pro模型】。${NC}"
-				echo ""
-				echo -e "  ${CYAN}── 非Pro模型 (支持代金券/免费额度) ──${NC}"
-				echo -e "    ${CYAN}1)${NC} deepseek-ai/DeepSeek-V3       — DeepSeek-V3 (推荐)"
-				echo -e "    ${CYAN}2)${NC} deepseek-ai/DeepSeek-R1       — DeepSeek-R1 (推理模型)"
-				# SiliconFlow 不是 OpenClaw 内置/官方插件 provider (走 OpenAI 兼容接入)，
-				# 无法用上游 catalog 核实模型 ID。原硬编码清单里的 Qwen2.5-7B/72B、
-				# Yi-1.5-34B-Chat-16K、glm-4-9b-chat 均已明显过期，因此不再维护，
-				# 改为引导用户从官方模型广场复制当前 ID。
-				echo -e "  ${CYAN}请从官方模型广场复制模型 ID:${NC}"
-				echo -e "    ${CYAN}https://cloud.siliconflow.cn/models${NC}"
-				echo -e "  ${DIM}格式形如 deepseek-ai/DeepSeek-V3.2；Pro/ 前缀模型仅支持充值余额${NC}"
-				echo ""
-				prompt_with_default "请输入模型 ID" "" model_name
-				auth_set_apikey siliconflow "$api_key"
-				register_custom_provider siliconflow "https://api.siliconflow.cn/v1" "$api_key" "$model_name" "$model_name"
-				register_and_set_model "siliconflow/${model_name}"
-				echo -e "  ${GREEN}✅ SiliconFlow 已配置，活跃模型: siliconflow/${model_name}${NC}"
-				configured=1
-			fi
-			;;
-		l)
-			echo ""
-			echo -e "  ${BOLD}🦙 Ollama 本地模型配置${NC}"
-			echo -e "  ${YELLOW}Ollama 在本地或局域网运行大模型，无需 API Key${NC}"
-			echo -e "  ${YELLOW}安装 Ollama: https://ollama.com${NC}"
-			echo ""
-			echo -e "  ${CYAN}连接方式:${NC}"
-			echo -e "    ${CYAN}a)${NC} 本机运行 (localhost:11434)"
-			echo -e "    ${CYAN}b)${NC} 局域网其他设备"
-			echo ""
-			prompt_with_default "请选择" "a" ollama_mode
-			local ollama_url=""
-			case "$ollama_mode" in
-				b)
-					prompt_with_default "Ollama 地址 (如 192.168.1.100:11434)" "" ollama_host
-					if [ -n "$ollama_host" ]; then
-						# 补全协议前缀
-						case "$ollama_host" in
-							http://*|https://*) ollama_url="${ollama_host}" ;;
-							*) ollama_url="http://${ollama_host}" ;;
-						esac
-						# v2026.3.2: Ollama 使用原生 API，baseUrl 不带 /v1
-						ollama_url=$(echo "$ollama_url" | sed 's|/v1/*$||;s|/*$||')
-					fi
-					;;
-				*)
-					ollama_url="http://127.0.0.1:11434"
-					;;
-			esac
-			if [ -n "$ollama_url" ]; then
-				# 检测 Ollama 是否可达
-				echo ""
-				echo -e "  ${CYAN}检测 Ollama 连通性...${NC}"
-				local ollama_base=$(echo "$ollama_url" | sed 's|/v1$||')
-				local ollama_check=$(curl -sf --connect-timeout 3 --max-time 5 "${ollama_base}/api/tags" 2>/dev/null || echo "")
-				if [ -n "$ollama_check" ]; then
-					echo -e "  ${GREEN}✅ Ollama 已连接${NC}"
-					# 列出已安装的模型
-					local model_list=$("$NODE_BIN" -e "
-						try{
-							const d=JSON.parse(process.argv[1]);
-							(d.models||[]).forEach((m,i)=>console.log('    '+(i+1)+') '+m.name));
-						}catch(e){}
-					" "$ollama_check" 2>/dev/null)
-					if [ -n "$model_list" ]; then
-						echo -e "  ${CYAN}已安装的模型:${NC}"
-						echo "$model_list"
-						echo -e "    ${CYAN}m)${NC} 手动输入模型名"
-						echo ""
-						prompt_with_default "请选择模型" "1" ollama_sel
-						if [ "$ollama_sel" = "m" ]; then
-							prompt_with_default "请输入模型名称" "llama3.3" model_name
-						elif echo "$ollama_sel" | grep -qE '^[0-9]+$'; then
-							model_name=$("$NODE_BIN" -e "
-								try{
-									const d=JSON.parse(process.argv[1]);
-									const m=(d.models||[])[parseInt(process.argv[2])-1];
-									console.log(m?m.name:'');
-								}catch(e){console.log('');}
-							" "$ollama_check" "$ollama_sel" 2>/dev/null)
-							if [ -z "$model_name" ]; then
-								echo -e "  ${YELLOW}无效选择，使用默认模型${NC}"
-								model_name="llama3.3"
-							fi
-						fi
-					else
-						echo -e "  ${YELLOW}未检测到已安装模型，请先在 Ollama 中拉取模型:${NC}"
-						echo -e "  ${CYAN}  ollama pull llama3.3${NC}"
-						echo ""
-						prompt_with_default "请输入模型名称" "llama3.3" model_name
-					fi
-				else
-					echo -e "  ${YELLOW}⚠️  无法连接 Ollama (${ollama_base})${NC}"
-					echo -e "  ${YELLOW}   请确认 Ollama 已启动并可访问${NC}"
-					echo -e "  ${CYAN}   提示: 如果 Ollama 在其他设备上，需设置 OLLAMA_HOST=0.0.0.0${NC}"
-					echo ""
-					prompt_with_default "仍要继续配置? (y/n)" "n" force_continue
-					if ! confirm_yes "$force_continue"; then
-						return
-					fi
-					prompt_with_default "请输入模型名称" "llama3.3" model_name
-				fi
-				if [ -n "$model_name" ]; then
-					# Ollama 无需 API Key，使用占位符
-					auth_set_apikey ollama "ollama-local" "ollama:local"
-					# v2026.3.2: Ollama 使用原生 ollama API，不再走 OpenAI 兼容层
-					_RCP_PROV="ollama" _RCP_URL="$ollama_url" _RCP_KEY="ollama-local" _RCP_MID="$model_name" _RCP_MNAME="$model_name" "$NODE_BIN" -e "
-						const fs=require('fs');
-						let d={};
-						try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
-						if(!d.models)d.models={};
-						if(!d.models.providers)d.models.providers={};
-						d.models.mode='merge';
-						d.models.providers['ollama']={
-							baseUrl:process.env._RCP_URL,
-							apiKey:process.env._RCP_KEY,
-							api:'ollama',
-							models:[{
-								id:process.env._RCP_MID,
-								name:process.env._RCP_MNAME,
-								reasoning:false,
-								input:['text'],
-								cost:{input:0,output:0,cacheRead:0,cacheWrite:0},
-								contextWindow:128000,
-								maxTokens:32000
-							}]
-						};
-						fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
-					" 2>/dev/null
-					chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-					register_and_set_model "ollama/${model_name}"
-					echo -e "  ${GREEN}✅ Ollama 已配置，活跃模型: ollama/${model_name}${NC}"
-					echo -e "  ${CYAN}   Ollama 地址: ${ollama_url}${NC}"
-					configured=1
-				fi
-			fi
-			;;
-		i)
-			echo ""
-			echo -e "  ${BOLD}腾讯云大模型 Coding Plan 套餐配置${NC}"
-			echo ""
-			echo -e "  ${YELLOW}订阅/管理套餐: https://hunyuan.cloud.tencent.com/#/app/subscription${NC}"
-			echo -e "  ${YELLOW}获取 API Key: 在上方页面创建 Coding Plan 专属 Key (sk-sp-...)${NC}"
-			echo -e "  ${DIM}文档: https://cloud.tencent.com/document/product/1772/128947${NC}"
-			echo ""
-			prompt_with_default "请输入 Coding Plan API Key (sk-sp-...)" "" api_key
-			if [ -n "$api_key" ]; then
-				echo ""
-				echo -e "  ${CYAN}可用模型 (Coding Plan 套餐内):${NC}"
-				echo -e "  ${CYAN}── 智能推荐 ──${NC}"
-				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
-				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
-				oc_pick_model tencent-tokenhub "hy3"
-				model_name="$OC_PICKED_MODEL"
-				echo ""
-				echo -e "  ${CYAN}正在注册腾讯云 Coding Plan 提供商 (含全部套餐模型)...${NC}"
-				auth_set_apikey lkeap "$api_key"
-				register_lkeap_codingplan_provider "$api_key"
-				register_and_set_model "lkeap/${model_name}"
-				echo -e "  ${GREEN}✅ 腾讯云 Coding Plan 已配置，活跃模型: lkeap/${model_name}${NC}"
-				echo -e "  ${DIM}提示: 套餐内全部模型已注册，可随时在 WebChat 中通过 /model 切换${NC}"
-				configured=1
-			fi
-			;;
-		j)
-			echo ""
-			echo -e "  ${BOLD}百度千帆大模型配置${NC}"
-			echo -e "  ${YELLOW}获取 API Key: https://console.bce.baidu.com/qianfan/ais/console/onlineService${NC}"
-			echo ""
-			echo -e "  ${DIM}提示: 需要 API Key (Access Token) 和可选的 Secret Key${NC}"
-			echo ""
-			prompt_with_default "请输入百度千帆 API Key (Access Token)" "" api_key
-			if [ -n "$api_key" ]; then
-				auth_set_apikey qianfan "$api_key"
-				echo ""
-				echo -e "  ${CYAN}可用模型:${NC}"
-				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
-				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
-				oc_pick_model qianfan "ernie-5.0-thinking-preview"
-				model_name="$OC_PICKED_MODEL"
-				# 百度千帆使用 OpenAI 兼容接口
-				# 注: OpenClaw v2026.3.28+ 支持 qianfan 原生 provider
-				register_custom_provider qianfan "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop" "$api_key" "$model_name" "$model_name"
-				register_and_set_model "qianfan/${model_name}"
-				echo -e "  ${GREEN}✅ 百度千帆已配置，活跃模型: qianfan/${model_name}${NC}"
-				configured=1
-			fi
-			;;
-		k)
-			echo ""
-			echo -e "  ${BOLD}智谱 GLM / Z.AI 配置${NC}"
-			echo ""
-			echo -e "  ${CYAN}认证方式:${NC}"
-			echo -e "    ${CYAN}a)${NC} CN (open.bigmodel.cn) ${GREEN}★ 国内用户推荐${NC}"
-			echo -e "    ${CYAN}b)${NC} Coding-Plan-CN (智谱 Coding Plan 套餐)"
-			echo -e "    ${CYAN}c)${NC} Global (api.z.ai)"
-			echo -e "    ${CYAN}d)${NC} 手动输入 API Key"
-			echo ""
-			prompt_with_default "请选择认证方式" "a" zai_method
-			case "$zai_method" in
-				a)
-					zai_base_url="https://open.bigmodel.cn/api/paas/v4"
-					echo -e "  ${YELLOW}获取 API Key: https://open.bigmodel.cn/api-key${NC}"
-					;;
-				b)
-					zai_base_url="https://open.bigmodel.cn/api/coding/paas/v4"
-					echo -e "  ${YELLOW}Coding Plan 套餐 API Key (sk-...)${NC}"
-					;;
-				c)
-					zai_base_url="https://api.z.ai/api/paas/v4"
-					echo -e "  ${YELLOW}全球版 API Key${NC}"
-					;;
-				d)
-					prompt_with_default "请输入 Base URL" "https://open.bigmodel.cn/api/paas/v4" zai_base_url
-					;;
-				*)
-					zai_base_url="https://open.bigmodel.cn/api/paas/v4"
-					;;
-			esac
-			echo ""
-			prompt_with_default "请输入智谱 API Key" "" api_key
-			if [ -n "$api_key" ]; then
-				echo ""
-				echo -e "  ${CYAN}可用模型:${NC}"
-				# 模型清单来自 model-presets.json (与 JS 侧共读同一数据源)，
-				# 并支持 d 动态发现 / m 手动输入，不再硬编码易过期的模型 ID。
-				oc_pick_model zai "glm-5.2"
-				model_name="$OC_PICKED_MODEL"
-				# 智谱 GLM 使用原生 zai provider (OpenClaw 内置支持)
-				auth_set_apikey zai "$api_key"
-				register_custom_provider zai "$zai_base_url" "$api_key" "$model_name" "$model_name" "128000" "4096"
-				register_and_set_model "zai/${model_name}"
-				echo -e "  ${GREEN}✅ 智谱 GLM 已配置，活跃模型: zai/${model_name}${NC}"
-				echo -e "  ${DIM}   Base URL: ${zai_base_url}${NC}"
-				configured=1
-			fi
-			;;
-		m)
-			echo ""
-			echo -e "  ${BOLD}自定义 OpenAI 兼容 API${NC}"
-			echo -e "  ${YELLOW}支持任何兼容 OpenAI API 格式的服务商${NC}"
-			echo ""
-			prompt_with_default "API Base URL (如 https://api.example.com/v1)" "" base_url
-			prompt_with_default "API Key" "" api_key
-			prompt_with_default "模型名称" "" model_name
-			if [ -n "$base_url" ] && [ -n "$api_key" ] && [ -n "$model_name" ]; then
-				auth_set_apikey openai-compatible "$api_key" "openai-compatible:manual"
-				register_custom_provider openai-compatible "$base_url" "$api_key" "$model_name" "$model_name"
-				register_and_set_model "openai-compatible/${model_name}"
-				echo -e "  ${GREEN}✅ 自定义模型已配置，活跃模型: openai-compatible/${model_name}${NC}"
-				configured=1
-			fi
-			;;
-		n)
-			echo ""
-			echo -e "  ${BOLD}自定义 Anthropic 兼容 API${NC}"
-			echo -e "  ${YELLOW}支持任何兼容 Anthropic Messages API 格式的服务商${NC}"
-			echo ""
-			prompt_with_default "API Base URL (如 https://api.anthropic.com)" "" base_url
-			prompt_with_default "API Key" "" api_key
-			prompt_with_default "模型名称" "claude-sonnet-5" model_name
-			if [ -n "$base_url" ] && [ -n "$api_key" ] && [ -n "$model_name" ]; then
-				_ACP_URL="${base_url%/}" _ACP_KEY="$api_key" _ACP_MID="$model_name" "$NODE_BIN" -e "
-					const fs=require('fs');
-					let d={};
-					try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
-					if(!d.models)d.models={};
-					if(!d.models.providers)d.models.providers={};
-					d.models.mode='merge';
-					d.models.providers['anthropic-compatible']={
-						baseUrl:process.env._ACP_URL,
-						apiKey:process.env._ACP_KEY,
-						api:'anthropic-messages',
-						models:[{
-							id:process.env._ACP_MID,
-							name:process.env._ACP_MID,
-							reasoning:false,
-							input:['text','image'],
-							cost:{input:0,output:0,cacheRead:0,cacheWrite:0},
-							contextWindow:200000,
-							maxTokens:16000
-						}]
-					};
-					fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
-				" 2>/dev/null
-				chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-				auth_set_apikey anthropic-compatible "$api_key" "anthropic-compatible:manual"
-				register_and_set_model "anthropic-compatible/${model_name}"
-				echo -e "  ${GREEN}✅ 自定义 Anthropic API 已配置，活跃模型: anthropic-compatible/${model_name}${NC}"
-				configured=1
-			fi
-			;;
-		o)
-			echo ""
-			echo -e "  ${BOLD}一万AI分享 粉丝专享 API${NC}"
-			echo -e "  ${YELLOW}OpenAI 兼容模式；Base URL 和模型已内置，只需要填写 API Key。${NC}"
-			echo -e "  ${DIM}Base URL: https://api.910501.xyz/v1${NC}"
-			echo -e "  ${DIM}Model: gpt-5.5${NC}"
-			echo ""
-			prompt_with_default "API Key" "" api_key
-			if [ -n "$api_key" ]; then
-				auth_set_apikey yiwanai "$api_key" "yiwanai:fan"
-				register_custom_provider yiwanai "https://api.910501.xyz/v1" "$api_key" "gpt-5.5" "gpt-5.5" 1000000 32000
-				_YW_PROV="yiwanai" "$NODE_BIN" -e "
-					const fs=require('fs');
-					let d={};
-					try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
-					const p=d.models&&d.models.providers&&d.models.providers[process.env._YW_PROV];
-					if(p&&p.models&&p.models[0]){
-						p.models[0].reasoning=true;
-						fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
-					}
-				" 2>/dev/null
-				chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
-				register_and_set_model "yiwanai/gpt-5.5"
-				echo -e "  ${GREEN}✅ 一万AI分享粉丝专享 API 已配置，活跃模型: yiwanai/gpt-5.5${NC}"
-				configured=1
-			fi
-			;;
-		q) return ;;
-		*) echo -e "  ${YELLOW}无效选择${NC}" ;;
-	esac
-
-	if [ "$configured" -eq 1 ]; then
-		echo ""
-		ask_restart
-	fi
-done
-}
-
-# ══════════════════════════════════════════════════════════════
-# 设定当前活跃模型
-# ══════════════════════════════════════════════════════════════
-set_active_model() {
-	echo ""
-	echo -e "  ${BOLD}🔄 设定当前活跃模型${NC}"
-	echo ""
-
-	local current_model=$(json_get agents.defaults.model.primary)
-	echo -e "  当前活跃模型: ${GREEN}${BOLD}${current_model:-未设置}${NC}"
-	echo ""
-
-	local models_json=""
-	models_json=$(oc_cmd models list --json 2>/dev/null || echo "")
-	local model_count=0
-	if [ -n "$models_json" ]; then
-		model_count=$("$NODE_BIN" -e "
-			try{const d=JSON.parse(process.argv[1]);console.log((d.models||[]).length);}catch(e){console.log(0);}
-		" "$models_json" 2>/dev/null || echo "0")
-	fi
-
-	if [ "$model_count" -gt 0 ] 2>/dev/null; then
-		echo -e "  ${CYAN}已配置的模型:${NC}"
-		echo ""
-		"$NODE_BIN" -e "
-			const d=JSON.parse(process.argv[1]);
-			(d.models||[]).forEach((m,i)=>{
-				const mark=m.key===process.argv[2]?' ← 当前活跃':'';
-				const n=m.name&&m.name!==m.key?' ('+m.name+')':'';
-				console.log('    '+(i+1)+') '+m.key+n+mark);
-			});
-		" "$models_json" "$current_model" 2>/dev/null
-		echo ""
-		echo -e "    ${CYAN}m)${NC} 手动输入模型 ID"
-		echo -e "    ${CYAN}0)${NC} 返回"
-		echo ""
-		prompt_with_default "请选择" "0" model_sel
-
-		if [ "$model_sel" = "0" ]; then
-			return
-		elif [ "$model_sel" = "m" ]; then
-			prompt_with_default "请输入模型 ID (如 openai/gpt-4o)" "${current_model:-}" manual_model
-			if [ -n "$manual_model" ]; then
-				register_and_set_model "$manual_model"
-				echo -e "  ${GREEN}✅ 活跃模型已设为: ${manual_model}${NC}"
-				ask_restart
-			fi
-		elif echo "$model_sel" | grep -qE '^[0-9]+$'; then
-			local selected=$("$NODE_BIN" -e "
-				const d=JSON.parse(process.argv[1]);
-				const m=(d.models||[])[parseInt(process.argv[2])-1];
-				console.log(m?m.key:'');
-			" "$models_json" "$model_sel" 2>/dev/null)
-			if [ -n "$selected" ]; then
-				register_and_set_model "$selected"
-				echo -e "  ${GREEN}✅ 活跃模型已切换为: ${selected}${NC}"
-				ask_restart
-			else
-				echo -e "  ${YELLOW}无效选择${NC}"
-			fi
-		fi
-	else
-		echo -e "  ${YELLOW}尚未配置任何模型。${NC}"
-		echo -e "  ${YELLOW}请先通过「配置 AI 模型提供商」(菜单 2) 添加模型。${NC}"
-		echo ""
-		prompt_with_default "直接输入模型 ID 设置? (留空返回)" "" manual_model
-		if [ -n "$manual_model" ]; then
-			register_and_set_model "$manual_model"
-			echo -e "  ${GREEN}✅ 活跃模型已设为: ${manual_model}${NC}"
-			ask_restart
-		fi
-	fi
+			0) return 0 ;;
+			*) echo -e "  ${YELLOW}无效选择${NC}" ;;
+		esac
+		[ $changed -eq 1 ] && ask_restart
+	done
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -1892,7 +1342,7 @@ configure_discord() {
 	prompt_with_default "请输入 Discord Bot Token" "" dc_token
 	dc_token=$(sanitize_input "$dc_token" | tr -d '[:space:]')
 	if [ -n "$dc_token" ]; then
-		json_set channels.discord.botToken "$dc_token"
+		json_set channels.discord.token "$dc_token"
 		chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
 		echo -e "  ${GREEN}✅ Discord Bot Token 已保存${NC}"
 		ask_restart
@@ -2304,7 +1754,6 @@ reset_to_defaults() {
 				json_set gateway.port 18789 2>&1
 				json_set gateway.bind lan 2>&1
 				json_set gateway.mode local 2>&1
-				json_set gateway.controlUi.allowInsecureAuth true 2>&1
 				json_set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true 2>&1
 				json_set gateway.tailscale.mode off 2>&1
 				echo -e "  ${GREEN}✅ 网关设置已恢复默认${NC}"
@@ -2323,14 +1772,14 @@ reset_to_defaults() {
 				oc_cmd config unset models >/dev/null 2>&1 || true
 				oc_cmd config unset agents.defaults.model >/dev/null 2>&1 || true
 				oc_cmd config unset agents.defaults.models >/dev/null 2>&1 || true
-				# 同时清除 auth-profiles.json 中的认证信息
-				local auth_file="${OC_STATE_DIR}/agents/main/agent/auth-profiles.json"
-				if [ -f "$auth_file" ]; then
-					echo '{"version":1,"profiles":{},"usageStats":{}}' > "$auth_file"
-					chown openclaw:openclaw "$auth_file" 2>/dev/null || true
-				fi
+				# 凭据保存在上游认证库 (state/openclaw.sqlite)，通过官方 logout 逐条注销；
+				# auth-profiles.json 已在 2026.9.x 退役，不再读写
+				ocp status 2>/dev/null | awk -F '\t' '$1=="PROFILE" { print $2 }' | while read -r _pid; do
+					[ -n "$_pid" ] || continue
+					ocp remove-auth "$_pid" | grep -q '^OK' || echo -e "  ${YELLOW}凭据 ${_pid} 未能注销${NC}"
+				done
 				echo -e "  ${GREEN}✅ 模型配置已清除${NC}"
-				echo -e "  ${YELLOW}请通过菜单 [2] 重新配置 AI 模型${NC}"
+				echo -e "  ${YELLOW}请通过菜单 [1] 重新配置 AI 模型${NC}"
 				ask_restart
 			else
 				echo -e "  ${CYAN}已取消${NC}"
@@ -2462,13 +1911,14 @@ reset_to_defaults() {
 				echo -e "  ${GREEN}   配置已清除${NC}"
 
 				echo -e "  ${CYAN}[4/5] 重新初始化...${NC}"
-				# 尝试 onboard，超时 10 秒避免阻塞
+				# 尝试 onboard (非交互、跳过认证与渠道)，带超时避免阻塞
+				local _ob_args="--non-interactive --accept-risk --mode local --auth-choice skip --gateway-bind lan --gateway-port 18789 --skip-daemon --skip-health --skip-channels --skip-skills --skip-search --skip-hooks"
 				local _node_bin
 				_node_bin=$(which node 2>/dev/null || echo "$NODE_BIN")
 				if command -v timeout >/dev/null 2>&1; then
-					timeout 10 sh -c "\"$_node_bin\" \"$OC_ENTRY\" onboard --non-interactive --accept-risk --tools-profile coding" >/dev/null 2>&1 || true
+					timeout 60 "$_node_bin" "$OC_ENTRY" onboard $_ob_args >/dev/null 2>&1 || true
 				else
-					"$_node_bin" "$OC_ENTRY" onboard --non-interactive --accept-risk --tools-profile coding >/dev/null 2>&1 &
+					"$_node_bin" "$OC_ENTRY" onboard $_ob_args >/dev/null 2>&1 &
 					local _ob_pid=$!
 					sleep 10
 					kill "$_ob_pid" 2>/dev/null || true
@@ -2484,7 +1934,6 @@ reset_to_defaults() {
 				json_set gateway.mode local
 				json_set gateway.auth.mode token
 				json_set gateway.auth.token "$new_token"
-				json_set gateway.controlUi.allowInsecureAuth true
 				json_set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true
 				json_set gateway.tailscale.mode off
 				json_set acp.dispatch.enabled false

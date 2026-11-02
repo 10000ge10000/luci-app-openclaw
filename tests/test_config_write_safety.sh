@@ -28,6 +28,12 @@ grep -Fq 'class ConfigParseError' "$TARGET" || fail "must define ConfigParseErro
 grep -Fq 'renameSync' "$TARGET" || fail "writeConfig must replace the config atomically via rename"
 grep -Fq 'CONFIG_BACKUP_SUFFIX' "$TARGET" || fail "writeConfig must keep a pre-write backup"
 grep -Fq "'.luci-pre-write'" "$TARGET" || fail "pre-write backup must not reuse OpenClaw's own .bak rotation names"
+# OpenClaw 2026.9.x 起 auth-profiles.json 已退役 (凭据存 state/openclaw.sqlite)，
+# 插件写入它会触发 AUTH_PROFILE_MIGRATION_REQUIRED。凭据只能经由 oc-providers.js 走官方 CLI。
+if grep -nE "writeFileSync\([^)]*auth-profiles|auth-profiles\.json['\"]?\)?[^\n]*writeFileSync" "$TARGET"; then
+	fail "interactive menu must not write the retired auth-profiles.json"
+fi
+grep -Fq "require('./oc-providers')" "$TARGET" || fail "interactive menu must configure credentials through the shared oc-providers backend"
 grep -Fq 'readConfigForDisplay' "$TARGET" || fail "read-only paths need a non-throwing accessor"
 
 # readConfig() 不得在解析失败时返回 {}
@@ -74,7 +80,7 @@ const body = [
   extract('class ConfigParseError', 'function configRecoveryHint'),
   extract('function readConfig()', 'function readConfigForDisplay'),
   extract('function readConfigForDisplay()', '/**\n * 写入 JSON 配置文件'),
-  extract('function writeConfig(config)', '/**\n * 注册模型'),
+  extract('function writeConfig(config)', '/**\n * 获取 JSON 配置值'),
 ].join('\n');
 
 const CONFIG_BACKUP_SUFFIX = '.luci-pre-write';
@@ -82,12 +88,13 @@ const C = new Proxy({}, { get: () => '' });
 const execSync = () => {};
 const fixStatePermissions = () => {};
 const CONFIG_FILE = configFile;
+const OC_STATE_DIR = path.dirname(configFile);
 
 const factory = new Function(
-  'fs', 'path', 'CONFIG_FILE', 'CONFIG_BACKUP_SUFFIX', 'C', 'execSync', 'fixStatePermissions',
+  'fs', 'path', 'CONFIG_FILE', 'CONFIG_BACKUP_SUFFIX', 'C', 'execSync', 'fixStatePermissions', 'OC_STATE_DIR',
   `${body}\nreturn { readConfig, readConfigForDisplay, writeConfig, ConfigParseError };`
 );
-const api = factory(fs, path, CONFIG_FILE, CONFIG_BACKUP_SUFFIX, C, execSync, fixStatePermissions);
+const api = factory(fs, path, CONFIG_FILE, CONFIG_BACKUP_SUFFIX, C, execSync, fixStatePermissions, OC_STATE_DIR);
 
 const results = [];
 function check(name, fn) {

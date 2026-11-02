@@ -1,0 +1,89 @@
+{
+  "_comment": [
+    "OpenClaw 兼容矩阵 —— openclaw-env、包契约校验与 LuCI 共读的唯一数据源。",
+    "",
+    "区分两个概念:",
+    "  - 上游已发布: 运行时通过 npm dist-tags 动态查询 (latest / extended-stable)，不写在这里。",
+    "  - 本插件已验证: 只有列在 versions 里的版本才会被默认安装；",
+    "    清单字段与 tarball integrity 必须逐项一致，否则安装失败关闭。",
+    "",
+    "维护约定 (升级适配基线时):",
+    "  1. 从 https://registry.npmjs.org/openclaw/<version> 复制 engines / scripts / dist.integrity，不要手抄。",
+    "  2. 在隔离目录完成安装、onboard、models auth、config validate、doctor 与 Gateway 启动验证后再加入。",
+    "  3. verification 只记录实际做过的验证，没有做过的写 null。",
+    "  4. 新增版本时同步更新 channels.<name>.verified。",
+    "  5. 新增版本时写明 wechat.minPlugin: 官方微信插件 peerDependencies 只声明下限，核心移除 plugin-sdk 子路径后旧插件仍能安装，渠道却会崩溃循环，plugins list 仍显示 loaded。"
+  ],
+  "schema": 1,
+  "node": {
+    "recommended": "24.22.2",
+    "line": "24 LTS (Krypton)",
+    "source": "https://nodejs.org/dist/index.json 与 https://unofficial-builds.nodejs.org/download/release/index.json (2026-11-01 查询)",
+    "note": "24.22.2 同时满足 2026.3.x 至 2026.10.x 全部版本的 engines.node，因此先升级 Node 再升级/回滚 OpenClaw 都安全。"
+  },
+  "defaultChannel": "extended-stable",
+  "channels": {
+    "extended-stable": {
+      "label": "长期稳定版",
+      "description": "官方长期维护通道，只接收修复，适合路由器长期运行",
+      "verified": "2026.9.36"
+    },
+    "latest": {
+      "label": "最新正式版",
+      "description": "官方最新正式发布，功能更新快",
+      "verified": "2026.10.9"
+    }
+  },
+  "wechat": {
+    "package": "@tencent-weixin/openclaw-weixin",
+    "pin": "2.4.10",
+    "note": "2.4.9 修复 2026.9.x 入站回复 (PreparedModelCatalogConfigReplacedError)，2.4.10 修复 2026.10 加载；2.4.6 在 2026.9.36 上实测因缺少 plugin-sdk/channel-runtime 崩溃循环。"
+  },
+  "lifecycle": {
+    "preinstall": "node scripts/preinstall-package-manager-warning.mjs",
+    "postinstall": "node scripts/postinstall-bundled-plugins.mjs",
+    "preinstallFile": "scripts/preinstall-package-manager-warning.mjs",
+    "postinstallFile": "scripts/postinstall-bundled-plugins.mjs"
+  },
+  "versions": {
+    "2026.10.9": {
+      "channel": "latest",
+      "published": "2026-10-29",
+      "engines": ">=24.22.1 <25 || >=26.12.1",
+      "integrity": "sha512-KbIl0/7an0/nKBo92FnJg7LFcEpFVQyOgSRfHNE9yxELg1Ebql7BmBsdLL+1dDOLZnQtuwjt6Hy45CCrmYdJNA==",
+      "unpackedSize": 250055860,
+      "sqliteVec": "0.1.9",
+      "wechat": { "minPlugin": "2.4.10" },
+      "verification": {
+        "cliSchema": "2026-11-01 macOS x86_64 + Node 24.22.2：onboard、models auth paste-api-key、plugins install、models set/fallbacks、models status --check/--probe、config validate、doctor --fix、Gateway 启动 (2026-11-02)；微信插件 2.4.10 加载成功、2.4.8 加载失败 (2026-11-02，未登录微信账号)",
+        "device": null
+      }
+    },
+    "2026.9.36": {
+      "channel": "extended-stable",
+      "published": "2026-10-29",
+      "engines": ">=24.22.1 <25 || >=26.12.1",
+      "integrity": "sha512-lf5bdnWiPleye2eGaaN6HIOI2g96rFJnNFqwuEPVdz+AHlOya8nTSSaXN9Ql9xlkYBCE3ANV6jqhPvJzCpXqVw==",
+      "unpackedSize": 390863707,
+      "sqliteVec": "0.1.9",
+      "wechat": { "minPlugin": "2.4.9" },
+      "verification": {
+        "cliSchema": "2026-11-01 macOS x86_64 + Node 24.22.2：onboard、models auth paste-api-key、plugins install、models set/fallbacks、models status --check、config validate、doctor --fix、Gateway 启动 (2026-11-02)",
+        "device": "2026-11-02 Raspberry Pi 4 / Kwrt 25.12.5 aarch64 musl + Node 24.22.2：从 2026.6.11 升级、备份校验、Doctor 迁移、凭据保留、Gateway 启动通过；微信插件 2.4.10 渠道启动、备份在隔离目录恢复、自定义 Provider 与真实请求、两套菜单查看、LuCI 接口通过。未验证：微信消息收发、真机端到端回滚。"
+      }
+    },
+    "2026.9.1": {
+      "channel": "legacy",
+      "published": "2026-09-03",
+      "engines": ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0",
+      "integrity": "sha512-0Ve0631CdgkJDwd4NNG1BawIdF5yCL2sO+Tts8amStw+H6vKURTj0K4rOa4+hFpJk1Dnw5LyKl5twzwX1VtA2w==",
+      "unpackedSize": 174863194,
+      "sqliteVec": "0.1.9",
+      "wechat": { "minPlugin": "2.4.9" },
+      "verification": {
+        "cliSchema": "v2.2.x 发布时的基线版本",
+        "device": "v2.2.x 发布时的基线版本"
+      }
+    }
+  }
+}

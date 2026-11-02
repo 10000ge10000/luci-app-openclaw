@@ -1,0 +1,406 @@
+{
+  "_comment": [
+    "AI 模型提供商目录 —— 交互式菜单 (oc-config-interactive.js) 与传统 Shell 菜单 (oc-config.sh)",
+    "共用的唯一数据源，二者都通过 oc-providers.js 读取，不各自维护列表。",
+    "",
+    "数据来源与核实方式 (2026-11-01):",
+    "  - authChoice / env / 外部插件包名: 上游 dist 内 official-external-provider-catalog 与",
+    "    dist/extensions/*/openclaw.plugin.json 的 providerAuthChoices。",
+    "  - provider / baseUrl / defaultModel: 在 2026.9.36 与 2026.10.9 上用假 Key 实跑",
+    "    openclaw onboard --non-interactive --auth-choice <choice>，读取写入后的配置。两版结果一致。",
+    "  - models: 同一次实跑中上游写入 agents.defaults.models 的模型 + 插件清单 modelCatalog 静态目录，",
+    "    仅收录两个版本都存在的 ID。",
+    "  - keyUrl: 仅采用上游 docs/providers/*.md 中出现的官方控制台地址；没有的留空，菜单改显示 docs。",
+    "",
+    "重要: 目录里出现的模型只代表上游登记过，不代表用户账号有权调用。",
+    "调用权限只能通过「连通性测试」(models status --probe) 确认。",
+    "",
+    "维护约定:",
+    "  - 新增条目必须先在 verifiedWith 中的版本上实跑核实，不要凭文档或印象填写。",
+    "  - models[].id 是 provider 侧裸 ID (不含 'provider/' 前缀)。",
+    "  - 上游升级后重新跑核实并更新 verifiedWith；未核实的版本仍可用，菜单会提示「未核实」。"
+  ],
+  "schema": 1,
+  "verifiedWith": ["2026.9.36", "2026.10.9"],
+  "verifiedAt": "2026-11-01",
+  "docsBase": "https://docs.openclaw.ai/providers/",
+  "groups": [
+    { "id": "official", "label": "官方 API (按量付费)" },
+    { "id": "plan", "label": "订阅套餐 / Coding Plan / 账号登录" },
+    { "id": "aggregator", "label": "聚合平台 / 自定义 API" },
+    { "id": "local", "label": "本地 / 局域网模型" }
+  ],
+  "quick": ["deepseek:api", "qwen-coding:cn", "zai-coding:cn", "kimi-code:api", "openrouter:api", "openai:api", "anthropic:api", "google:api"],
+  "providers": [
+    {
+      "id": "openai", "label": "OpenAI", "group": "official", "docs": "openai",
+      "methods": [
+        { "id": "api", "label": "API Key", "type": "api-key", "authChoice": "openai-api-key", "env": "OPENAI_API_KEY", "provider": "openai", "defaultModel": "gpt-6-astra" }
+      ]
+    },
+    {
+      "id": "anthropic", "label": "Anthropic Claude", "group": "official", "docs": "anthropic", "keyUrl": "https://console.anthropic.com/",
+      "methods": [
+        { "id": "api", "label": "API Key", "type": "api-key", "authChoice": "apiKey", "env": "ANTHROPIC_API_KEY", "provider": "anthropic", "defaultModel": "claude-opus-5-5" }
+      ]
+    },
+    {
+      "id": "google", "label": "Google Gemini", "group": "official", "docs": "google", "keyUrl": "https://aistudio.google.com/apikey",
+      "methods": [
+        { "id": "api", "label": "AI Studio API Key", "type": "api-key", "authChoice": "gemini-api-key", "env": "GEMINI_API_KEY", "provider": "google", "defaultModel": "gemini-4-argon" }
+      ]
+    },
+    {
+      "id": "xai", "label": "xAI Grok", "group": "official", "docs": "xai",
+      "methods": [
+        { "id": "api", "label": "API Key", "type": "api-key", "authChoice": "xai-api-key", "env": "XAI_API_KEY", "provider": "xai", "baseUrl": "https://api.x.ai/v1", "defaultModel": "grok-4.7" }
+      ]
+    },
+    {
+      "id": "deepseek", "label": "DeepSeek 深度求索", "group": "official", "docs": "deepseek", "keyUrl": "https://platform.deepseek.com/api_keys",
+      "plugin": "@openclaw/deepseek-provider",
+      "methods": [
+        { "id": "api", "label": "API Key", "type": "api-key", "authChoice": "deepseek-api-key", "env": "DEEPSEEK_API_KEY", "provider": "deepseek", "baseUrl": "https://api.deepseek.com", "defaultModel": "deepseek-v4-pro" }
+      ]
+    },
+    {
+      "id": "qwen", "label": "阿里云百炼 通义千问 (按量)", "group": "official", "docs": "qwen",
+      "plugin": "@openclaw/qwen-provider",
+      "methods": [
+        { "id": "cn", "label": "中国站 (dashscope.aliyuncs.com)", "type": "api-key", "authChoice": "qwen-standard-api-key-cn", "env": "QWEN_API_KEY", "provider": "qwen", "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1", "defaultModel": "qwen3.5-plus" },
+        { "id": "intl", "label": "国际站 (dashscope-intl.aliyuncs.com)", "type": "api-key", "authChoice": "qwen-standard-api-key", "env": "QWEN_API_KEY", "provider": "qwen", "baseUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "defaultModel": "qwen3.5-plus" }
+      ]
+    },
+    {
+      "id": "zai", "label": "智谱 GLM / Z.AI (按量)", "group": "official", "docs": "zai",
+      "plugin": "@openclaw/zai-provider",
+      "methods": [
+        { "id": "cn", "label": "中国站 (open.bigmodel.cn)", "type": "api-key", "authChoice": "zai-cn", "env": "ZAI_API_KEY", "provider": "zai", "baseUrl": "https://open.bigmodel.cn/api/paas/v4", "defaultModel": "glm-5.2" },
+        { "id": "global", "label": "国际站 (api.z.ai)", "type": "api-key", "authChoice": "zai-global", "env": "ZAI_API_KEY", "provider": "zai", "baseUrl": "https://api.z.ai/api/paas/v4", "defaultModel": "glm-5.2" }
+      ]
+    },
+    {
+      "id": "moonshot", "label": "Moonshot Kimi 开放平台 (按量)", "group": "official", "docs": "moonshot",
+      "plugin": "@openclaw/moonshot-provider",
+      "methods": [
+        { "id": "cn", "label": "中国站 (api.moonshot.cn)", "type": "api-key", "authChoice": "moonshot-api-key-cn", "env": "MOONSHOT_API_KEY", "provider": "moonshot", "baseUrl": "https://api.moonshot.cn/v1", "defaultModel": "kimi-k3" },
+        { "id": "global", "label": "国际站 (api.moonshot.ai)", "type": "api-key", "authChoice": "moonshot-api-key", "env": "MOONSHOT_API_KEY", "provider": "moonshot", "baseUrl": "https://api.moonshot.ai/v1", "defaultModel": "kimi-k3" }
+      ]
+    },
+    {
+      "id": "minimax", "label": "MiniMax", "group": "official", "docs": "minimax",
+      "methods": [
+        { "id": "cn", "label": "中国站 API Key (api.minimaxi.com)", "type": "api-key", "authChoice": "minimax-cn-api", "env": "MINIMAX_API_KEY", "provider": "minimax", "baseUrl": "https://api.minimaxi.com/anthropic", "defaultModel": "MiniMax-M3" },
+        { "id": "global", "label": "国际站 API Key (api.minimax.io)", "type": "api-key", "authChoice": "minimax-global-api", "env": "MINIMAX_API_KEY", "provider": "minimax", "baseUrl": "https://api.minimax.io/anthropic", "defaultModel": "MiniMax-M3" }
+      ]
+    },
+    {
+      "id": "qianfan", "label": "百度千帆", "group": "official", "docs": "qianfan", "keyUrl": "https://console.bce.baidu.com/qianfan/ais/console/apiKey",
+      "plugin": "@openclaw/qianfan-provider",
+      "methods": [
+        { "id": "api", "label": "API Key", "type": "api-key", "authChoice": "qianfan-api-key", "env": "QIANFAN_API_KEY", "provider": "qianfan", "baseUrl": "https://qianfan.baidubce.com/v2", "defaultModel": "deepseek-v4-pro" }
+      ]
+    },
+    {
+      "id": "volcengine", "label": "火山引擎 方舟 (豆包)", "group": "official", "docs": "volcengine",
+      "plugin": "@openclaw/volcengine-provider",
+      "note": "上游把同一个 Key 同时用于按量 (volcengine) 与 Coding Plan (volcengine-plan)，默认模型为 Coding Plan 的 ark-code-latest；按量用户请在模型选择中改选 volcengine/ 开头的模型。",
+      "methods": [
+        { "id": "api", "label": "API Key", "type": "api-key", "authChoice": "volcengine-api-key", "env": "VOLCANO_ENGINE_API_KEY", "provider": "volcengine-plan", "authProvider": "volcengine", "alsoProviders": ["volcengine"], "defaultModel": "ark-code-latest" }
+      ]
+    },
+    {
+      "id": "stepfun", "label": "阶跃星辰 StepFun (按量)", "group": "official", "docs": "stepfun",
+      "plugin": "@openclaw/stepfun-provider",
+      "methods": [
+        { "id": "cn", "label": "中国站 (api.stepfun.com)", "type": "api-key", "authChoice": "stepfun-standard-api-key-cn", "env": "STEPFUN_API_KEY", "provider": "stepfun", "baseUrl": "https://api.stepfun.com/v1", "defaultModel": "step-3.5-flash" },
+        { "id": "intl", "label": "国际站 (api.stepfun.ai)", "type": "api-key", "authChoice": "stepfun-standard-api-key-intl", "env": "STEPFUN_API_KEY", "provider": "stepfun", "baseUrl": "https://api.stepfun.ai/v1", "defaultModel": "step-3.5-flash" }
+      ]
+    },
+    {
+      "id": "xiaomi", "label": "小米 MiMo (按量)", "group": "official", "docs": "xiaomi", "keyUrl": "https://platform.xiaomimimo.com/#/console/api-keys",
+      "plugin": "@openclaw/xiaomi-provider",
+      "methods": [
+        { "id": "api", "label": "API Key", "type": "api-key", "authChoice": "xiaomi-api-key", "env": "XIAOMI_API_KEY", "provider": "xiaomi", "baseUrl": "https://api.xiaomimimo.com/v1", "defaultModel": "mimo-v2.6-pro" }
+      ]
+    },
+    {
+      "id": "tencent-tokenhub", "label": "腾讯云 TokenHub (混元)", "group": "official", "docs": "tencent",
+      "plugin": "@openclaw/tencent-provider",
+      "methods": [
+        { "id": "api", "label": "TokenHub API Key", "type": "api-key", "authChoice": "tokenhub-api-key", "env": "TOKENHUB_API_KEY", "provider": "tencent-tokenhub", "baseUrl": "https://tokenhub.tencentmaas.com/v1", "defaultModel": "hy4-preview" }
+      ]
+    },
+    {
+      "id": "qwen-coding", "label": "阿里云百炼 Coding Plan", "group": "plan", "docs": "qwen",
+      "plugin": "@openclaw/qwen-provider",
+      "methods": [
+        { "id": "cn", "label": "中国站 (coding.dashscope.aliyuncs.com)", "type": "api-key", "authChoice": "qwen-api-key-cn", "env": "QWEN_API_KEY", "provider": "qwen", "baseUrl": "https://coding.dashscope.aliyuncs.com/v1", "defaultModel": "qwen3.5-plus", "models": "planModels" },
+        { "id": "intl", "label": "国际站 (coding-intl.dashscope.aliyuncs.com)", "type": "api-key", "authChoice": "qwen-api-key", "env": "QWEN_API_KEY", "provider": "qwen", "baseUrl": "https://coding-intl.dashscope.aliyuncs.com/v1", "defaultModel": "qwen3.5-plus", "models": "planModels" }
+      ]
+    },
+    {
+      "id": "qwen-token-plan", "label": "阿里云 Qwen Token Plan", "group": "plan", "docs": "qwen",
+      "plugin": "@openclaw/qwen-provider",
+      "methods": [
+        { "id": "cn", "label": "中国站 (cn-beijing)", "type": "api-key", "authChoice": "qwen-token-plan-cn", "env": "QWEN_TOKEN_PLAN_API_KEY", "provider": "qwen-token-plan", "baseUrl": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", "defaultModel": "qwen3.7-plus" },
+        { "id": "intl", "label": "国际站 (ap-southeast-1)", "type": "api-key", "authChoice": "qwen-token-plan", "env": "QWEN_TOKEN_PLAN_API_KEY", "provider": "qwen-token-plan", "defaultModel": "qwen3.7-plus" }
+      ]
+    },
+    {
+      "id": "zai-coding", "label": "智谱 GLM Coding Plan", "group": "plan", "docs": "zai",
+      "plugin": "@openclaw/zai-provider",
+      "methods": [
+        { "id": "cn", "label": "中国站 (open.bigmodel.cn)", "type": "api-key", "authChoice": "zai-coding-cn", "env": "ZAI_API_KEY", "provider": "zai", "baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4", "defaultModel": "glm-5.3" },
+        { "id": "global", "label": "国际站 (api.z.ai)", "type": "api-key", "authChoice": "zai-coding-global", "env": "ZAI_API_KEY", "provider": "zai", "baseUrl": "https://api.z.ai/api/coding/paas/v4", "defaultModel": "glm-5.3" }
+      ]
+    },
+    {
+      "id": "kimi-code", "label": "Kimi Code 会员订阅", "group": "plan", "docs": "moonshot",
+      "plugin": "@openclaw/kimi-provider",
+      "methods": [
+        { "id": "api", "label": "Kimi Code API Key", "type": "api-key", "authChoice": "kimi-code-api-key", "env": "KIMI_API_KEY", "provider": "kimi", "baseUrl": "https://api.kimi.com/coding/", "defaultModel": "kimi-for-coding" }
+      ]
+    },
+    {
+      "id": "stepfun-plan", "label": "阶跃星辰 Step Plan", "group": "plan", "docs": "stepfun",
+      "plugin": "@openclaw/stepfun-provider",
+      "methods": [
+        { "id": "cn", "label": "中国站 (api.stepfun.com)", "type": "api-key", "authChoice": "stepfun-plan-api-key-cn", "env": "STEPFUN_API_KEY", "provider": "stepfun-plan", "baseUrl": "https://api.stepfun.com/step_plan/v1", "defaultModel": "step-3.5-flash" },
+        { "id": "intl", "label": "国际站 (api.stepfun.ai)", "type": "api-key", "authChoice": "stepfun-plan-api-key-intl", "env": "STEPFUN_API_KEY", "provider": "stepfun-plan", "baseUrl": "https://api.stepfun.ai/step_plan/v1", "defaultModel": "step-3.5-flash" }
+      ]
+    },
+    {
+      "id": "xiaomi-token-plan", "label": "小米 MiMo Token Plan", "group": "plan", "docs": "xiaomi",
+      "plugin": "@openclaw/xiaomi-provider",
+      "methods": [
+        { "id": "cn", "label": "中国区", "type": "api-key", "authChoice": "xiaomi-token-plan-cn", "env": "XIAOMI_TOKEN_PLAN_API_KEY", "provider": "xiaomi-token-plan", "baseUrl": "https://token-plan-cn.xiaomimimo.com/v1", "defaultModel": "mimo-v2.6-pro", "keyHint": "Token Plan Key 以 tp- 开头；sk- 开头的是按量 Key" },
+        { "id": "sgp", "label": "新加坡", "type": "api-key", "authChoice": "xiaomi-token-plan-sgp", "env": "XIAOMI_TOKEN_PLAN_API_KEY", "provider": "xiaomi-token-plan", "defaultModel": "mimo-v2.6-pro", "keyHint": "Token Plan Key 以 tp- 开头" },
+        { "id": "ams", "label": "欧洲", "type": "api-key", "authChoice": "xiaomi-token-plan-ams", "env": "XIAOMI_TOKEN_PLAN_API_KEY", "provider": "xiaomi-token-plan", "defaultModel": "mimo-v2.6-pro", "keyHint": "Token Plan Key 以 tp- 开头" }
+      ]
+    },
+    {
+      "id": "tencent-tokenplan", "label": "腾讯云 TokenPlan", "group": "plan", "docs": "tencent",
+      "plugin": "@openclaw/tencent-provider",
+      "methods": [
+        { "id": "api", "label": "TokenPlan API Key", "type": "api-key", "authChoice": "tokenplan-api-key", "env": "TOKENPLAN_API_KEY", "provider": "tencent-tokenplan", "baseUrl": "https://api.lkeap.cloud.tencent.com/plan/v3", "defaultModel": "hy4-preview" }
+      ]
+    },
+    {
+      "id": "github-copilot", "label": "GitHub Copilot 订阅", "group": "plan", "docs": "github-copilot",
+      "methods": [
+        { "id": "device", "label": "GitHub 设备码登录", "type": "oauth", "loginArgs": ["models", "auth", "login-github-copilot"], "provider": "github-copilot", "unverified": "需要真实 Copilot 订阅，插件未做账号级实测" }
+      ]
+    },
+    {
+      "id": "openai-codex", "label": "ChatGPT / Codex 账号登录", "group": "plan", "docs": "openai",
+      "methods": [
+        { "id": "device", "label": "设备码登录 (适合路由器等无浏览器环境)", "type": "oauth", "loginArgs": ["models", "auth", "login", "--provider", "openai", "--device-code"], "provider": "openai", "unverified": "需要真实 ChatGPT 账号，插件未做账号级实测" }
+      ]
+    },
+    {
+      "id": "minimax-oauth", "label": "MiniMax 账号登录", "group": "plan", "docs": "minimax",
+      "methods": [
+        { "id": "cn", "label": "中国站 OAuth", "type": "oauth", "loginArgs": ["onboard", "--auth-choice", "minimax-cn-oauth", "--skip-daemon", "--skip-health", "--skip-channels", "--skip-skills", "--skip-search", "--skip-hooks"], "provider": "minimax-portal", "unverified": "需要真实 MiniMax 账号，插件未做账号级实测" },
+        { "id": "global", "label": "国际站 OAuth", "type": "oauth", "loginArgs": ["onboard", "--auth-choice", "minimax-global-oauth", "--skip-daemon", "--skip-health", "--skip-channels", "--skip-skills", "--skip-search", "--skip-hooks"], "provider": "minimax-portal", "unverified": "需要真实 MiniMax 账号，插件未做账号级实测" }
+      ]
+    },
+    {
+      "id": "openrouter", "label": "OpenRouter", "group": "aggregator", "docs": "openrouter", "keyUrl": "https://openrouter.ai/keys",
+      "methods": [
+        { "id": "api", "label": "API Key", "type": "api-key", "authChoice": "openrouter-api-key", "env": "OPENROUTER_API_KEY", "provider": "openrouter", "defaultModel": "auto" }
+      ]
+    },
+    {
+      "id": "vercel-ai-gateway", "label": "Vercel AI Gateway", "group": "aggregator", "docs": "vercel-ai-gateway",
+      "plugin": "@openclaw/vercel-ai-gateway-provider",
+      "methods": [
+        { "id": "api", "label": "API Key", "type": "api-key", "authChoice": "ai-gateway-api-key", "env": "AI_GATEWAY_API_KEY", "provider": "vercel-ai-gateway", "defaultModel": "anthropic/claude-opus-4.6" }
+      ]
+    },
+    {
+      "id": "huggingface", "label": "Hugging Face Inference", "group": "aggregator", "docs": "huggingface",
+      "methods": [
+        { "id": "api", "label": "HF Token", "type": "api-key", "authChoice": "huggingface-api-key", "env": "HF_TOKEN", "provider": "huggingface", "baseUrl": "https://router.huggingface.co/v1", "defaultModel": "deepseek-ai/DeepSeek-R1" }
+      ]
+    },
+    {
+      "id": "together", "label": "Together AI", "group": "aggregator", "docs": "together", "keyUrl": "https://api.together.ai/settings/api-keys",
+      "methods": [
+        { "id": "api", "label": "API Key", "type": "api-key", "authChoice": "together-api-key", "env": "TOGETHER_API_KEY", "provider": "together", "baseUrl": "https://api.together.xyz/v1", "defaultModel": "moonshotai/Kimi-K2.6" }
+      ]
+    },
+    {
+      "id": "nvidia", "label": "NVIDIA NIM", "group": "aggregator", "docs": "nvidia", "keyUrl": "https://build.nvidia.com/settings/api-keys",
+      "methods": [
+        { "id": "api", "label": "API Key", "type": "api-key", "authChoice": "nvidia-api-key", "env": "NVIDIA_API_KEY", "provider": "nvidia", "baseUrl": "https://integrate.api.nvidia.com/v1", "defaultModel": "nemotron-3-ultra-550b-a55b" }
+      ]
+    },
+    {
+      "id": "opencode-go", "label": "OpenCode Go", "group": "aggregator", "docs": "opencode-go",
+      "methods": [
+        { "id": "api", "label": "OpenCode API Key", "type": "api-key", "authChoice": "opencode-go", "env": "OPENCODE_API_KEY", "provider": "opencode-go", "defaultModel": "deepseek-v4-pro" }
+      ]
+    },
+    {
+      "id": "siliconflow", "label": "硅基流动 SiliconFlow", "group": "aggregator",
+      "note": "SiliconFlow 没有 OpenClaw 官方 provider，按 OpenAI 兼容自定义 API 接入。模型 ID 请从 https://cloud.siliconflow.cn/models 复制。国际站文档核实为 https://api.siliconflow.com/v1；国内站文档 2026-11-01 访问返回 502，api.siliconflow.cn/v1 端点可达 (未带 Key 返回 401)，待复核文档。",
+      "methods": [
+        { "id": "cn", "label": "国内站 (api.siliconflow.cn)", "type": "custom", "customProviderId": "siliconflow", "baseUrl": "https://api.siliconflow.cn/v1", "compatibility": "openai", "modelHint": "deepseek-ai/DeepSeek-V3.2" },
+        { "id": "intl", "label": "国际站 (api.siliconflow.com)", "type": "custom", "customProviderId": "siliconflow", "baseUrl": "https://api.siliconflow.com/v1", "compatibility": "openai", "modelHint": "deepseek-ai/DeepSeek-V3.2" }
+      ]
+    },
+    {
+      "id": "custom", "label": "自定义 API (OpenAI / Anthropic 兼容)", "group": "aggregator", "docs": "models",
+      "note": "按上游设计，自定义 provider 的 Key 以明文保存在 openclaw.json 的 models.providers.<id>.apiKey 中。",
+      "methods": [
+        { "id": "openai", "label": "OpenAI Chat Completions 兼容", "type": "custom", "compatibility": "openai" },
+        { "id": "openai-responses", "label": "OpenAI Responses 兼容", "type": "custom", "compatibility": "openai-responses" },
+        { "id": "anthropic", "label": "Anthropic Messages 兼容", "type": "custom", "compatibility": "anthropic" }
+      ]
+    },
+    {
+      "id": "ollama", "label": "Ollama", "group": "local", "docs": "ollama",
+      "methods": [
+        { "id": "local", "label": "连接 Ollama 服务 (本机或局域网)", "type": "local", "authChoice": "ollama", "provider": "ollama", "baseUrlDefault": "http://127.0.0.1:11434", "note": "上游会先检测 Ollama 是否可达，不可达时拒绝写入" }
+      ]
+    },
+    {
+      "id": "local-openai", "label": "vLLM / LM Studio / SGLang 等本地服务", "group": "local", "docs": "vllm",
+      "methods": [
+        { "id": "openai", "label": "OpenAI 兼容本地服务 (Key 可留空)", "type": "custom", "compatibility": "openai", "baseUrlDefault": "http://127.0.0.1:8000/v1", "keyOptional": true }
+      ]
+    }
+  ],
+  "models": {
+    "openai": [
+      { "id": "gpt-6-astra", "tier": "高性能", "desc": "GPT-6 Astra (上游默认)" },
+      { "id": "gpt-6.1-sol", "tier": "均衡", "desc": "GPT-6.1 Sol" },
+      { "id": "gpt-6-luna", "tier": "经济", "desc": "GPT-6 Luna" },
+      { "id": "gpt-5.4-mini", "tier": "快速", "desc": "GPT-5.4 Mini" }
+    ],
+    "anthropic": [
+      { "id": "claude-opus-5-5", "tier": "高性能", "desc": "Claude Opus 5.5 (上游默认)" },
+      { "id": "claude-sonnet-5-5", "tier": "均衡", "desc": "Claude Sonnet 5.5" },
+      { "id": "claude-haiku-5-5", "tier": "快速", "desc": "Claude Haiku 5.5" }
+    ],
+    "google": [
+      { "id": "gemini-4-argon", "tier": "高性能", "desc": "Gemini 4 Argon (上游默认)" },
+      { "id": "gemini-3.8-flash", "tier": "均衡", "desc": "Gemini 3.8 Flash" },
+      { "id": "gemini-3.5-flash-lite", "tier": "经济", "desc": "Gemini 3.5 Flash-Lite" }
+    ],
+    "xai": [
+      { "id": "grok-4.7", "tier": "高性能", "desc": "Grok 4.7 (上游默认)" },
+      { "id": "grok-4.3", "tier": "均衡", "desc": "Grok 4.3 (1M 上下文)" },
+      { "id": "grok-4.20-0309-non-reasoning", "tier": "快速", "desc": "Grok 4.20 非推理" }
+    ],
+    "deepseek": [
+      { "id": "deepseek-v4-pro", "tier": "高性能", "desc": "DeepSeek V4 Pro (上游默认)" },
+      { "id": "deepseek-flash", "tier": "均衡", "desc": "DeepSeek V4.1 Flash (支持图片)" },
+      { "id": "deepseek-v4-flash", "tier": "经济", "desc": "DeepSeek V4 Flash" }
+    ],
+    "qwen": [
+      { "id": "qwen3.8-max", "tier": "高性能", "desc": "Qwen3.8 Max (仅按量)" },
+      { "id": "qwen3.7-plus", "tier": "均衡", "desc": "Qwen3.7 Plus" },
+      { "id": "qwen3.5-plus", "tier": "均衡", "desc": "Qwen3.5 Plus (上游默认)" },
+      { "id": "qwen3.8-flash", "tier": "快速", "desc": "Qwen3.8 Flash (仅按量)" },
+      { "id": "qwen3-coder-plus", "tier": "编程", "desc": "Qwen3 Coder Plus" }
+    ],
+    "planModels": [
+      { "id": "qwen3.7-plus", "tier": "高性能", "desc": "Qwen3.7 Plus" },
+      { "id": "qwen3.5-plus", "tier": "均衡", "desc": "Qwen3.5 Plus (上游默认)" },
+      { "id": "qwen3-coder-plus", "tier": "编程", "desc": "Qwen3 Coder Plus" },
+      { "id": "glm-5", "tier": "均衡", "desc": "智谱 GLM-5 (套餐内)" },
+      { "id": "kimi-k2.5", "tier": "均衡", "desc": "Kimi K2.5 (套餐内)" },
+      { "id": "MiniMax-M2.5", "tier": "均衡", "desc": "MiniMax M2.5 (套餐内)" }
+    ],
+    "qwen-token-plan": [
+      { "id": "qwen3.8-max", "tier": "高性能", "desc": "Qwen3.8 Max" },
+      { "id": "qwen3.7-plus", "tier": "均衡", "desc": "Qwen3.7 Plus (上游默认)" },
+      { "id": "qwen3.8-flash", "tier": "快速", "desc": "Qwen3.8 Flash" }
+    ],
+    "zai": [
+      { "id": "glm-5.3", "tier": "高性能", "desc": "GLM-5.3 (Coding Plan 默认)" },
+      { "id": "glm-5.2", "tier": "均衡", "desc": "GLM-5.2 (按量默认)" },
+      { "id": "glm-5.3-flash", "tier": "快速", "desc": "GLM-5.3 Flash (支持图片)" },
+      { "id": "glm-5-turbo", "tier": "经济", "desc": "GLM-5 Turbo" }
+    ],
+    "moonshot": [
+      { "id": "kimi-k3", "tier": "高性能", "desc": "Kimi K3 (上游默认)" },
+      { "id": "kimi-k2.7-code", "tier": "编程", "desc": "Kimi K2.7 Code" },
+      { "id": "kimi-k2.7-code-highspeed", "tier": "快速", "desc": "Kimi K2.7 Code 高速版" }
+    ],
+    "kimi": [
+      { "id": "kimi-for-coding", "tier": "均衡", "desc": "Kimi Code (上游默认)" },
+      { "id": "k3", "tier": "高性能", "desc": "Kimi K3" },
+      { "id": "kimi-for-coding-highspeed", "tier": "快速", "desc": "Kimi Code 高速版" }
+    ],
+    "minimax": [
+      { "id": "MiniMax-M3", "tier": "高性能", "desc": "MiniMax M3 (上游默认；模型列表由上游动态发现)" },
+      { "id": "MiniMax-M2.7", "tier": "均衡", "desc": "MiniMax M2.7" }
+    ],
+    "qianfan": [
+      { "id": "deepseek-v4-pro", "tier": "高性能", "desc": "DeepSeek V4 Pro (上游默认)" },
+      { "id": "ernie-5.1", "tier": "均衡", "desc": "文心 ERNIE 5.1" },
+      { "id": "deepseek-v3.2", "tier": "经济", "desc": "DeepSeek V3.2" }
+    ],
+    "volcengine-plan": [
+      { "id": "ark-code-latest", "tier": "均衡", "desc": "Ark Coding Plan 自动路由 (上游默认)" },
+      { "id": "glm-5.2", "tier": "高性能", "desc": "GLM 5.2 (套餐内)" },
+      { "id": "deepseek-v4-pro", "tier": "高性能", "desc": "DeepSeek V4 Pro (套餐内)" },
+      { "id": "doubao-seed-2.1-turbo", "tier": "快速", "desc": "豆包 Seed 2.1 Turbo (套餐内)" }
+    ],
+    "volcengine": [
+      { "id": "doubao-seed-2-1-pro-260628", "tier": "高性能", "desc": "豆包 Seed 2.1 Pro (按量)" },
+      { "id": "doubao-seed-2-1-turbo-260628", "tier": "均衡", "desc": "豆包 Seed 2.1 Turbo (按量)" },
+      { "id": "deepseek-v4-flash-260425", "tier": "经济", "desc": "DeepSeek V4 Flash (按量)" }
+    ],
+    "stepfun": [
+      { "id": "step-3.7-flash", "tier": "均衡", "desc": "Step 3.7 Flash (支持图片)" },
+      { "id": "step-3.5-flash", "tier": "经济", "desc": "Step 3.5 Flash (上游默认)" }
+    ],
+    "stepfun-plan": [
+      { "id": "step-3.7-flash", "tier": "均衡", "desc": "Step 3.7 Flash" },
+      { "id": "step-3.5-flash", "tier": "经济", "desc": "Step 3.5 Flash (上游默认)" }
+    ],
+    "xiaomi": [
+      { "id": "mimo-v2.6-pro", "tier": "高性能", "desc": "MiMo V2.6 Pro (上游默认)" },
+      { "id": "mimo-v2.6-flash", "tier": "经济", "desc": "MiMo V2.6 Flash" }
+    ],
+    "xiaomi-token-plan": [
+      { "id": "mimo-v2.6-pro", "tier": "高性能", "desc": "MiMo V2.6 Pro (上游默认)" },
+      { "id": "mimo-v2.6-flash", "tier": "经济", "desc": "MiMo V2.6 Flash" }
+    ],
+    "tencent-tokenhub": [
+      { "id": "hy4-preview", "tier": "高性能", "desc": "混元 Hy4 preview (上游默认)" },
+      { "id": "hy3", "tier": "经济", "desc": "混元 Hy3" }
+    ],
+    "tencent-tokenplan": [
+      { "id": "hy4-preview", "tier": "高性能", "desc": "混元 Hy4 preview (上游默认)" },
+      { "id": "hy3", "tier": "经济", "desc": "混元 Hy3" }
+    ],
+    "github-copilot": [
+      { "id": "claude-sonnet-5", "tier": "均衡", "desc": "Claude Sonnet 5" },
+      { "id": "gpt-5.5", "tier": "均衡", "desc": "GPT-5.5" },
+      { "id": "gpt-5.4-mini", "tier": "快速", "desc": "GPT-5.4 mini" }
+    ],
+    "openrouter": [
+      { "id": "auto", "tier": "均衡", "desc": "OpenRouter 自动路由 (上游默认)" }
+    ],
+    "vercel-ai-gateway": [
+      { "id": "anthropic/claude-opus-4.6", "tier": "高性能", "desc": "上游默认" }
+    ],
+    "huggingface": [
+      { "id": "deepseek-ai/DeepSeek-R1", "tier": "均衡", "desc": "上游默认" }
+    ],
+    "together": [
+      { "id": "moonshotai/Kimi-K2.6", "tier": "均衡", "desc": "上游默认" }
+    ],
+    "nvidia": [
+      { "id": "nemotron-3-ultra-550b-a55b", "tier": "高性能", "desc": "上游默认" }
+    ],
+    "opencode-go": [
+      { "id": "deepseek-v4-pro", "tier": "高性能", "desc": "上游默认" }
+    ]
+  }
+}

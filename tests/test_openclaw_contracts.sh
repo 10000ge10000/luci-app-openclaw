@@ -6,11 +6,45 @@ fail() {
 	exit 1
 }
 
-grep -q "OC_TESTED_VERSION=\"2026.9.1\"" root/usr/bin/openclaw-env || fail "tested OpenClaw version not pinned"
-grep -q "NODE_VERSION_V2=\"22.23.2\"" root/usr/bin/openclaw-env || fail "default Node.js version not pinned"
-grep -q "OC_NODE_MIN_VERSION=\"\${OC_NODE_MIN_VERSION:-22.22.3}\"" root/usr/bin/openclaw-env || fail "minimum Node.js version not pinned"
+grep -q "OC_TESTED_VERSION=\"2026.9.36\"" root/usr/bin/openclaw-env || fail "tested OpenClaw version not pinned"
+grep -q "NODE_VERSION_V2=\"24.22.2\"" root/usr/bin/openclaw-env || fail "default Node.js version not pinned"
+grep -q "OC_NODE_MIN_VERSION=\"\${OC_NODE_MIN_VERSION:-24.22.1}\"" root/usr/bin/openclaw-env || fail "minimum Node.js version not pinned"
+
+# openclaw-env 里的兜底常量必须与兼容矩阵一致: 默认通道的已验证版本、推荐 Node，
+# 且推荐 Node 满足矩阵内每个非 legacy 版本的 engines。
+if command -v node >/dev/null 2>&1; then
+	node -e '
+const fs = require("fs");
+const env = fs.readFileSync("root/usr/bin/openclaw-env", "utf8");
+const m = JSON.parse(fs.readFileSync("root/usr/share/openclaw/openclaw-compat.json", "utf8"));
+const pick = (re) => (env.match(re) || [])[1];
+const tested = pick(/^OC_TESTED_VERSION="([^"]+)"/m);
+const nodeV = pick(/^NODE_VERSION_V2="([^"]+)"/m);
+const floor = pick(/^OC_NODE_FLOOR_VERSION="([^"]+)"/m);
+const errs = [];
+if (tested !== m.channels[m.defaultChannel].verified) errs.push(`OC_TESTED_VERSION ${tested} != ${m.defaultChannel}.verified`);
+if (nodeV !== m.node.recommended) errs.push(`NODE_VERSION_V2 ${nodeV} != node.recommended`);
+for (const [name, ch] of Object.entries(m.channels)) {
+  if (!m.versions[ch.verified]) errs.push(`channel ${name} verified ${ch.verified} missing from versions`);
+}
+const cmp = (a, b) => { a = a.split(".").map(Number); b = b.split(".").map(Number); for (let i = 0; i < 3; i++) { if ((a[i]||0) !== (b[i]||0)) return (a[i]||0) - (b[i]||0); } return 0; };
+const sat = (v, range) => range.split("||").some((part) => part.trim().split(/\s+/).every((c) => {
+  const mm = c.match(/^(>=|<=|>|<|=)?(\d+(?:\.\d+){0,2})$/); if (!mm) return false;
+  const d = cmp(v, mm[2]); return { ">=": d >= 0, "<=": d <= 0, ">": d > 0, "<": d < 0 }[mm[1]] ?? d === 0;
+}));
+// 支持底线 = 矩阵内所有版本 engines 下限中最低的一个，矩阵变动时必须同步
+const lows = Object.values(m.versions).map((i) => (i.engines.match(/\d+\.\d+\.\d+/) || [])[0]).sort(cmp);
+if (floor !== lows[0]) errs.push(`OC_NODE_FLOOR_VERSION ${floor} != lowest engines floor in matrix ${lows[0]}`);
+for (const [ver, info] of Object.entries(m.versions)) {
+  if (info.channel === "legacy") continue;
+  if (!sat(nodeV, info.engines)) errs.push(`Node ${nodeV} does not satisfy ${ver} engines ${info.engines}`);
+  if (!/^sha512-/.test(info.integrity || "")) errs.push(`${ver} integrity missing`);
+}
+if (errs.length) { console.error(errs.join("\n")); process.exit(1); }
+' || fail "openclaw-env constants disagree with openclaw-compat.json"
+fi
 grep -q "oc_assert_node_min_version" root/usr/bin/openclaw-env || fail "Node.js minimum version check missing"
-grep -q 'oc_node_version_ge "$from_pkg" "$required"' root/usr/bin/openclaw-env || fail "package Node.js requirement must not lower static minimum"
+grep -q 'oc_node_version_ge "$from_pkg" "$OC_NODE_FLOOR_VERSION"' root/usr/bin/openclaw-env || fail "package Node.js requirement must not lower the supported floor"
 grep -q "validate-runtime" root/usr/bin/openclaw-env || fail "openclaw-env must validate runtime against full engines.node contract"
 grep -q "openclaw-package-contract.js" root/usr/bin/openclaw-env || fail "openclaw-env must reference package contract validator"
 grep -q "validate_openclaw_manifest" root/usr/bin/openclaw-env || fail "openclaw-env must define static manifest validation helper"
@@ -72,7 +106,7 @@ grep -q "archived-extensions" root/etc/init.d/openclaw || fail "legacy weixin ex
 grep -q "find_wechat_plugin_dir" luasrc/controller/openclaw.lua || fail "wechat npm plugin detection missing"
 grep -q "wechat_openclaw_plugin_install_cmd" luasrc/controller/openclaw.lua || fail "wechat install must use OpenClaw plugin installer"
 grep -q "delete d.plugins.installs\\['openclaw-weixin'\\]" luasrc/controller/openclaw.lua || fail "wechat config must remove deprecated authored install records"
-grep -q "plugins install --force --pin @tencent-weixin/openclaw-weixin@2.4.8" luasrc/controller/openclaw.lua || fail "wechat install must write the official plugin index"
+grep -q "plugins install --force --pin @tencent-weixin/openclaw-weixin@2.4.10" luasrc/controller/openclaw.lua || fail "wechat install must write the official plugin index"
 grep -q "channels\\['openclaw-weixin'\\].enabled = true" luasrc/controller/openclaw.lua || fail "wechat channel enable registration missing"
 grep -q "OpenClaw 插件索引注册完成" luasrc/controller/openclaw.lua || fail "wechat install log must confirm index registration"
 grep -q "plugins enable openclaw-weixin" luasrc/controller/openclaw.lua || fail "wechat lifecycle must persist the official plugin enable entry"
@@ -162,31 +196,31 @@ grep -q "fix_openclaw_state_permissions" root/usr/share/openclaw/oc-config.sh ||
 grep -q "fixStatePermissions" root/usr/share/openclaw/oc-config-interactive.js || fail "interactive config must use permission helper"
 grep -q "fixStatePermissions" root/usr/share/openclaw/web-pty.js || fail "web pty must use permission helper"
 
-grep -q "一万AI分享 粉丝专享 API" root/usr/share/openclaw/oc-config-interactive.js || fail "interactive menu missing Yiwan AI fan API"
-grep -q "configureYiwanAIFanAPI" root/usr/share/openclaw/oc-config-interactive.js || fail "interactive Yiwan AI configure handler missing"
-grep -q "yiwanai-fan" root/usr/share/openclaw/oc-config-interactive.js || fail "interactive Yiwan AI menu value missing"
-grep -q "一万AI分享 粉丝专享 API" root/usr/share/openclaw/oc-config.sh || fail "shell menu missing Yiwan AI fan API"
-grep -q "https://api.910501.xyz/v1" root/usr/share/openclaw/oc-config-interactive.js || fail "interactive Yiwan AI base URL missing"
-grep -q "https://api.910501.xyz/v1" root/usr/share/openclaw/oc-config.sh || fail "shell Yiwan AI base URL missing"
-grep -q "gpt-5.5" root/usr/share/openclaw/oc-config-interactive.js || fail "interactive Yiwan AI model missing"
-grep -q "gpt-5.5" root/usr/share/openclaw/oc-config.sh || fail "shell Yiwan AI model missing"
-grep -q "authSetApikey(providerName, apiKey,.*fan" root/usr/share/openclaw/oc-config-interactive.js || fail "interactive Yiwan AI auth profile missing"
-grep -q 'auth_set_apikey yiwanai "$api_key" "yiwanai:fan"' root/usr/share/openclaw/oc-config.sh || fail "shell Yiwan AI auth profile missing"
-grep -q "registerCustomProvider(providerName, baseUrl, apiKey, modelName, modelName, 1000000, 32000)" root/usr/share/openclaw/oc-config-interactive.js || fail "interactive Yiwan AI 1M context registration missing"
-grep -q 'register_custom_provider yiwanai "https://api.910501.xyz/v1" "$api_key" "gpt-5.5" "gpt-5.5" 1000000 32000' root/usr/share/openclaw/oc-config.sh || fail "shell Yiwan AI 1M context registration missing"
-grep -q 'registerAndSetModel(`${providerName}/${modelName}`)' root/usr/share/openclaw/oc-config-interactive.js || fail "interactive Yiwan AI active model missing"
-grep -q "provider.models\[0\].reasoning = true" root/usr/share/openclaw/oc-config-interactive.js || fail "interactive Yiwan AI reasoning flag missing"
-grep -q "p.models\[0\].reasoning=true" root/usr/share/openclaw/oc-config.sh || fail "shell Yiwan AI reasoning flag missing"
-grep -q "yiwanai/gpt-5.5" root/usr/share/openclaw/oc-config.sh || fail "shell Yiwan AI active model missing"
-grep -q "anthropic-compatible" root/usr/share/openclaw/oc-config.sh || fail "shell custom Anthropic provider missing"
-grep -q "anthropic-messages" root/usr/share/openclaw/oc-config.sh || fail "shell custom Anthropic provider mode missing"
+# 「一万AI分享 粉丝专享 API」对应的公益站点已停止运营，入口与固定地址必须彻底移除；
+# 自定义 OpenAI / Anthropic 兼容 API 配置能力保留。不清理已有用户配置中的 yiwanai provider。
+for f in root/usr/share/openclaw/oc-config-interactive.js root/usr/share/openclaw/oc-config.sh root/usr/share/openclaw/oc-menu-engine.js root/usr/share/openclaw/provider-catalog.json root/usr/share/openclaw/oc-providers.js luasrc/controller/openclaw.lua luasrc/model/cbi/openclaw/basic.lua; do
+	if grep -nE "粉丝专享|yiwanai|configureYiwanAIFanAPI|api\.910501\.xyz" "$f"; then
+		fail "retired Yiwan AI fan API must be removed from $f"
+	fi
+done
+# 自定义 OpenAI / Anthropic 兼容 API: 目录里保留三种兼容模式，后端接受它们，两套菜单都有 custom 分支。
+node -e '
+const c = require("./root/usr/share/openclaw/provider-catalog.json");
+const p = c.providers.find((x) => x.id === "custom");
+const compat = p ? p.methods.filter((m) => m.type === "custom").map((m) => m.compatibility) : [];
+for (const want of ["openai", "openai-responses", "anthropic"]) if (!compat.includes(want)) { console.error("missing " + want); process.exit(1); }
+' || fail "catalog must keep custom OpenAI / OpenAI Responses / Anthropic compatible providers"
+grep -q "'openai', 'openai-responses', 'anthropic'" root/usr/share/openclaw/oc-providers.js || fail "backend must accept all custom compatibility modes"
+grep -q "case 'custom': return configureCustomMethod" root/usr/share/openclaw/oc-config-interactive.js || fail "interactive menu must keep custom provider configuration"
+grep -Eq "^[[:space:]]*custom\)" root/usr/share/openclaw/oc-config.sh || fail "shell menu must keep custom provider configuration"
+grep -q "apply-custom" root/usr/share/openclaw/oc-config.sh || fail "shell menu must configure custom providers through the shared backend"
 
 grep -q "uciHttpsConsoleUrl" luasrc/view/openclaw/console.htm || fail "console must support HTTPS console url"
 grep -q "return 'http://'" luasrc/view/openclaw/console.htm || fail "console must fallback to HTTP gateway URL"
 grep -q "新窗口直达" luasrc/view/openclaw/console.htm || fail "console must expose a new-window direct entry"
 grep -q "新窗口打开" luasrc/view/openclaw/console.htm || fail "console must expose a new-window entry"
 grep -q "访问条件提示" luasrc/view/openclaw/console.htm || fail "console must provide access condition hint"
-grep -q "document.createElement('iframe')" luasrc/view/openclaw/console.htm || fail "console must embed OpenClaw in an iframe"
+if grep -q "createElement('iframe')" luasrc/view/openclaw/console.htm; then fail "console must not iframe-embed the Control UI (X-Frame-Options: DENY, #108)"; fi
 
 grep -q "root/usr/libexec" scripts/build_ipk.sh || fail "ipk script must package shell helpers"
 grep -q "root/usr/libexec" scripts/build_run.sh || fail "run script must package shell helpers"

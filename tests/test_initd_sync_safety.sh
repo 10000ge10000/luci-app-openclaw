@@ -36,6 +36,23 @@ if awk '/^OC_SYNC_PORT=/,/^" 2>\/dev\/null$/' "$INIT_SCRIPT" \
 	fail "sync_uci_to_json must not swallow JSON parse errors (that wipes user config)"
 fi
 
+# 启动路径上所有「读配置 → 改 → 写回」的内嵌脚本都不得吞掉解析错误后继续写
+# (_ensure_critical_config 每次启动都执行，旧实现会把含尾随逗号的配置覆盖成默认值)
+if grep -nE "try ?\{ ?d ?= ?JSON\.parse\(fs\.readFileSync\([^)]*\)\); ?\} ?catch ?\(e\) ?\{ ?\}" "$INIT_SCRIPT"; then
+	fail "init.d must not swallow JSON parse errors before writing config back"
+fi
+grep -Fq '已跳过关键字段补全' "$INIT_SCRIPT" \
+	|| fail "_ensure_critical_config must abort instead of overwriting an unparsable config"
+
+# 函数必须先定义后调用 (#108 日志: "_ensure_critical_config: not found")
+for fn in _ensure_critical_config _sync_token_after_doctor; do
+	def_line=$(grep -n "^[[:space:]]*${fn}() {" "$INIT_SCRIPT" | head -1 | cut -d: -f1)
+	[ -n "$def_line" ] || fail "$fn definition missing"
+	first_call=$(grep -nE "^[[:space:]]*${fn}[[:space:]]*$" "$INIT_SCRIPT" | head -1 | cut -d: -f1)
+	[ -n "$first_call" ] || fail "$fn is never called"
+	[ "$first_call" -gt "$def_line" ] || fail "$fn is called at line $first_call before its definition at line $def_line"
+done
+
 # ── 行为契约 (需要 node) ──
 NODE_BIN=""
 for cand in node nodejs /opt/openclaw/node/bin/node; do
@@ -120,5 +137,39 @@ printf '' > "$EMPTY"
 run_sync 18789 lan t3 "$EMPTY" || fail "sync should treat an empty file as a fresh install"
 "$NODE_BIN" -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$EMPTY" \
 	|| fail "sync produced invalid JSON for a fresh install"
+
+# ── _ensure_critical_config 行为契约 ──
+# 边界: 'OC_SYNC_TOKEN="$critical_token" "$NODE_BIN" -e "' 的下一行，到以 '" 2>/dev/null' 开头的行之前。
+ENSURE="$WORK/ensure.js"
+awk '
+	/OC_SYNC_TOKEN="\$critical_token" "\$NODE_BIN" -e "/ { grab = 1; next }
+	grab && /^" 2>\/dev\/null/ { exit }
+	grab { print }
+' "$INIT_SCRIPT" > "$ENSURE.tpl"
+[ -s "$ENSURE.tpl" ] || fail "cannot extract _ensure_critical_config script"
+
+run_ensure() {
+	sed "s#\${CONFIG_FILE}#$1#g" "$ENSURE.tpl" > "$ENSURE"
+	OC_SYNC_TOKEN="tok" "$NODE_BIN" "$ENSURE" >/dev/null 2>&1
+}
+
+# 场景 5: 尾随逗号配置 -> 必须中止且一字节不改
+BAD2="$WORK/bad2.json"
+printf '{\n "gateway": { "port": 18789, },\n "models": { "providers": { "p": { "apiKey": "SECRET2" } } }\n}\n' > "$BAD2"
+before=$(cat "$BAD2")
+if run_ensure "$BAD2"; then
+	fail "_ensure_critical_config should fail on a corrupt config"
+fi
+[ "$before" = "$(cat "$BAD2")" ] || fail "_ensure_critical_config modified a corrupt config (apiKey would be lost)"
+
+# 场景 6: 正常配置 -> 补全关键字段且保留其它字段
+GOOD2="$WORK/good2.json"
+printf '{ "models": { "providers": { "p": { "apiKey": "KEEP2" } } } }' > "$GOOD2"
+run_ensure "$GOOD2" || fail "_ensure_critical_config failed on a valid config"
+"$NODE_BIN" -e '
+const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+if (j.models.providers.p.apiKey !== "KEEP2") { console.error("apiKey lost"); process.exit(1); }
+if (j.gateway.mode !== "local" || j.gateway.auth.token !== "tok") { console.error("critical fields missing"); process.exit(1); }
+' "$GOOD2" || fail "_ensure_critical_config damaged a valid config"
 
 echo "ok"

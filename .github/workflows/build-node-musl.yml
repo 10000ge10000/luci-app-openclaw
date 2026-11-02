@@ -9,7 +9,7 @@ on:
         default: true
         type: boolean
       build_v2:
-        description: 'Build V2 (22.23.2) - Current stable version'
+        description: 'Build V2 (24.22.2) - Current stable version'
         required: false
         default: true
         type: boolean
@@ -70,7 +70,7 @@ jobs:
             dist/*.tar.xz
             dist/*.sha256
 
-  # ── V2 构建: 使用 Alpine apk LTS 模式 (22.23.2) ──
+  # ── V2 构建: 转发 unofficial-builds 官方社区 musl 构建 (24.22.2) ──
   build-v2:
     name: Build Node.js V2 (Current)
     if: ${{ inputs.build_v2 }}
@@ -89,17 +89,16 @@ jobs:
         with:
           platforms: linux/arm64
 
-      - name: Build Node.js V2 ARM64 musl (apk lts mode)
+      - name: Build Node.js V2 ARM64 musl (unofficial-builds mode)
         run: |
-          NODE_VER="22.23.2"
+          NODE_VER="24.22.2"
           mkdir -p dist
-          echo "=== Building Node.js v${NODE_VER} ARM64 musl (apk lts mode) ==="
+          echo "=== Fetching Node.js v${NODE_VER} ARM64 musl (unofficial-builds mode) ==="
           docker run --rm --platform linux/arm64 \
             -v "$PWD/dist:/output" \
             -v "$PWD/scripts/build-node-musl.sh:/build-node-musl.sh:ro" \
             -e "NODE_VER=${NODE_VER}" \
-            -e "BUILD_MODE=apk" \
-            -e "PKG_TYPE=lts" \
+            -e "BUILD_MODE=unofficial" \
             alpine:3.21 sh /build-node-musl.sh
 
       - name: Build info
@@ -168,20 +167,21 @@ jobs:
           body: |
             预编译的 Node.js ARM64 musl 二进制文件，供 ARM64 OpenWrt/iStoreOS 设备使用。
 
-            Node.js 官方 [unofficial-builds](https://unofficial-builds.nodejs.org/) 仅提供 x64 musl 构建，不提供 ARM64 musl。
-            此 Release 使用 Alpine Linux ARM64 (musl libc) 环境打包。
+            `openclaw-env` 优先从 [unofficial-builds](https://unofficial-builds.nodejs.org/) 下载 musl 构建，
+            本 Release 只作为其不可达时的兜底镜像。
 
             ## 版本说明
 
             | 文件 | 版本 | 用途 |
             |------|------|------|
-            | `node-v22.23.2-linux-arm64-musl.tar.xz` | V2 (当前) | OpenClaw v2026.9.1+ (要求 >= 22.22.3) |
+            | `node-v24.22.2-linux-arm64-musl.tar.xz` | V2 (当前) | OpenClaw 2026.9.36 / 2026.10.9 (要求 >=24.22.1 <25 \|\| >=26.12.1) |
+            | `node-v22.23.2-linux-arm64-musl.tar.xz` | 旧 V2 | OpenClaw 2026.9.1 (插件 v2.2.x 基线) |
             | `node-v22.x.x-linux-arm64-musl.tar.xz` | V1 (旧版) | OpenClaw v2026.3.8 及更早版本 |
 
             ## 构建模式
 
-            V2 和 V1 均使用 **Alpine apk 模式** 构建，避免把 glibc 二进制转换为 musl:
-            - **V2**: 打包 Alpine LTS Node.js v22.23.2，满足 OpenClaw >= 22.22.3 的要求
+            两种模式都不会把 glibc 二进制转换为 musl:
+            - **V2**: 原样转发 unofficial-builds 的 `node-v24.22.2-linux-arm64-musl.tar.xz`，按上游 SHASUMS256.txt 校验，并在 ARM64 Alpine 容器内实际运行验证
             - **V1**: 使用 Alpine `nodejs` LTS 包 (v22.x)，兼容旧版 OpenClaw
 
             `openclaw-env setup` 会在 ARM64 musl 设备上自动从此处下载合适的版本。

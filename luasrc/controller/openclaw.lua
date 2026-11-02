@@ -3,6 +3,7 @@ module("luci.controller.openclaw", package.seeall)
 
 local paths_ok, oc_paths = pcall(require, "openclaw.paths")
 local devices_ok, oc_devices = pcall(require, "openclaw.devices")
+local backup_ok, oc_backup = pcall(require, "openclaw.backup")
 
 local function shellquote(value)
 	if paths_ok and oc_paths.shellquote then
@@ -75,6 +76,49 @@ end
 
 local function is_newer_version(latest, current)
 	return latest ~= nil and current ~= nil and latest ~= "" and current ~= "" and compare_versions(latest, current) > 0
+end
+
+-- 解析安装/升级的版本选择。
+-- channel: extended-stable / latest (空 = UCI 中保存的通道)；pin: 精确版本或空；
+-- legacy_version: 旧前端的 version 参数 (stable / latest / x.y.z)；allow: "1" 允许未验证版本。
+-- 返回 { channel, pin, allow } 或 nil, 错误信息。所有值都在这里白名单校验，后续才拼入 shell。
+local function parse_version_selection(channel, pin, legacy_version, allow)
+	channel = tostring(channel or ""):gsub("%s+", "")
+	pin = tostring(pin or ""):gsub("%s+", ""):gsub("^v", "")
+	legacy_version = tostring(legacy_version or ""):gsub("%s+", "")
+	if channel == "" and legacy_version ~= "" then
+		if legacy_version == "stable" then
+			channel = ""
+		elseif legacy_version == "latest" or legacy_version == "extended-stable" then
+			channel = legacy_version
+		else
+			pin = legacy_version:gsub("^v", "")
+		end
+	end
+	if channel == "stable" then channel = "" end
+	if channel == "" then
+		local uci = require "luci.model.uci".cursor()
+		channel = uci:get("openclaw", "main", "channel") or ""
+	end
+	if channel == "" then channel = "extended-stable" end
+	if channel ~= "extended-stable" and channel ~= "latest" then
+		return nil, "未知的发布通道: " .. channel
+	end
+	if pin ~= "" and not pin:match("^%d+%.%d+%.%d+$") then
+		return nil, "锁定版本格式无效，应为 2026.9.36 这样的版本号"
+	end
+	return { channel = channel, pin = pin, allow = (tostring(allow or "") == "1") }
+end
+
+local function version_env_prefix(sel)
+	local prefix = "OC_CHANNEL=" .. shellquote(sel.channel) .. " "
+	if sel.pin ~= "" then
+		prefix = prefix .. "OC_VERSION=" .. shellquote(sel.pin) .. " "
+	end
+	if sel.allow then
+		prefix = prefix .. "OC_ALLOW_UNVERIFIED=1 "
+	end
+	return prefix
 end
 
 local function fix_openclaw_state_permissions(oc_data)
@@ -223,7 +267,7 @@ local function wechat_openclaw_plugin_install_cmd(install_path, oc_entry, log_fi
 		"OPENCLAW_SUPERVISOR_MODE=external OPENCLAW_SERVICE_REPAIR_POLICY=external " ..
 		"NODE_ICU_DATA=" .. install_path .. "/node/share/icu NPM_CONFIG_CACHE=$OC_WECHAT_DATA/.npm npm_config_cache=$OC_WECHAT_DATA/.npm TMPDIR=$OC_WECHAT_DATA/.tmp " ..
 		"PATH=" .. install_path .. "/node/bin:" .. install_path .. "/global/bin:$PATH " ..
-		"\"$OC_WECHAT_NODE\" \"$OC_WECHAT_ENTRY\" plugins install --force --pin @tencent-weixin/openclaw-weixin@2.4.8' >> " .. shellquote(log_file) .. " 2>&1; " ..
+		"\"$OC_WECHAT_NODE\" \"$OC_WECHAT_ENTRY\" plugins install --force --pin @tencent-weixin/openclaw-weixin@2.4.10' >> " .. shellquote(log_file) .. " 2>&1; " ..
 		"RC=$?; echo $RC > " .. shellquote(exit_file) .. "; " ..
 		"if [ $RC -eq 0 ]; then echo '✅ OpenClaw 插件索引注册完成' >> " .. shellquote(log_file) .. "; else echo '❌ OpenClaw 插件安装失败 (exit: '$RC')' >> " .. shellquote(log_file) .. "; fi; "
 end
@@ -736,25 +780,17 @@ function action_service_ctl()
 	elseif action == "setup" then
 		-- 先清理旧日志和状态
 		sys.exec("rm -f /tmp/openclaw-setup.log /tmp/openclaw-setup.pid /tmp/openclaw-setup.exit")
-		-- 获取用户选择的版本 (stable=指定版本, latest=最新版)
-		local version = http.formvalue("version") or ""
-		-- 获取自定义安装路径 (用户输入的是基础路径，如 /opt 或 /mnt/data)
+		-- 发布通道 / 锁定版本 / 是否允许未验证版本 (旧版前端只传 version=stable|latest|<x.y.z>)
 		local install_path = http.formvalue("install_path") or ""
-		local env_prefix = ""
-		if version == "stable" then
-			-- 稳定版: 读取 openclaw-env 中定义的 OC_TESTED_VERSION
-			local tested_ver = sys.exec("grep '^OC_TESTED_VERSION=' /usr/bin/openclaw-env 2>/dev/null | cut -d'\"' -f2"):gsub("%s+", "")
-			if tested_ver ~= "" then
-				env_prefix = "OC_VERSION=" .. shellquote(tested_ver) .. " "
-			end
-		elseif version == "latest" then
-			env_prefix = "OC_VERSION='latest' "
-		elseif version ~= "" and version ~= "latest" then
-			-- 校验版本号格式 (仅允许数字、点、横线、字母)
-			if version:match("^[%d%.%-a-zA-Z]+$") then
-				env_prefix = "OC_VERSION=" .. shellquote(version) .. " "
-			end
+		local sel, err = parse_version_selection(http.formvalue("channel"), http.formvalue("pin"), http.formvalue("version"), http.formvalue("allow_unverified"))
+		if not sel then
+			http.prepare_content("application/json")
+			http.write_json({ status = "error", message = err })
+			return
 		end
+		-- 安装时记住所选通道与锁定版本，后续「检测升级」与升级按同一策略执行
+		sys.exec("uci set openclaw.main.channel=" .. shellquote(sel.channel) .. "; uci set openclaw.main.pin_version=" .. shellquote(sel.pin) .. "; uci commit openclaw 2>/dev/null")
+		local env_prefix = version_env_prefix(sel)
 		-- 处理自定义安装路径
 		if install_path ~= "" then
 			local normalized = normalize_install_base(install_path)
@@ -776,15 +812,13 @@ function action_service_ctl()
 	elseif action == "upgrade" then
 		-- 先清理旧日志和状态
 		sys.exec("rm -f /tmp/openclaw-setup.log /tmp/openclaw-setup.pid /tmp/openclaw-setup.exit")
-		local target_ver = http.formvalue("version") or ""
-		local env_prefix = ""
-		if target_ver == "latest" then
-			env_prefix = "OC_VERSION='latest' "
-		elseif target_ver ~= "" and target_ver ~= "stable" then
-			if target_ver:match("^[%d%.%-a-zA-Z]+$") then
-				env_prefix = "OC_VERSION=" .. shellquote(target_ver) .. " "
-			end
+		local sel, err = parse_version_selection(http.formvalue("channel"), http.formvalue("pin"), http.formvalue("version"), http.formvalue("allow_unverified"))
+		if not sel then
+			http.prepare_content("application/json")
+			http.write_json({ status = "error", message = err })
+			return
 		end
+		local env_prefix = version_env_prefix(sel)
 		-- 异步执行 openclaw-env upgrade 事务状态机
 		sys.exec("( " .. env_prefix .. "/usr/bin/openclaw-env upgrade > /tmp/openclaw-setup.log 2>&1; echo $? > /tmp/openclaw-setup.exit ) & echo $! > /tmp/openclaw-setup.pid")
 		http.prepare_content("application/json")
@@ -906,34 +940,32 @@ function action_check_update()
 	end
 
 	-- 2. OpenClaw 核心版本检查
-	local openclaw_current = ""
-	local openclaw_latest = ""
-	local openclaw_has_update = false
-
-	local oc_check_str = sys.exec("/usr/bin/openclaw-env check 2>/dev/null | grep -i 'OpenClaw:' | head -1"):gsub("%s+", "")
-	if oc_check_str ~= "" then
-		openclaw_current = oc_check_str:match("[vV]?([%d%.%-]+)") or ""
-	end
-	if openclaw_current == "" or openclaw_current == "未安装" then
-		-- 备用路径读取: 从 package.json 探测
-		local candidate_pkg = "/opt/openclaw/global/lib/node_modules/openclaw/package.json"
-		local f_pkg = io.open(candidate_pkg, "r")
-		if f_pkg then
-			local content = f_pkg:read("*a")
-			f_pkg:close()
-			openclaw_current = content:match('"version"%s*:%s*"([^"]+)"') or ""
+	-- openclaw-env versions 同时给出「本插件已验证」(兼容矩阵) 与「上游已发布」(npm dist-tags)；
+	-- 是否提示升级只看已验证版本，上游更新的版本仅作提示，不会被当作可安全升级。
+	local openclaw_current, openclaw_latest, openclaw_has_update = "", "", false
+	local openclaw_channel, openclaw_upstream, openclaw_upstream_newer, openclaw_pinned = "", "", false, ""
+	local openclaw_upstream_error = false
+	local vjson = sys.exec("/usr/bin/openclaw-env versions 2>/dev/null")
+	local ok_j, jsonc = pcall(require, "luci.jsonc")
+	local v = (ok_j and vjson and vjson ~= "") and jsonc.parse(vjson) or nil
+	if type(v) == "table" then
+		openclaw_current = v.installed or ""
+		openclaw_channel = v.channel or v.defaultChannel or ""
+		openclaw_pinned = v.pin or ""
+		local ch = type(v.channels) == "table" and v.channels[openclaw_channel] or nil
+		if type(ch) == "table" then
+			openclaw_latest = ch.verified or ""
+			openclaw_upstream = ch.upstream or ""
+			openclaw_upstream_newer = ch.upstreamNewer == true
 		end
+		openclaw_upstream_error = (v.upstreamOk ~= true)
 	end
-
-	-- 推荐/已验证的最新稳定版本
-	local tested_ver = sys.exec("sed -n 's/^OC_TESTED_VERSION=\"\\(.*\\)\"/\\1/p' /usr/bin/openclaw-env 2>/dev/null"):gsub("%s+", "")
-	if tested_ver == "" then tested_ver = "2026.9.1" end
-	openclaw_latest = tested_ver
-
-	if openclaw_current ~= "" and openclaw_current ~= "未安装" and openclaw_latest ~= "" then
-		if is_newer_version(openclaw_latest, openclaw_current) then
-			openclaw_has_update = true
-		end
+	if openclaw_pinned == "" and openclaw_current ~= "" and openclaw_latest ~= "" then
+		openclaw_has_update = is_newer_version(openclaw_latest, openclaw_current)
+	end
+	-- 上游比已验证版本更新，但当前安装就是上游版本时不再提示
+	if openclaw_upstream_newer and openclaw_upstream == openclaw_current then
+		openclaw_upstream_newer = false
 	end
 
 	http.prepare_content("application/json")
@@ -945,7 +977,12 @@ function action_check_update()
 		release_notes = release_notes,
 		openclaw_current = openclaw_current,
 		openclaw_latest = openclaw_latest,
-		openclaw_has_update = openclaw_has_update
+		openclaw_has_update = openclaw_has_update,
+		openclaw_channel = openclaw_channel,
+		openclaw_pinned = openclaw_pinned,
+		openclaw_upstream = openclaw_upstream,
+		openclaw_upstream_newer = openclaw_upstream_newer,
+		openclaw_upstream_error = openclaw_upstream_error
 	})
 end
 
@@ -1174,8 +1211,17 @@ end
 function action_backup()
 	local http = require "luci.http"
 	local sys = require "luci.sys"
-	local uci = require "luci.model.uci".cursor()
 	local action = http.formvalue("action") or "create"
+
+	local function reply(tbl)
+		http.prepare_content("application/json")
+		http.write_json(tbl)
+	end
+
+	if not backup_ok or not oc_backup then
+		reply({ status = "error", message = "备份校验模块不可用，请重新安装插件" })
+		return
+	end
 
 	-- 使用统一路径 helper，兼容用户误填 /mnt/data/openclaw 的场景。
 	local install_path = get_install_path()
@@ -1198,23 +1244,55 @@ function action_backup()
 		end
 	end
 
-	if oc_entry == "" then
-		http.prepare_content("application/json")
-		http.write_json({ status = "error", message = "OpenClaw 未安装，无法执行备份操作" })
+	-- 下载/上传/列表/删除不依赖 OpenClaw CLI，未安装时也允许操作 (便于重装后上传恢复)
+	local needs_cli = (action == "create" or action == "verify")
+	if needs_cli and oc_entry == "" then
+		reply({ status = "error", message = "OpenClaw 未安装，无法执行备份操作" })
 		return
 	end
 
+	-- NODE_ICU_DATA: musl 小 ICU 构建的 Node.js 缺少它时 OpenClaw 启动即崩溃
+	-- (Invalid regular expression ... \p{Extended_Pictographic})，备份因此从未成功过。
 	local env_prefix = string.format(
-		"HOME=%s/data OPENCLAW_HOME=%s/data " ..
-		"OPENCLAW_STATE_DIR=%s/data/.openclaw " ..
-		"OPENCLAW_CONFIG_PATH=%s/data/.openclaw/openclaw.json " ..
-		"PATH=%s/node/bin:%s/global/bin:$PATH ",
-		install_path, install_path, install_path, install_path, install_path, install_path
+		"HOME=%s OPENCLAW_HOME=%s " ..
+		"OPENCLAW_STATE_DIR=%s OPENCLAW_CONFIG_PATH=%s " ..
+		"NODE_ICU_DATA=%s PATH=%s:%s:$PATH ",
+		shellquote(install_path .. "/data"), shellquote(install_path .. "/data"),
+		shellquote(install_path .. "/data/.openclaw"), shellquote(install_path .. "/data/.openclaw/openclaw.json"),
+		shellquote(install_path .. "/node/share/icu"),
+		shellquote(install_path .. "/node/bin"), shellquote(install_path .. "/global/bin")
 	)
+	local cli = shellquote(node_bin) .. " " .. shellquote(oc_entry)
 
 	-- 备份目录 (openclaw backup create 输出到 CWD，需要 cd)
-	local backup_dir = install_path .. "/data/.openclaw/backups"
-	local cd_prefix = "mkdir -p " .. backup_dir .. " && cd " .. backup_dir .. " && "
+	local oc_data_dir = install_path .. "/data/.openclaw"
+	local backup_dir = oc_data_dir .. "/backups"
+	local cd_prefix = "mkdir -p " .. shellquote(backup_dir) .. " && cd " .. shellquote(backup_dir) .. " && "
+
+	local function list_backup_names()
+		local names = {}
+		local iter = nixio.fs.dir(backup_dir)
+		if iter then
+			for name in iter do
+				if oc_backup.valid_name(name) then
+					local st = nixio.fs.stat(backup_dir .. "/" .. name)
+					if st and st.type == "reg" then names[#names + 1] = { name = name, mtime = st.mtime or 0 } end
+				end
+			end
+		end
+		table.sort(names, function(a, b) return a.mtime > b.mtime end)
+		return names
+	end
+
+	-- 解析请求中的备份文件名: 必须通过白名单且文件存在，不做模糊回退
+	local function resolve_backup(raw)
+		local name = oc_backup.valid_name(raw)
+		if not name then return nil, "无效的备份文件名" end
+		local path = backup_dir .. "/" .. name
+		local st = nixio.fs.stat(path)
+		if not st or st.type ~= "reg" then return nil, "备份文件不存在" end
+		return path, name
+	end
 
 	-- ── 辅助: 解析单个备份文件的 manifest 信息 ──
 	local function parse_backup_info(filepath)
@@ -1222,17 +1300,11 @@ function action_backup()
 		-- 文件大小
 		local st = nixio.fs.stat(filepath)
 		local size = st and st.size or 0
-		-- 从文件名提取时间戳: 2026-03-11T18-28-43.149Z-openclaw-backup.tar.gz
-		local ts = filename:match("^(%d%d%d%d%-%d%d%-%d%dT%d%d%-%d%d%-%d%d%.%d+Z)")
-		local display_time = ""
-		if ts then
-			-- 2026-03-11T18-28-43.149Z -> 2026-03-11 18:28:43
-			display_time = ts:gsub("T", " "):gsub("(%d%d)%-(%d%d)%-(%d%d)%.%d+Z", "%1:%2:%3")
-		end
+		local display_time = oc_backup.display_time(filename)
 		-- 读取 manifest.json 判断备份类型
 		local backup_type = "unknown"
 		local manifest_json = sys.exec(
-			"tar --wildcards -xzf " .. filepath .. " '*/manifest.json' -O 2>/dev/null"
+			"tar --wildcards -xzf " .. shellquote(filepath) .. " '*/manifest.json' -O 2>/dev/null"
 		)
 		if manifest_json and manifest_json ~= "" then
 			-- 简单字符串匹配，避免依赖 JSON 库
@@ -1266,178 +1338,264 @@ function action_backup()
 			size = size,
 			size_str = size_str,
 			time = display_time,
-			backup_type = backup_type
+			backup_type = backup_type,
+			uploaded = oc_backup.is_uploaded(filename)
 		}
+	end
+
+	local function upload_part_path(id)
+		return "/tmp/openclaw-backup-upload-" .. id .. ".part"
 	end
 
 	if action == "create" then
 		local only_config = http.formvalue("only_config") or "1"
 		local backup_cmd
 		if only_config == "1" then
-			backup_cmd = cd_prefix .. env_prefix .. node_bin .. " " .. oc_entry .. " backup create --only-config --no-include-workspace 2>&1"
+			backup_cmd = cd_prefix .. env_prefix .. cli .. " backup create --only-config --no-include-workspace 2>&1"
 		else
-			backup_cmd = cd_prefix .. "HOME=" .. backup_dir .. " " .. env_prefix .. node_bin .. " " .. oc_entry .. " backup create --no-include-workspace 2>&1"
+			backup_cmd = cd_prefix .. "HOME=" .. shellquote(backup_dir) .. " " .. env_prefix .. cli .. " backup create --no-include-workspace 2>&1"
 		end
-		local output = sys.exec(backup_cmd)
+		local output = sys.exec(backup_cmd) or ""
 		-- 完整备份可能输出到 HOME，移动到 backup_dir
-		sys.exec("mv " .. install_path .. "/data/*-openclaw-backup.tar.gz " .. backup_dir .. "/ 2>/dev/null")
-		-- 提取备份文件路径
-		local backup_path = output:match("([%S]+%.tar%.gz)")
-		http.prepare_content("application/json")
-		http.write_json({
+		sys.exec("mv " .. shellquote(install_path .. "/data") .. "/*-openclaw-backup.tar.gz " .. shellquote(backup_dir) .. "/ 2>/dev/null")
+		-- 以归档实际落盘为准判断成败，CLI 崩溃时不能返回 ok
+		local reported = output:match("([%S]+%-openclaw%-backup%.tar%.gz)")
+		local created = reported and oc_backup.valid_name(reported:match("([^/]+)$") or "")
+		if not created or not nixio.fs.stat(backup_dir .. "/" .. created, "type") then
+			local tail = output:gsub("\27%[[%d;]*m", ""):sub(-600)
+			reply({ status = "error", action = "create", message = "备份创建失败: " .. (tail ~= "" and tail or "未生成备份文件"), output = output })
+			return
+		end
+		reply({
 			status = "ok",
 			action = "create",
 			output = output,
-			backup_path = backup_path or ""
+			backup_path = backup_dir .. "/" .. created
 		})
 	elseif action == "verify" then
 		-- 找到最新的备份文件
-		local latest = sys.exec("ls -t " .. backup_dir .. "/*-openclaw-backup.tar.gz 2>/dev/null | head -1"):gsub("%s+", "")
-		if latest == "" then
-			http.prepare_content("application/json")
-			http.write_json({ status = "error", message = "未找到备份文件，请先创建备份" })
+		local names = list_backup_names()
+		if #names == 0 then
+			reply({ status = "error", message = "未找到备份文件，请先创建备份" })
 			return
 		end
-		local output = sys.exec(env_prefix .. node_bin .. " " .. oc_entry .. " backup verify " .. latest .. " 2>&1")
-		http.prepare_content("application/json")
-		http.write_json({
+		local latest = backup_dir .. "/" .. names[1].name
+		local output = sys.exec(env_prefix .. cli .. " backup verify " .. shellquote(latest) .. " 2>&1")
+		reply({
 			status = "ok",
 			action = "verify",
 			output = output,
 			backup_path = latest
 		})
 	elseif action == "restore" then
-		-- 支持指定文件名，不指定则用最新
+		-- 指定文件名时必须精确命中，不再静默回退到最新备份 (避免恢复了用户没选的备份)
 		local target_file = http.formvalue("file") or ""
-		local restore_path = ""
+		local restore_path, restore_name
 		if target_file ~= "" then
-			-- 安全: 只允许文件名，不允许路径穿越
-			target_file = target_file:match("([^/]+)$") or ""
-			if target_file:match("%-openclaw%-backup%.tar%.gz$") then
-				restore_path = backup_dir .. "/" .. target_file
+			restore_path, restore_name = resolve_backup(target_file)
+			if not restore_path then
+				reply({ status = "error", message = restore_name })
+				return
 			end
+		else
+			local names = list_backup_names()
+			if #names == 0 then
+				reply({ status = "error", message = "未找到备份文件，请先创建备份" })
+				return
+			end
+			restore_name = names[1].name
+			restore_path = backup_dir .. "/" .. restore_name
 		end
-		if restore_path == "" or not nixio.fs.stat(restore_path, "type") then
-			-- fallback 到最新
-			restore_path = sys.exec("ls -t " .. backup_dir .. "/*-openclaw-backup.tar.gz 2>/dev/null | head -1"):gsub("%s+", "")
-		end
-		if restore_path == "" then
-			http.prepare_content("application/json")
-			http.write_json({ status = "error", message = "未找到备份文件，请先创建备份" })
-			return
-		end
-		local oc_data_dir = install_path .. "/data/.openclaw"
 		local config_path = oc_data_dir .. "/openclaw.json"
 
-		-- 1) 先验证备份中的 openclaw.json 是否有效
-		local check_cmd = "tar -xzf " .. restore_path .. " --wildcards '*/openclaw.json' -O 2>/dev/null"
-		local json_content = sys.exec(check_cmd)
-		if not json_content or json_content == "" then
-			http.prepare_content("application/json")
-			http.write_json({ status = "error", message = "备份文件中未找到 openclaw.json" })
-			return
-		end
-		-- 写入临时文件并用 node 验证
-		local tmpfile = "/tmp/oc-restore-check.json"
-		local f = io.open(tmpfile, "w")
-		if f then f:write(json_content); f:close() end
-		local check = sys.exec(node_bin .. " -e \"try{JSON.parse(require('fs').readFileSync('" .. tmpfile .. "','utf8'));console.log('OK')}catch(e){console.log('FAIL')}\" 2>/dev/null"):gsub("%s+", "")
-		os.remove(tmpfile)
-		if check ~= "OK" then
-			http.prepare_content("application/json")
-			http.write_json({ status = "error", message = "备份文件中的配置无效，恢复已取消" })
+		-- 1) 校验归档结构: 上传的备份严格校验 (仅普通文件、仅状态目录子树)
+		local strict = oc_backup.is_uploaded(restore_name)
+		local names_text = sys.exec("tar -tzf " .. shellquote(restore_path) .. " 2>/dev/null")
+		local verbose_text = strict and sys.exec("tar -tvzf " .. shellquote(restore_path) .. " 2>/dev/null") or nil
+		local info, verr = oc_backup.validate_listing(names_text, verbose_text, strict)
+		if not info then
+			reply({ status = "error", message = "备份校验失败: " .. tostring(verr) })
 			return
 		end
 
-		-- 2) 备份当前配置
-		sys.exec("cp -f " .. config_path .. " " .. config_path .. ".pre-restore 2>/dev/null")
-
-		-- 3) 获取备份名前缀 (如: 2026-03-11T18-21-17.209Z-openclaw-backup)
-		--    备份结构: <backup_name>/payload/posix/<绝对路径>
-		local first_entry = sys.exec("tar -tzf " .. restore_path .. " 2>/dev/null | head -1"):gsub("%s+", "")
-		local backup_name = first_entry:match("^([^/]+)/") or ""
-		if backup_name == "" then
-			http.prepare_content("application/json")
-			http.write_json({ status = "error", message = "备份文件格式无法识别" })
+		-- 2) 验证备份中的 openclaw.json 是否为合法 JSON 对象
+		local json_content = sys.exec("tar -xzf " .. shellquote(restore_path) .. " -O " .. shellquote(info.member .. "/openclaw.json") .. " 2>/dev/null")
+		local jsonc = require "luci.jsonc"
+		local parsed = json_content and json_content ~= "" and jsonc.parse(json_content) or nil
+		if type(parsed) ~= "table" then
+			reply({ status = "error", message = "备份文件中的配置无效，恢复已取消" })
 			return
 		end
-		local payload_prefix = backup_name .. "/payload/posix/"
-		-- strip 3 层: <backup_name> / payload / posix
-		local strip_count = 3
+
+		-- 3) 备份当前配置
+		sys.exec("cp -f " .. shellquote(config_path) .. " " .. shellquote(config_path .. ".pre-restore") .. " 2>/dev/null")
 
 		-- 4) 停止服务
 		sys.exec("/etc/init.d/openclaw stop >/dev/null 2>&1")
 		-- 等待端口释放
 		sys.exec("sleep 2")
 
-		-- 5) 提取 payload 文件到根目录 (还原到原始绝对路径)
-		--    注: --wildcards 与 --strip-components 组合在某些 tar 版本不兼容
-		--    使用精确路径前缀代替 wildcards
-		local extract_cmd = string.format(
-			"tar -xzf %s --strip-components=%d -C / '%s' 2>&1",
-			restore_path, strip_count, payload_prefix
-		)
-		local extract_out = sys.exec(extract_cmd)
+		-- 5) 只解压备份中的状态目录子树，写入当前状态目录
+		--    (兼容从其它安装路径迁移，且归档中的其它路径不会被写到磁盘)
+		sys.exec("mkdir -p " .. shellquote(oc_data_dir))
+		local extract_out = sys.exec(string.format(
+			"tar -xzf %s --strip-components=%d -C %s %s 2>&1; echo \"__EXIT:$?__\"",
+			shellquote(restore_path), info.strip, shellquote(oc_data_dir), shellquote(info.member)
+		)) or ""
+		local extract_rc = tonumber(extract_out:match("__EXIT:(%d+)__") or "1")
+		extract_out = extract_out:gsub("%s*__EXIT:%d+__%s*$", "")
 
 		-- 6) 修复权限
-		fix_openclaw_state_permissions(oc_data_dir)
+		fix_openclaw_state_permissions(install_path .. "/data")
 
 		-- 7) 重启服务
 		sys.exec("/etc/init.d/openclaw start >/dev/null 2>&1 &")
 
-		http.prepare_content("application/json")
-		http.write_json({
+		if extract_rc ~= 0 then
+			reply({ status = "error", action = "restore", message = "解压备份失败，原配置已保存为 openclaw.json.pre-restore: " .. extract_out:sub(-400) })
+			return
+		end
+		reply({
 			status = "ok",
 			action = "restore",
-			message = "已从备份完整恢复所有配置和数据，服务正在重启。原配置已保存为 openclaw.json.pre-restore",
+			message = "已从备份恢复配置和数据，服务正在重启。原配置已保存为 openclaw.json.pre-restore",
 			backup_path = restore_path,
-			extract_output = extract_out or ""
+			extract_output = extract_out
 		})
 	elseif action == "list" then
-		-- 返回结构化的备份文件列表(含类型/大小/时间)
-		local files_raw = sys.exec("ls -t " .. backup_dir .. "/*-openclaw-backup.tar.gz 2>/dev/null"):gsub("%s+$", "")
+		-- 返回结构化的备份文件列表(含类型/大小/时间)，文件名不合规的条目不展示
 		local backups = {}
-		if files_raw ~= "" then
-			for fpath in files_raw:gmatch("[^\n]+") do
-				fpath = fpath:gsub("%s+", "")
-				if fpath ~= "" then
-					backups[#backups + 1] = parse_backup_info(fpath)
-				end
-				-- 最多返回 20 条
-				if #backups >= 20 then break end
-			end
+		for _, item in ipairs(list_backup_names()) do
+			backups[#backups + 1] = parse_backup_info(backup_dir .. "/" .. item.name)
+			-- 最多返回 20 条
+			if #backups >= 20 then break end
 		end
-		http.prepare_content("application/json")
-		http.write_json({
+		reply({
 			status = "ok",
 			action = "list",
 			backups = backups
 		})
 	elseif action == "delete" then
-		local target_file = http.formvalue("file") or ""
-		-- 安全: 只允许文件名，不允许路径穿越
-		target_file = target_file:match("([^/]+)$") or ""
-		if target_file == "" or not target_file:match("%-openclaw%-backup%.tar%.gz$") then
-			http.prepare_content("application/json")
-			http.write_json({ status = "error", message = "无效的备份文件名" })
-			return
-		end
-		local del_path = backup_dir .. "/" .. target_file
-		if not nixio.fs.stat(del_path, "type") then
-			http.prepare_content("application/json")
-			http.write_json({ status = "error", message = "备份文件不存在" })
+		local del_path, del_name = resolve_backup(http.formvalue("file") or "")
+		if not del_path then
+			reply({ status = "error", message = del_name })
 			return
 		end
 		os.remove(del_path)
-		http.prepare_content("application/json")
-		http.write_json({
+		reply({
 			status = "ok",
 			action = "delete",
-			message = "已删除备份: " .. target_file
+			message = "已删除备份: " .. del_name
 		})
+	elseif action == "download" then
+		-- 下载备份 (#111)。备份含 API Key 等敏感信息，仅限已登录管理员经 POST + CSRF 获取。
+		local path, name = resolve_backup(http.formvalue("file") or "")
+		if not path then
+			reply({ status = "error", message = name })
+			return
+		end
+		local f = io.open(path, "rb")
+		if not f then
+			reply({ status = "error", message = "无法读取备份文件" })
+			return
+		end
+		http.header("Content-Disposition", 'attachment; filename="' .. name .. '"')
+		http.header("Cache-Control", "no-store")
+		http.prepare_content("application/gzip")
+		while true do
+			local block = f:read(65536)
+			if not block then break end
+			http.write(block)
+		end
+		f:close()
+	elseif action == "upload_begin" then
+		-- 分块上传 (#111): 浏览器按块提交 base64，避免一次性大表单占满路由器内存，
+		-- 也不依赖不同 LuCI 版本的 multipart 处理差异。
+		local size = tonumber(http.formvalue("size") or "")
+		if not size or size <= 0 or size ~= math.floor(size) then
+			reply({ status = "error", message = "无效的文件大小" })
+			return
+		end
+		if size > oc_backup.MAX_UPLOAD_BYTES then
+			reply({ status = "error", message = string.format("备份文件过大 (上限 %d MB)", oc_backup.MAX_UPLOAD_BYTES / 1048576) })
+			return
+		end
+		-- 清理 1 小时前遗留的未完成上传
+		sys.exec("find /tmp -maxdepth 1 -name 'openclaw-backup-upload-*.part' -mmin +60 -exec rm -f {} \\; 2>/dev/null")
+		local id = sys.exec("head -c 8 /dev/urandom 2>/dev/null | hexdump -v -e '/1 \"%02x\"' 2>/dev/null"):gsub("%s+", "")
+		if not oc_backup.valid_upload_id(id) then
+			id = string.format("%08x%08x", os.time() % 4294967296, math.random(0, 4294967295))
+		end
+		local f = io.open(upload_part_path(id), "wb")
+		if not f then
+			reply({ status = "error", message = "无法在 /tmp 创建临时文件" })
+			return
+		end
+		f:close()
+		reply({ status = "ok", upload_id = id, chunk_b64 = 262144 })
+	elseif action == "upload_chunk" then
+		local id = oc_backup.valid_upload_id(http.formvalue("upload_id"))
+		local offset = tonumber(http.formvalue("offset") or "")
+		local data = http.formvalue("data") or ""
+		local part = id and upload_part_path(id)
+		local st = part and nixio.fs.stat(part)
+		if not st then
+			reply({ status = "error", message = "上传会话不存在或已过期，请重新上传" })
+			return
+		end
+		if #data > oc_backup.MAX_CHUNK_B64 then
+			reply({ status = "error", message = "上传分块过大" })
+			return
+		end
+		if offset ~= st.size then
+			reply({ status = "error", message = "上传分块顺序错误，请重新上传" })
+			return
+		end
+		local bytes = oc_backup.b64decode(data)
+		if not bytes then
+			reply({ status = "error", message = "上传数据编码无效" })
+			return
+		end
+		if st.size + #bytes > oc_backup.MAX_UPLOAD_BYTES then
+			os.remove(part)
+			reply({ status = "error", message = "备份文件过大，已取消上传" })
+			return
+		end
+		local f = io.open(part, "ab")
+		if not f then
+			reply({ status = "error", message = "写入临时文件失败" })
+			return
+		end
+		f:write(bytes)
+		f:close()
+		reply({ status = "ok", received = st.size + #bytes })
+	elseif action == "upload_finish" then
+		local id = oc_backup.valid_upload_id(http.formvalue("upload_id"))
+		local part = id and upload_part_path(id)
+		if not part or not nixio.fs.stat(part) then
+			reply({ status = "error", message = "上传会话不存在或已过期，请重新上传" })
+			return
+		end
+		local names_text = sys.exec("tar -tzf " .. shellquote(part) .. " 2>/dev/null")
+		local verbose_text = sys.exec("tar -tvzf " .. shellquote(part) .. " 2>/dev/null")
+		local info, verr = oc_backup.validate_listing(names_text, verbose_text, true)
+		if not info then
+			os.remove(part)
+			reply({ status = "error", message = "不是有效的 OpenClaw 备份: " .. tostring(verr) })
+			return
+		end
+		sys.exec("mkdir -p " .. shellquote(backup_dir))
+		local name = oc_backup.upload_name()
+		local dest = backup_dir .. "/" .. name
+		local mv_out = sys.exec("mv -f " .. shellquote(part) .. " " .. shellquote(dest) .. " 2>&1 && chmod 600 " .. shellquote(dest) .. " && echo __OK__")
+		if not mv_out:find("__OK__", 1, true) then
+			os.remove(part)
+			reply({ status = "error", message = "保存上传的备份失败: " .. mv_out })
+			return
+		end
+		reply({ status = "ok", action = "upload", filename = name, message = "备份已上传: " .. name })
 	else
-		http.prepare_content("application/json")
-		http.write_json({ status = "error", message = "未知备份操作: " .. action })
+		reply({ status = "error", message = "未知备份操作: " .. action })
 	end
 end
 
@@ -2342,6 +2500,25 @@ end
 -- ═══════════════════════════════════════════
 -- 设备配对管理 API (v2026.9.1+ Control UI 设备配对审批)
 -- ═══════════════════════════════════════════
+
+-- 可移植的超时执行 (#110)
+-- iStoreOS / Kwrt 等固件的 BusyBox 未编译 timeout applet，也未预装 coreutils-timeout，
+-- 直接调用 `timeout` 会得到 "sh: timeout: not found"。优先使用系统 timeout，
+-- 缺失时用后台看门狗兜底，超时返回 124 (与 coreutils 语义一致)。
+-- 看门狗的 stdio 必须重定向，否则它会持有 popen 管道，让 LuCI 请求一直挂起；
+-- 看门狗按秒轮询、目标结束后自行退出，不由调用方 kill，避免 shell 把 "Terminated" 作业通知
+-- 写进 2>&1 捕获的输出，污染 devices list 的 JSON。
+local OC_PORTABLE_TIMEOUT_SH =
+	"_oc_timeout() { _oc_t=$1; shift; " ..
+	"if command -v timeout >/dev/null 2>&1; then timeout \"$_oc_t\" \"$@\"; return $?; fi; " ..
+	"_oc_m=/tmp/.openclaw-timeout-$$-$(date +%s 2>/dev/null); rm -f \"$_oc_m\"; " ..
+	"\"$@\" & _oc_p=$!; " ..
+	"( _oc_n=0; while kill -0 \"$_oc_p\" 2>/dev/null; do " ..
+	"if [ \"$_oc_n\" -ge \"$_oc_t\" ]; then : > \"$_oc_m\"; kill -TERM \"$_oc_p\" 2>/dev/null; sleep 2; kill -KILL \"$_oc_p\" 2>/dev/null; break; fi; " ..
+	"sleep 1; _oc_n=$((_oc_n + 1)); done ) </dev/null >/dev/null 2>&1 & " ..
+	"wait \"$_oc_p\"; _oc_r=$?; " ..
+	"if [ -e \"$_oc_m\" ]; then rm -f \"$_oc_m\"; return 124; fi; return $_oc_r; }; "
+
 local function run_openclaw_devices_cli(args)
 	local sys = require "luci.sys"
 	local install_path = get_install_path()
@@ -2368,13 +2545,14 @@ local function run_openclaw_devices_cli(args)
 	if not ensure_openclaw_user(oc_data) then
 		return nil, "无法创建或读取 openclaw 系统用户"
 	end
-	local inner_cmd = string.format(
-		"cd %s && HOME=%s OPENCLAW_HOME=%s " ..
+	local inner_cmd = OC_PORTABLE_TIMEOUT_SH .. string.format(
+		-- 环境变量用 export 显式导出: 「VAR=x 函数名」前缀赋值在 ash/dash 中是否传给函数内的子进程属于未定义行为
+		"cd %s && export HOME=%s OPENCLAW_HOME=%s " ..
 		"OPENCLAW_STATE_DIR=%s/.openclaw OPENCLAW_CONFIG_PATH=%s/.openclaw/openclaw.json " ..
 		"OPENCLAW_SUPERVISOR_MODE=external OPENCLAW_SERVICE_REPAIR_POLICY=external " ..
 		"NODE_ICU_DATA=%s/node/share/icu NPM_CONFIG_CACHE=%s/.npm npm_config_cache=%s/.npm " ..
-		"TMPDIR=%s/.tmp PATH=%s/node/bin:%s/global/bin:$PATH " ..
-		"timeout 20 %s %s %s",
+		"TMPDIR=%s/.tmp PATH=%s/node/bin:%s/global/bin:$PATH && " ..
+		"_oc_timeout 20 %s %s %s",
 		shellquote(oc_data), shellquote(oc_data), shellquote(oc_data),
 		shellquote(oc_data), shellquote(oc_data), shellquote(install_path),
 		shellquote(oc_data), shellquote(oc_data), shellquote(oc_data),

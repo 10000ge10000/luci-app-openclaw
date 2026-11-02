@@ -180,29 +180,26 @@ for mutate in \
 done
 
 # ── 5. engines.node 范围语义与严格 semver 边界比对校验 ──
-# 契约规则: ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"
+# 默认规则取自默认通道已验证版本 (2026.9.36 / 2026.10.9): ">=24.22.1 <25 || >=26.12.1"
 
 # 合法版本
-"$NODE_BIN" "$CONTRACT_JS" validate-node-version "22.23.2" >/dev/null 2>&1 || fail "Node 22.23.2 must be valid"
-"$NODE_BIN" "$CONTRACT_JS" validate-node-version "22.22.3" >/dev/null 2>&1 || fail "Node 22.22.3 must be valid"
-"$NODE_BIN" "$CONTRACT_JS" validate-node-version "24.15.0" >/dev/null 2>&1 || fail "Node 24.15.0 must be valid"
-"$NODE_BIN" "$CONTRACT_JS" validate-node-version "25.9.0" >/dev/null 2>&1 || fail "Node 25.9.0 must be valid"
+for v in 24.22.2 24.22.1 24.30.0 26.12.1 27.0.0; do
+	"$NODE_BIN" "$CONTRACT_JS" validate-node-version "$v" >/dev/null 2>&1 || fail "Node $v must be valid"
+done
 
-# 非法版本: 低于最低要求 (退出码 1)
-set +e
-"$NODE_BIN" "$CONTRACT_JS" validate-node-version "22.19.0" >/dev/null 2>&1
-RC_LOW=$?
-"$NODE_BIN" "$CONTRACT_JS" validate-node-version "22.22.2" >/dev/null 2>&1
-RC_PATCH=$?
-"$NODE_BIN" "$CONTRACT_JS" validate-node-version "23.0.0" >/dev/null 2>&1
-RC_23=$?
-"$NODE_BIN" "$CONTRACT_JS" validate-node-version "24.14.0" >/dev/null 2>&1
-RC_24=$?
-set -e
-[ "$RC_LOW" -eq 1 ] || fail "Node 22.19.0 must exit 1 (contract unsatisfied)"
-[ "$RC_PATCH" -eq 1 ] || fail "Node 22.22.2 must exit 1 (contract unsatisfied)"
-[ "$RC_23" -eq 1 ] || fail "Node 23.0.0 must exit 1 (contract unsatisfied)"
-[ "$RC_24" -eq 1 ] || fail "Node 24.14.0 must exit 1 (contract unsatisfied)"
+# 非法版本: 低于最低要求或落在空档 (退出码 1)。22.x 是 v2.2.x 的默认 Node，
+# 新版 OpenClaw 必须拒绝，迫使升级流程先升级 Node 再升级 OpenClaw。
+for v in 22.23.2 22.22.3 24.15.0 24.22.0 25.9.0 26.12.0; do
+	set +e
+	"$NODE_BIN" "$CONTRACT_JS" validate-node-version "$v" >/dev/null 2>&1
+	rc=$?
+	set -e
+	[ "$rc" -eq 1 ] || fail "Node $v must exit 1 (contract unsatisfied), got $rc"
+done
+
+# 旧版 engines 规则仍可显式传入 (legacy 2026.9.1 回滚校验用)
+"$NODE_BIN" "$CONTRACT_JS" validate-node-version "22.23.2" ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0" >/dev/null 2>&1 \
+	|| fail "Node 22.23.2 must satisfy the legacy 2026.9.1 engines spec"
 
 # 非法格式/前后缀 semver (退出码 2)
 set +e
@@ -295,8 +292,18 @@ p.engines = { node: ">=" + process.versions.node };
 require("fs").writeFileSync(process.argv[2], JSON.stringify(p));
 ' "$FIXTURE_PKG" "$PKG_CUSTOM_NO_LIFECYCLE"
 
+# 默认 (未显式允许) 必须拒绝不在兼容矩阵中的版本: 「上游已发布」不等于「本插件已验证」
+if "$NODE_BIN" "$CONTRACT_JS" validate-manifest "$PKG_CUSTOM_NO_LIFECYCLE" "2026.9.9" >/dev/null 2>&1; then
+	fail "unverified version must be rejected unless OC_ALLOW_UNVERIFIED=1"
+fi
+# 以下用例模拟用户在界面勾选「允许安装未验证版本」
+OC_ALLOW_UNVERIFIED=1
+export OC_ALLOW_UNVERIFIED
+if "$NODE_BIN" "$CONTRACT_JS" validate-manifest "$PKG_CUSTOM_WITH_LIFECYCLE" "2026.9.9" >/dev/null 2>&1; then
+	fail "unverified version with unknown lifecycle script must be rejected even when allowed"
+fi
 CUSTOM_VAL_OUT=$("$NODE_BIN" "$CONTRACT_JS" validate-manifest "$PKG_CUSTOM_NO_LIFECYCLE" "2026.9.9" 2>&1)
-echo "$CUSTOM_VAL_OUT" | grep -q "未验证" || fail "custom version without lifecycle must be explicitly marked unverified"
+echo "$CUSTOM_VAL_OUT" | grep -Eq "未(经本插件)?验证" || fail "custom version without lifecycle must be explicitly marked unverified"
 
 # 8.0 自定义/latest 版本包含常规 scripts (如 test, start, prepush, build) 但不含 npm 安装期 lifecycle 时必须正常放行 (标记未验证)
 PKG_CUSTOM_WITH_REGULAR_SCRIPTS="$TMP_DIR/pkg-custom-regular-scripts.json"
@@ -315,7 +322,7 @@ require("fs").writeFileSync(process.argv[2], JSON.stringify(p));
 
 REGULAR_VAL_OUT=$("$NODE_BIN" "$CONTRACT_JS" validate-manifest "$PKG_CUSTOM_WITH_REGULAR_SCRIPTS" "2026.9.9" 2>&1) \
 	|| fail "custom version with regular scripts (test, start, prepush) should be allowed"
-echo "$REGULAR_VAL_OUT" | grep -q "未验证" || fail "custom version with regular scripts must be marked unverified"
+echo "$REGULAR_VAL_OUT" | grep -Eq "未(经本插件)?验证" || fail "custom version with regular scripts must be marked unverified"
 
 # 8.0.1 真实 npm 安装期钩子 (如 prepare, prepack, postpack, install) 在自定义/latest 版本中必须被拦截 (fail-closed)
 for hook in prepare prepack postpack install; do
@@ -388,6 +395,67 @@ require("fs").writeFileSync(process.argv[2], JSON.stringify(p));
 if "$NODE_BIN" "$CONTRACT_JS" validate-manifest "$PKG_CUSTOM_VER_MISMATCH" "2026.9.9" >/dev/null 2>&1; then
 	fail "custom version with version mismatch must be rejected (fail-closed)"
 fi
+
+unset OC_ALLOW_UNVERIFIED
+
+# ── 8.1 发布通道/锁定版本解析与 tarball integrity (fixture 矩阵，与真实版本号解耦) ──
+FIX_COMPAT="$TMP_DIR/compat-fixture.json"
+FIX_TGZ="$TMP_DIR/fixture-pkg.tgz"
+echo "fixture tarball payload" > "$FIX_TGZ"
+"$NODE_BIN" -e '
+const fs = require("fs");
+const crypto = require("crypto");
+const integ = "sha512-" + crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64");
+const base = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const v = (channel) => ({ channel, engines: ">=24.22.1 <25", integrity: integ, unpackedSize: 1, sqliteVec: base.versions[Object.keys(base.versions)[0]].sqliteVec, verification: {} });
+fs.writeFileSync(process.argv[2], JSON.stringify({
+  schema: 1, node: base.node, lifecycle: base.lifecycle, defaultChannel: "extended-stable",
+  channels: { "extended-stable": { verified: "2030.1.5" }, latest: { verified: "2030.2.3" } },
+  versions: { "2030.1.5": v("extended-stable"), "2030.2.3": v("latest"), "2029.12.1": v("legacy") }
+}));
+' "$FIX_TGZ" "$FIX_COMPAT" "$REPO_ROOT/root/usr/share/openclaw/openclaw-compat.json"
+
+rt() { OC_COMPAT_FILE="$FIX_COMPAT" "$NODE_BIN" "$CONTRACT_JS" resolve-target "$@" 2>/dev/null; }
+expect_rt() {
+	_want="$1"; shift
+	_got=$(rt "$@") || fail "resolve-target $* should succeed"
+	[ "$_got" = "$_want" ] || fail "resolve-target $*: expected '$_want', got '$_got'"
+}
+expect_rt_reject() {
+	if rt "$@" >/dev/null; then fail "resolve-target $* must be rejected"; fi
+}
+# 默认 / stable 别名 → 默认通道的已验证版本
+expect_rt "2030.1.5 extended-stable verified same -"
+expect_rt "2030.1.5 extended-stable verified same -" --channel stable
+expect_rt "2030.2.3 latest verified same -" --channel latest
+# 上游有更新但未验证: 默认仍装已验证版本，只提示 newer
+expect_rt "2030.2.3 latest verified newer 2030.2.9" --channel latest --upstream 2030.2.9
+# 用户显式允许后才安装上游最新
+expect_rt "2030.2.9 latest unverified newer 2030.2.9" --channel latest --upstream 2030.2.9 --allow-unverified
+# 上游更旧 (镜像滞后) 不得降级
+expect_rt "2030.2.3 latest verified same 2030.2.1" --channel latest --upstream 2030.2.1 --allow-unverified
+# 锁定版本: 矩阵内直接放行 (含 legacy 回滚目标)，矩阵外须显式允许
+expect_rt "2029.12.1 legacy verified same -" --pin 2029.12.1
+expect_rt "2030.1.5 extended-stable verified same -" --pin v2030.1.5
+expect_rt_reject --pin 2030.3.1
+expect_rt "2030.3.1 pinned unverified same -" --pin 2030.3.1 --allow-unverified
+# 锁定优先于通道
+expect_rt "2029.12.1 legacy verified same -" --channel latest --pin 2029.12.1
+# 非法输入失败关闭
+expect_rt_reject --pin bad
+expect_rt_reject --pin 2030.1.5-beta.1 --allow-unverified
+expect_rt_reject --channel nightly
+# 矩阵缺失时失败关闭
+if OC_COMPAT_FILE="$TMP_DIR/missing-compat.json" "$NODE_BIN" "$CONTRACT_JS" resolve-target >/dev/null 2>&1; then
+	fail "resolve-target must fail closed when the compat matrix is missing"
+fi
+
+vi_rc() { set +e; OC_COMPAT_FILE="$FIX_COMPAT" "$NODE_BIN" "$CONTRACT_JS" validate-integrity "$@" >/dev/null 2>&1; _rc=$?; set -e; echo "$_rc"; }
+[ "$(vi_rc "$FIX_TGZ" 2030.1.5)" -eq 0 ] || fail "tarball matching the matrix integrity must pass"
+echo "tampered" > "$TMP_DIR/tampered.tgz"
+[ "$(vi_rc "$TMP_DIR/tampered.tgz" 2030.1.5)" -eq 1 ] || fail "tarball with a different sha512 must be rejected (tampered mirror)"
+[ "$(vi_rc "$TMP_DIR/tampered.tgz" 2030.3.1)" -eq 0 ] || fail "unverified version has no matrix integrity and must defer to npm"
+[ "$(vi_rc "$TMP_DIR/absent.tgz" 2030.1.5)" -eq 2 ] || fail "missing tarball must be a usage error (exit 2)"
 
 # ── 9. lifecycle 失败传播与 postinstall 环境变量行为校验 ──
 MOCK_LIFECYCLE_DIR="$TMP_DIR/mock-lifecycle"
@@ -678,6 +746,15 @@ NPM_BIN="$MOCK_NPM_DIR/bin/npm"
 NODE_BIN="$NODE_BIN"
 OC_PACKAGE_CONTRACT="$CONTRACT_JS"
 OC_TESTED_VERSION="2026.9.1"
+# v2.3 起 install/upgrade 先经通道/锁定版本解析与矩阵 integrity 校验；这两步另有专项测试
+# (第 8.1 节)，此处直接给出目标版本，专注验证事务、回滚与状态保持。
+# OC_ALLOW_UNVERIFIED=1 模拟用户勾选「允许安装未验证版本」，使 2026.9.9 等自定义版本可进入预检。
+OC_ALLOW_UNVERIFIED=1
+export OC_ALLOW_UNVERIFIED
+resolve_target_version() { OC_TARGET_VER="\${OC_VERSION:-\$OC_TESTED_VERSION}"; OC_TARGET_CHANNEL="test"; OC_TARGET_VERIFIED=1; OC_TARGET_NEWER=0; OC_TARGET_UPSTREAM=""; return 0; }
+print_target_summary() { :; }
+validate_openclaw_tarball() { return 0; }
+download_node() { return \${MOCK_NODE_RC:-0}; }
 OC_GLOBAL="$MOCK_NPM_DIR/global"
 OC_VERSION=""
 log_info() { :; }
@@ -688,6 +765,8 @@ find_oc_entry() { echo "$MOCK_INSTALL_PKG_DIR/openclaw.mjs"; }
 execute_openclaw_lifecycle() { return 0; }
 install_openclaw_cli_wrapper() { return 0; }
 assert_node_runtime() { return 0; }
+npm_selfcheck() { return 0; }
+npm_runtime_broken_hint() { :; }
 EOF
 echo "console.log('2026.9.1');" > "$MOCK_INSTALL_PKG_DIR/openclaw.mjs"
 chmod +x "$MOCK_INSTALL_PKG_DIR/openclaw.mjs"
@@ -882,6 +961,15 @@ NPM_BIN="$MOCK_PRESERVE_DIR/bin/npm"
 NODE_BIN="$NODE_BIN"
 OC_PACKAGE_CONTRACT="$CONTRACT_JS"
 OC_TESTED_VERSION="2026.9.1"
+# v2.3 起 install/upgrade 先经通道/锁定版本解析与矩阵 integrity 校验；这两步另有专项测试
+# (第 8.1 节)，此处直接给出目标版本，专注验证事务、回滚与状态保持。
+# OC_ALLOW_UNVERIFIED=1 模拟用户勾选「允许安装未验证版本」，使 2026.9.9 等自定义版本可进入预检。
+OC_ALLOW_UNVERIFIED=1
+export OC_ALLOW_UNVERIFIED
+resolve_target_version() { OC_TARGET_VER="\${OC_VERSION:-\$OC_TESTED_VERSION}"; OC_TARGET_CHANNEL="test"; OC_TARGET_VERIFIED=1; OC_TARGET_NEWER=0; OC_TARGET_UPSTREAM=""; return 0; }
+print_target_summary() { :; }
+validate_openclaw_tarball() { return 0; }
+download_node() { return \${MOCK_NODE_RC:-0}; }
 OC_GLOBAL="$EXISTING_GLOBAL"
 OC_VERSION="\${OC_VERSION:-}"
 log_info() { :; }
@@ -899,6 +987,8 @@ find_oc_entry() {
 install_openclaw_cli_wrapper() { return 0; }
 assert_node_runtime() { return 0; }
 cleanup_partial_install() { :; }
+npm_selfcheck() { return 0; }
+npm_runtime_broken_hint() { :; }
 EOF
 awk '/^validate_openclaw_manifest\(\)/,/^\}$/' "$ENV_SCRIPT" >> "$HARNESS_PRESERVE"
 awk '/^execute_openclaw_lifecycle\(\)/,/^\}$/' "$ENV_SCRIPT" >> "$HARNESS_PRESERVE"
@@ -1016,6 +1106,15 @@ NPM_BIN="$MOCK_PRESERVE_DIR/bin/npm"
 NODE_BIN="$NODE_BIN"
 OC_PACKAGE_CONTRACT="$CONTRACT_JS"
 OC_TESTED_VERSION="2026.9.1"
+# v2.3 起 install/upgrade 先经通道/锁定版本解析与矩阵 integrity 校验；这两步另有专项测试
+# (第 8.1 节)，此处直接给出目标版本，专注验证事务、回滚与状态保持。
+# OC_ALLOW_UNVERIFIED=1 模拟用户勾选「允许安装未验证版本」，使 2026.9.9 等自定义版本可进入预检。
+OC_ALLOW_UNVERIFIED=1
+export OC_ALLOW_UNVERIFIED
+resolve_target_version() { OC_TARGET_VER="\${OC_VERSION:-\$OC_TESTED_VERSION}"; OC_TARGET_CHANNEL="test"; OC_TARGET_VERIFIED=1; OC_TARGET_NEWER=0; OC_TARGET_UPSTREAM=""; return 0; }
+print_target_summary() { :; }
+validate_openclaw_tarball() { return 0; }
+download_node() { return \${MOCK_NODE_RC:-0}; }
 OC_GLOBAL="$EXISTING_GLOBAL"
 OC_VERSION="\${OC_VERSION:-}"
 log_info() { :; }
@@ -1033,6 +1132,8 @@ find_oc_entry() {
 install_openclaw_cli_wrapper() { return 0; }
 assert_node_runtime() { return 0; }
 cleanup_partial_install() { :; }
+npm_selfcheck() { return 0; }
+npm_runtime_broken_hint() { :; }
 EOF
 awk '/^validate_openclaw_manifest\(\)/,/^\}$/' "$ENV_SCRIPT" >> "$HARNESS_UPGRADE_PRESERVE"
 awk '/^execute_openclaw_lifecycle\(\)/,/^\}$/' "$ENV_SCRIPT" >> "$HARNESS_UPGRADE_PRESERVE"
@@ -1129,6 +1230,19 @@ RC_UP_ENGINES=$?
 set -e
 assert_state_preserved "upgrade_openclaw incompat-engines" "$RC_UP_ENGINES"
 
+# (11.3h2) Node 运行时升级失败: 必须在 npm pack 之前终止，已有安装与版本标记保持不变
+echo "valid-custom" > "$MOCK_PACK_TYPE"
+: > "$MOCK_PRESERVE_ARGS"
+set +e
+MOCK_NODE_RC=1 OC_VERSION="2026.9.9" sh "$HARNESS_UPGRADE_PRESERVE" >/dev/null 2>&1
+RC_UP_NODE=$?
+set -e
+[ "$RC_UP_NODE" -ne 0 ] || fail "upgrade_openclaw must fail when the Node.js runtime upgrade fails"
+if [ -f "$MOCK_PRESERVE_ARGS" ] && grep -q -- "pack openclaw@" "$MOCK_PRESERVE_ARGS"; then
+	fail "upgrade_openclaw must not download OpenClaw after a failed Node.js upgrade"
+fi
+assert_state_preserved "upgrade_openclaw node-runtime-failure" "$RC_UP_NODE"
+
 # (11.3i) 通过预检后升级使用同一个本地 tarball 产物
 echo "valid-custom" > "$MOCK_PACK_TYPE"
 rm -f "$MOCK_PRESERVE_ARGS"
@@ -1139,11 +1253,47 @@ grep -q -- "--ignore-scripts" "$MOCK_PRESERVE_ARGS" || fail "upgrade_openclaw mu
 grep -q -- "--omit=optional" "$MOCK_PRESERVE_ARGS" || fail "upgrade_openclaw must enforce --omit=optional"
 
 # ── 12. 构建脚本与发布工作流版本与架构一致性 ──
-grep -q 'NODE_VERSION_V2="22.23.2"' "$ENV_SCRIPT" || fail "NODE_VERSION_V2 must be pinned to 22.23.2"
-grep -q 'OC_TESTED_VERSION="2026.9.1"' "$ENV_SCRIPT" || fail "OC_TESTED_VERSION must be pinned to 2026.9.1"
-grep -q 'node-v22.23.2-linux-arm64-musl.tar.xz' "$WORKFLOW" || fail "workflow must produce node-v22.23.2-linux-arm64-musl.tar.xz"
+grep -q 'NODE_VERSION_V2="24.22.2"' "$ENV_SCRIPT" || fail "NODE_VERSION_V2 must be pinned to 24.22.2"
+grep -q 'OC_TESTED_VERSION="2026.9.36"' "$ENV_SCRIPT" || fail "OC_TESTED_VERSION must be pinned to 2026.9.36"
+grep -q 'node-v24.22.2-linux-arm64-musl.tar.xz' "$WORKFLOW" || fail "workflow must produce node-v24.22.2-linux-arm64-musl.tar.xz"
 grep -Fq 'Actual Alpine Node.js version (${ACTUAL_VER}) does not match requested version (${NODE_VER})' "$BUILD_SCRIPT" || fail "build script must reject Alpine apk version mismatch"
 grep -Fq 'cross mode (glibc binary with patched ELF interpreter) is forbidden' "$BUILD_SCRIPT" || fail "build script must forbid fake glibc cross mode"
+
+# ── 12.1 assert_node_runtime: 以已安装包的 engines 为准，但不低于支持底线 ──
+# 存量 / 预放置的 Node 22 + 2026.9.1 不能被新版默认下限误拒 (#113)；新版包在 Node 22 上必须被拒；
+# engines 异常宽松的包不能绕过底线。
+NR_DIR="$TMP_DIR/node-runtime"
+mkdir -p "$NR_DIR/pkg"
+cat > "$NR_DIR/mock-node" <<EOF
+#!/bin/sh
+if [ "\$1" = "--version" ]; then echo "v\${MOCK_NODE_VER}"; exit 0; fi
+exec "$NODE_BIN" "\$@"
+EOF
+chmod +x "$NR_DIR/mock-node"
+echo "console.log('x');" > "$NR_DIR/pkg/openclaw.mjs"
+NR_HARNESS="$NR_DIR/harness.sh"
+{
+	cat "$REPO_ROOT/root/usr/libexec/openclaw-node.sh"
+	printf 'log_error() { echo "ERROR: $*" >&2; }\nlog_warn() { :; }\nlog_info() { :; }\n'
+	awk '/^detect_oc_node_requirement\(\)/,/^}$/' "$ENV_SCRIPT"
+	awk '/^assert_node_runtime\(\)/,/^}$/' "$ENV_SCRIPT"
+	echo 'assert_node_runtime'
+} > "$NR_HARNESS"
+nr_run() { # <node 版本> <find_oc_entry 结果>
+	env MOCK_NODE_VER="$1" NODE_BIN="$NR_DIR/mock-node" NODE_BASE="$NR_DIR/base" OC_PACKAGE_CONTRACT="$CONTRACT_JS" \
+		OC_NODE_MIN_VERSION=24.22.1 OC_NODE_FLOOR_VERSION=22.22.3 sh -c "find_oc_entry() { echo '$2'; }; . '$NR_HARNESS'" >/dev/null 2>&1
+}
+printf '{ "engines": { "node": ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0" } }\n' > "$NR_DIR/pkg/package.json"
+nr_run 22.23.2 "$NR_DIR/pkg/openclaw.mjs" || fail "Node 22 + installed legacy OpenClaw must pass (its engines allow it)"
+nr_run 24.22.2 "$NR_DIR/pkg/openclaw.mjs" || fail "Node 24 + installed legacy OpenClaw must pass"
+if nr_run 22.19.0 "$NR_DIR/pkg/openclaw.mjs"; then fail "Node below the installed package engines must be rejected"; fi
+printf '{ "engines": { "node": ">=24.22.1 <25 || >=26.12.1" } }\n' > "$NR_DIR/pkg/package.json"
+if nr_run 22.23.2 "$NR_DIR/pkg/openclaw.mjs"; then fail "Node 22 + current OpenClaw must be rejected"; fi
+nr_run 24.22.2 "$NR_DIR/pkg/openclaw.mjs" || fail "Node 24 + current OpenClaw must pass"
+if nr_run 22.23.2 ""; then fail "without an installed package the default minimum must apply"; fi
+printf '{ "engines": { "node": ">=18.0.0" } }\n' > "$NR_DIR/pkg/package.json"
+if nr_run 20.0.0 "$NR_DIR/pkg/openclaw.mjs"; then fail "a package with lax engines must not lower the supported floor"; fi
+nr_run 22.23.2 "$NR_DIR/pkg/openclaw.mjs" || fail "Node above the floor must pass when the package allows it"
 
 # ── 13. lifecycle 副作用与依赖解析契约测试 (预检零执行、正式安装/升级恰好一次、失败回滚与状态保持) ──
 FIXTURE_PREINSTALL="$REPO_ROOT/tests/fixtures/lifecycle-side-effect/scripts/preinstall-package-manager-warning.mjs"
@@ -1228,6 +1378,15 @@ NPM_BIN="$MOCK_SE_DIR/bin/npm"
 NODE_BIN="$NODE_BIN"
 OC_PACKAGE_CONTRACT="$CONTRACT_JS"
 OC_TESTED_VERSION="2026.9.1"
+# v2.3 起 install/upgrade 先经通道/锁定版本解析与矩阵 integrity 校验；这两步另有专项测试
+# (第 8.1 节)，此处直接给出目标版本，专注验证事务、回滚与状态保持。
+# OC_ALLOW_UNVERIFIED=1 模拟用户勾选「允许安装未验证版本」，使 2026.9.9 等自定义版本可进入预检。
+OC_ALLOW_UNVERIFIED=1
+export OC_ALLOW_UNVERIFIED
+resolve_target_version() { OC_TARGET_VER="\${OC_VERSION:-\$OC_TESTED_VERSION}"; OC_TARGET_CHANNEL="test"; OC_TARGET_VERIFIED=1; OC_TARGET_NEWER=0; OC_TARGET_UPSTREAM=""; return 0; }
+print_target_summary() { :; }
+validate_openclaw_tarball() { return 0; }
+download_node() { return \${MOCK_NODE_RC:-0}; }
 OC_GLOBAL="$MOCK_SE_GLOBAL"
 OC_VERSION="2026.9.1"
 OC_SETUP_CLEANUP=0
@@ -1251,6 +1410,8 @@ install_openclaw_cli_wrapper() {
 }
 assert_node_runtime() { return 0; }
 cleanup_partial_install() { :; }
+npm_selfcheck() { return 0; }
+npm_runtime_broken_hint() { :; }
 EOF
 awk '/^validate_openclaw_manifest\(\)/,/^\}$/' "$ENV_SCRIPT" >> "$HARNESS_SE_INSTALL"
 awk '/^execute_openclaw_lifecycle\(\)/,/^\}$/' "$ENV_SCRIPT" >> "$HARNESS_SE_INSTALL"
@@ -1272,6 +1433,15 @@ NPM_BIN="$MOCK_SE_DIR/bin/npm"
 NODE_BIN="$NODE_BIN"
 OC_PACKAGE_CONTRACT="$CONTRACT_JS"
 OC_TESTED_VERSION="2026.9.1"
+# v2.3 起 install/upgrade 先经通道/锁定版本解析与矩阵 integrity 校验；这两步另有专项测试
+# (第 8.1 节)，此处直接给出目标版本，专注验证事务、回滚与状态保持。
+# OC_ALLOW_UNVERIFIED=1 模拟用户勾选「允许安装未验证版本」，使 2026.9.9 等自定义版本可进入预检。
+OC_ALLOW_UNVERIFIED=1
+export OC_ALLOW_UNVERIFIED
+resolve_target_version() { OC_TARGET_VER="\${OC_VERSION:-\$OC_TESTED_VERSION}"; OC_TARGET_CHANNEL="test"; OC_TARGET_VERIFIED=1; OC_TARGET_NEWER=0; OC_TARGET_UPSTREAM=""; return 0; }
+print_target_summary() { :; }
+validate_openclaw_tarball() { return 0; }
+download_node() { return \${MOCK_NODE_RC:-0}; }
 OC_GLOBAL="$MOCK_SE_GLOBAL"
 OC_VERSION="2026.9.1"
 log_info() { :; }
@@ -1294,6 +1464,8 @@ install_openclaw_cli_wrapper() {
 }
 assert_node_runtime() { return 0; }
 cleanup_partial_install() { :; }
+npm_selfcheck() { return 0; }
+npm_runtime_broken_hint() { :; }
 EOF
 awk '/^validate_openclaw_manifest\(\)/,/^\}$/' "$ENV_SCRIPT" >> "$HARNESS_SE_UPGRADE"
 awk '/^execute_openclaw_lifecycle\(\)/,/^\}$/' "$ENV_SCRIPT" >> "$HARNESS_SE_UPGRADE"

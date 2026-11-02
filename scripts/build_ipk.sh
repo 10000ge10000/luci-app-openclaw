@@ -82,8 +82,10 @@ cp "$PKG_DIR/VERSION" "$DATA_DIR/usr/share/openclaw/VERSION"
 cp "$PKG_DIR/root/usr/share/openclaw/oc-config.sh" "$DATA_DIR/usr/share/openclaw/"
 chmod +x "$DATA_DIR/usr/share/openclaw/oc-config.sh"
 cp "$PKG_DIR/root/usr/share/openclaw/"*.js "$DATA_DIR/usr/share/openclaw/"
-# 精选模型预设 (shell 与 JS 共读的唯一数据源)
-cp "$PKG_DIR/root/usr/share/openclaw/model-presets.json" "$DATA_DIR/usr/share/openclaw/"
+# 共享数据文件: *.js 通配不会带上 .json，必须逐个显式复制
+# provider-catalog.json: Shell 与 JS 菜单共读的提供商目录; openclaw-compat.json: 通道与已验证版本
+cp "$PKG_DIR/root/usr/share/openclaw/provider-catalog.json" "$DATA_DIR/usr/share/openclaw/"
+cp "$PKG_DIR/root/usr/share/openclaw/openclaw-compat.json" "$DATA_DIR/usr/share/openclaw/"
 
 # Web PTY UI
 cp -r "$PKG_DIR/root/usr/share/openclaw/ui" "$DATA_DIR/usr/share/openclaw/"
@@ -146,11 +148,17 @@ cat > "$CTRL_DIR/postinst" << 'EOF'
 		USER_PTY_TOKEN=$(sed -n "s/^\s*option\s\+pty_token\s\+['\"]\\?\\([^'\"]*\\)['\"]\\?.*/\\1/p" "$OLD_CONFIG" 2>/dev/null | tail -1)
 		USER_INSTALL_PATH=$(sed -n "s/^\s*option\s\+install_path\s\+['\"]\\?\\([^'\"]*\\)['\"]\\?.*/\\1/p" "$OLD_CONFIG" 2>/dev/null | tail -1)
 		USER_CONSOLE_URL=$(sed -n "s/^\s*option\s\+console_url\s\+['\"]\\?\\([^'\"]*\\)['\"]\\?.*/\\1/p" "$OLD_CONFIG" 2>/dev/null | tail -1)
+		USER_CHANNEL=$(sed -n "s/^\s*option\s\+channel\s\+['\"]\\?\\([^'\"]*\\)['\"]\\?.*/\\1/p" "$OLD_CONFIG" 2>/dev/null | tail -1)
+		USER_PIN_VERSION=$(sed -n "s/^\s*option\s\+pin_version\s\+['\"]\\?\\([^'\"]*\\)['\"]\\?.*/\\1/p" "$OLD_CONFIG" 2>/dev/null | tail -1)
 		
 		# 步骤2: 备份旧配置 (带时间戳)
 		BAK_FILE="/etc/config/openclaw.$(date +%Y%m%d%H%M%S).bak"
 		cp "$OLD_CONFIG" "$BAK_FILE" 2>/dev/null || true
 		echo "旧配置已备份到: $BAK_FILE"
+		# 时间戳备份含 Token，每次安装多一份，只保留最近 5 份
+		ls -1 /etc/config/openclaw.*.bak 2>/dev/null | grep -E '/openclaw\.[0-9]{14}\.bak$' | sort -r | tail -n +6 | while IFS= read -r old_bak; do
+			rm -f "$old_bak"
+		done
 		
 		# 步骤3: 使用新配置文件
 		mv "$NEW_CONFIG" "$OLD_CONFIG" 2>/dev/null || cp "$NEW_CONFIG" "$OLD_CONFIG" 2>/dev/null || true
@@ -166,6 +174,8 @@ cat > "$CTRL_DIR/postinst" << 'EOF'
 		[ -n "$USER_INSTALL_PATH" ] && sed -i "s/^\(\s*option\s\+install_path\s\+\).*/\\1'$USER_INSTALL_PATH'/" "$OLD_CONFIG" 2>/dev/null || true
 		[ -n "$USER_PTY_TOKEN" ] && uci set openclaw.main.pty_token="$USER_PTY_TOKEN" 2>/dev/null || true
 		[ -n "$USER_CONSOLE_URL" ] && uci set openclaw.main.console_url="$USER_CONSOLE_URL" 2>/dev/null || true
+		[ -n "$USER_CHANNEL" ] && uci set openclaw.main.channel="$USER_CHANNEL" 2>/dev/null || true
+		[ -n "$USER_PIN_VERSION" ] && uci set openclaw.main.pin_version="$USER_PIN_VERSION" 2>/dev/null || true
 		uci commit openclaw 2>/dev/null || true
 		
 		echo "配置合并完成，用户设置已保留"

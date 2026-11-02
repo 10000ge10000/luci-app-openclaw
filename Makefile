@@ -74,6 +74,7 @@ define Package/$(PKG_NAME)/install
 	$(INSTALL_DATA) ./luasrc/openclaw/paths.lua $(1)/usr/lib/lua/openclaw/paths.lua
 	$(INSTALL_DATA) ./luasrc/openclaw/devices.lua $(1)/usr/lib/lua/openclaw/devices.lua
 	$(INSTALL_DATA) ./luasrc/openclaw/console.lua $(1)/usr/lib/lua/openclaw/console.lua
+	$(INSTALL_DATA) ./luasrc/openclaw/backup.lua $(1)/usr/lib/lua/openclaw/backup.lua
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/model/cbi/openclaw
 	$(INSTALL_DATA) ./luasrc/model/cbi/openclaw/basic.lua $(1)/usr/lib/lua/luci/model/cbi/openclaw/basic.lua
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/view/openclaw
@@ -90,7 +91,10 @@ define Package/$(PKG_NAME)/install
 	$(INSTALL_BIN) ./root/usr/share/openclaw/oc-config-interactive.js $(1)/usr/share/openclaw/oc-config-interactive.js
 	$(INSTALL_DATA) ./root/usr/share/openclaw/oc-menu-engine.js $(1)/usr/share/openclaw/oc-menu-engine.js
 	$(INSTALL_BIN) ./root/usr/share/openclaw/openclaw-package-contract.js $(1)/usr/share/openclaw/openclaw-package-contract.js
-	$(INSTALL_DATA) ./root/usr/share/openclaw/model-presets.json $(1)/usr/share/openclaw/model-presets.json
+	$(INSTALL_DATA) ./root/usr/share/openclaw/oc-providers.js $(1)/usr/share/openclaw/oc-providers.js
+	$(INSTALL_DATA) ./root/usr/share/openclaw/oc-config-fixups.js $(1)/usr/share/openclaw/oc-config-fixups.js
+	$(INSTALL_DATA) ./root/usr/share/openclaw/provider-catalog.json $(1)/usr/share/openclaw/provider-catalog.json
+	$(INSTALL_DATA) ./root/usr/share/openclaw/openclaw-compat.json $(1)/usr/share/openclaw/openclaw-compat.json
 	$(INSTALL_DIR) $(1)/usr/share/openclaw/ui
 	$(CP) ./root/usr/share/openclaw/ui/* $(1)/usr/share/openclaw/ui/
 endef

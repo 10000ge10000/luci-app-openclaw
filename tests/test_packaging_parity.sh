@@ -40,7 +40,7 @@ covered() {
 
 	_base=$(basename "$_file")
 	_dir=$(dirname "$_file")
-	_ext=$(printf '%s' "$_base" | sed -n 's/.*\.\([A-Za-z0-9]\+\)$/\1/p')
+	_ext=$(printf '%s' "$_base" | sed -n 's/.*\.\([A-Za-z0-9][A-Za-z0-9]*\)$/\1/p')
 
 	# 显式文件名
 	if grep -Fq "$_base" "$_script"; then
@@ -88,7 +88,7 @@ for f in "$REPO_ROOT"/root/usr/share/rpcd/acl.d/*.json; do
 	[ -f "$f" ] && add_files "root/usr/share/rpcd/acl.d/$(basename "$f")"
 done
 # /usr/share/openclaw 下的脚本与前端 (ui/ 目录整体复制, 单独校验)
-for f in "$REPO_ROOT"/root/usr/share/openclaw/*.sh "$REPO_ROOT"/root/usr/share/openclaw/*.js; do
+for f in "$REPO_ROOT"/root/usr/share/openclaw/*.sh "$REPO_ROOT"/root/usr/share/openclaw/*.js "$REPO_ROOT"/root/usr/share/openclaw/*.json; do
 	[ -f "$f" ] && add_files "root/usr/share/openclaw/$(basename "$f")"
 done
 
@@ -137,16 +137,26 @@ grep -Fq 'define Package/$(PKG_NAME)' "$MK" || fail "Makefile must define Packag
 # 新增的共享数据文件必须显式安装: build 脚本只 cp *.js 通配，
 # .json 不会被自动带上 (model-presets.json 曾因此漏装)。
 for s in "$MK" "$IPK" "$RUN"; do
+	for f in provider-catalog.json openclaw-compat.json; do
+		grep -Fq "$f" "$s" \
+			|| fail "$(basename "$s") must install $f (the *.js glob does not cover it)"
+	done
 	grep -Fq 'model-presets.json' "$s" \
-		|| fail "$(basename "$s") must install model-presets.json (the *.js glob does not cover it)"
+		&& fail "$(basename "$s") still references the retired model-presets.json"
+done
+# Makefile 逐个安装文件 (无通配)，新增的 JS 也必须逐个列出
+for f in oc-providers.js oc-config-fixups.js; do
+	grep -Fq "$f" "$MK" || fail "Makefile must install $f"
 done
 
-# 自定义 IPK 的 conffile 合并必须保留所有运行凭据和兼容控制台地址。
-for key in USER_PTY_TOKEN USER_CONSOLE_URL; do
+# 自定义 IPK 的 conffile 合并必须保留所有运行凭据、兼容控制台地址和用户选择的发布通道/锁定版本。
+for key in USER_PTY_TOKEN USER_CONSOLE_URL USER_CHANNEL USER_PIN_VERSION; do
 	grep -Fq "$key" "$IPK" || fail "build_ipk.sh must preserve $key during package upgrades"
 done
 grep -Fq 'uci set openclaw.main.pty_token="$USER_PTY_TOKEN"' "$IPK" || fail "IPK postinst must restore the existing PTY token"
 grep -Fq 'uci set openclaw.main.console_url="$USER_CONSOLE_URL"' "$IPK" || fail "IPK postinst must restore the existing console URL"
+grep -Fq 'uci set openclaw.main.channel="$USER_CHANNEL"' "$IPK" || fail "IPK postinst must restore the selected release channel"
+grep -Fq 'uci set openclaw.main.pin_version="$USER_PIN_VERSION"' "$IPK" || fail "IPK postinst must restore the pinned version"
 
 # ── 真实构建产物校验 ──
 # 前面的检查都是静态文本比对，抓不到"脚本已改但产物仍缺文件"的情况
@@ -168,12 +178,12 @@ if command -v ar >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
 				mkdir -p "$EXTRACT/data"
 				tar xzf "$EXTRACT/data.tar.gz" -C "$EXTRACT/data" 2>/dev/null
 				SHARE="$EXTRACT/data/usr/share/openclaw"
-				for want in oc-config.sh oc-config-interactive.js oc-menu-engine.js web-pty.js model-presets.json VERSION; do
+				for want in oc-config.sh oc-config-interactive.js oc-menu-engine.js web-pty.js oc-providers.js oc-config-fixups.js openclaw-package-contract.js provider-catalog.json openclaw-compat.json VERSION; do
 					[ -f "$SHARE/$want" ] \
 						|| fail "built .ipk is missing /usr/share/openclaw/$want"
 				done
 				[ -d "$SHARE/ui" ] || fail "built .ipk is missing /usr/share/openclaw/ui/"
-				for want in devices.lua console.lua; do
+				for want in devices.lua console.lua backup.lua; do
 					[ -f "$EXTRACT/data/usr/lib/lua/openclaw/$want" ] \
 						|| fail "built .ipk is missing /usr/lib/lua/openclaw/$want"
 				done

@@ -19,6 +19,11 @@ fail() {
 
 [ -f "$STATE_SCRIPT" ] || fail "state helper script not found: $STATE_SCRIPT"
 
+# 默认禁用 CLI 探测: 否则 oc_find_cli 的 /opt/openclaw 兜底会在装有 OpenClaw 的真机上
+# 调用真实 CLI (旧版没有 database preflight 子命令，测试因此失败且不封闭)。
+# 需要 mock CLI 的用例会在单条命令上覆盖 OPENCLAW_CLI。
+export OPENCLAW_CLI=none
+
 TMP_DIR=$(mktemp -d /tmp/oc-state-test-XXXXXX 2>/dev/null || mktemp -d 2>/dev/null || echo "/tmp/oc-state-test-$$")
 chmod 755 "$TMP_DIR" 2>/dev/null || true
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
@@ -132,6 +137,26 @@ touch "$VALID_DB_DIR/agents.db-shm"
 
 sh "$STATE_SCRIPT" database-preflight "$VALID_DB_DIR" >/dev/null 2>&1 || fail "database-preflight should pass on valid SQLite"
 
+# 5.1b 目录输入且存在官方 CLI 时，以官方 database preflight 结果为准
+MOCK_PRE_CLI="$TMP_DIR/mock-preflight-cli"
+cat > "$MOCK_PRE_CLI" <<'EOF'
+#!/bin/sh
+[ "$1 $2" = "database preflight" ] || exit 64
+exit "${MOCK_PRE_RC:-0}"
+EOF
+chmod 755 "$MOCK_PRE_CLI"
+chmod 755 "$TMP_DIR" "$VALID_DB_DIR" 2>/dev/null || true
+# 指定 OC_GLOBAL/OC_DATA 跳过 oc_load_paths，让 CLI 在临时数据目录内运行，不依赖 /opt/openclaw
+PRE_DATA="$TMP_DIR/preflight-data"
+mkdir -p "$PRE_DATA" && chmod 755 "$PRE_DATA"
+OC_GLOBAL="$TMP_DIR/preflight-global" OC_DATA="$PRE_DATA" OPENCLAW_CLI="$MOCK_PRE_CLI" MOCK_PRE_RC=0 sh "$STATE_SCRIPT" database-preflight "$VALID_DB_DIR" >/dev/null 2>&1 \
+	|| fail "database-preflight should pass when the official CLI preflight passes"
+set +e
+OC_GLOBAL="$TMP_DIR/preflight-global" OC_DATA="$PRE_DATA" OPENCLAW_CLI="$MOCK_PRE_CLI" MOCK_PRE_RC=9 sh "$STATE_SCRIPT" database-preflight "$VALID_DB_DIR" >/dev/null 2>&1
+RC_CLI_PRE=$?
+set -e
+[ "$RC_CLI_PRE" -ne 0 ] || fail "database-preflight must fail when the official CLI preflight fails"
+
 # 5.2 损坏 SQLite 文件: 长度 < 16 字节
 CORRUPT_DB_DIR="$TMP_DIR/corrupt-db"
 mkdir -p "$CORRUPT_DB_DIR"
@@ -181,12 +206,64 @@ set -e
 [ "$RC_RB_CORRUPT" -ne 0 ] || fail "rollback-explicit must abort when backup archive verification fails"
 grep -q '"phase"[[:space:]]*:[[:space:]]*"recovery"' "$STATUS_FILE" || fail "phase must remain recovery when rollback aborted"
 
+# 6.3 完整回滚走到底: 真机实测 BusyBox pgrep 不排除祖先进程，pgrep -f "openclaw" 会匹配脚本自身，
+# 服务已停后回滚被自己杀掉。这里用 pgrep 替身复现 BusyBox 行为，不会碰任何真实进程。
+# 回滚内部写死调用 /etc/init.d/openclaw，真实设备上不跑，防止停掉服务。
+if [ ! -e /etc/init.d/openclaw ]; then
+	RB_DIR="$TMP_DIR/rb"
+	RB_BIN="$RB_DIR/bin"
+	RB_DATA="$RB_DIR/data"
+	RB_STATE="$RB_DATA/.openclaw"
+	mkdir -p "$RB_BIN" "$RB_STATE" "$RB_DIR/global"
+	cat > "$RB_BIN/pgrep" <<'EOF'
+#!/bin/sh
+# 只模拟 -f: 调用方命令行含该模式时返回调用方 (以及 $() 子 shell 的父进程)
+[ "$1" = "-f" ] || exit 1
+for pid in "$PPID" "$(ps -o ppid= -p "$PPID" | tr -d ' ')"; do
+	case "$(ps -o args= -p "$pid")" in
+		*"$2"*) echo "$pid" ;;
+	esac
+done
+EOF
+	chmod +x "$RB_BIN/pgrep"
+	echo '{"gateway":{"port":1},"marker":"before-upgrade"}' > "$RB_STATE/openclaw.json"
+	RB_ENV="OC_GLOBAL=$RB_DIR/global OC_DATA=$RB_DATA OPENCLAW_STATE_DIR=$RB_STATE OPENCLAW_GATEWAY_PORT=1"
+	RB_ARCHIVE="$RB_DIR/before.tar.gz"
+	tar -czf "$RB_ARCHIVE" -C "$RB_DATA" .openclaw
+	echo '{"gateway":{"port":1},"marker":"after-upgrade"}' > "$RB_STATE/openclaw.json"
+	set +e
+	env PATH="$RB_BIN:$PATH" $RB_ENV sh "$STATE_SCRIPT" rollback-explicit "$RB_ARCHIVE" "$RB_STATE" >"$RB_DIR/out" 2>&1
+	RC_RB_FULL=$?
+	set -e
+	[ "$RC_RB_FULL" -eq 0 ] || { cat "$RB_DIR/out" >&2; fail "rollback-explicit must complete instead of killing itself (rc=$RC_RB_FULL)"; }
+	grep -q 'before-upgrade' "$RB_STATE/openclaw.json" || fail "rollback-explicit must restore the state from the archive"
+	ls "$RB_DATA"/backups/failed-state-*.tar.gz >/dev/null 2>&1 || fail "rollback-explicit must archive the failed state first"
+	RB_STATUS=$(env $RB_ENV sh "$STATE_SCRIPT" status "$RB_STATE" 2>/dev/null)
+	printf '%s' "$RB_STATUS" | grep -q '"phase"[[:space:]]*:[[:space:]]*"rolled_back"' || fail "phase must be rolled_back after a completed rollback"
+fi
+
 # ── 7. oc-config.sh json_set 升级事务防写穿契约 ──
 OC_CFG_DIR="$TMP_DIR/cfg-test"
 mkdir -p "$OC_CFG_DIR/data/.openclaw"
 mkdir -p "$OC_CFG_DIR/.luci-openclaw-upgrade"
 CFG_FILE="$OC_CFG_DIR/data/.openclaw/openclaw.json"
 echo '{"gateway":{"port":18789}}' > "$CFG_FILE"
+
+# 密封: 宿主机存在 /usr/libexec/openclaw-paths.sh 时，oc-config.sh 会按 UCI 重算
+# OC_DATA/CONFIG_FILE，忽略这里传入的环境变量，--set 会写穿到真实安装的 openclaw.json
+# (实机复现过)。因此改跑一份不加载宿主机路径库与权限脚本的副本，并在副本未改成功时直接失败。
+OC_CONFIG_SANDBOX="$TMP_DIR/oc-config-sandbox.sh"
+sed -e 's|^\[ -r /usr/libexec/openclaw-paths.sh \] && \. /usr/libexec/openclaw-paths.sh$|: sandbox-host-paths-lib-disabled|' \
+	-e 's#/usr/libexec/openclaw-permissions.sh#/nonexistent/openclaw-permissions.sh#g' \
+	"$OC_CONFIG_SCRIPT" > "$OC_CONFIG_SANDBOX"
+! grep -q '/usr/libexec/openclaw-paths.sh' "$OC_CONFIG_SANDBOX" || fail "oc-config.sh sandbox copy still loads host openclaw-paths.sh; refusing to run --set"
+! grep -q '/usr/libexec/openclaw-permissions.sh' "$OC_CONFIG_SANDBOX" || fail "oc-config.sh sandbox copy still calls host openclaw-permissions.sh"
+# 副本按沙箱路径推导 NODE_BASE，NODE_ICU_DATA 会指向不存在的目录，musl small-ICU 的 node 因此无法启动；
+# 这里只借用当前 PATH 里 node 的安装前缀 (只读)，配置路径仍全部落在沙箱。
+OC_CFG_NODE_BASE=""
+if command -v node >/dev/null 2>&1; then
+	OC_CFG_NODE_BASE=$(dirname "$(dirname "$(command -v node)")")
+fi
 
 # 7.1 当 phase 为 migrating 时，json_set 暂停写入 openclaw.json
 cat > "$OC_CFG_DIR/.luci-openclaw-upgrade/status.json" <<'EOF'
@@ -196,10 +273,12 @@ cat > "$OC_CFG_DIR/.luci-openclaw-upgrade/status.json" <<'EOF'
 }
 EOF
 
+OC_INSTALL_PATH="$OC_CFG_DIR/base" \
+NODE_BASE="${OC_CFG_NODE_BASE:-$OC_CFG_DIR/base/openclaw/node}" \
 OPENCLAW_STATE_DIR="$OC_CFG_DIR/data/.openclaw" \
 CONFIG_FILE="$CFG_FILE" \
 OC_DATA="$OC_CFG_DIR/data" \
-sh "$OC_CONFIG_SCRIPT" --set "gateway.port" "28888" >/dev/null 2>&1 || true
+sh "$OC_CONFIG_SANDBOX" --set "gateway.port" "28888" >/dev/null 2>&1 || true
 
 # 验证 openclaw.json 未被篡改 (端口仍为 18789)
 grep -q '18789' "$CFG_FILE" || fail "json_set must NOT mutate openclaw.json when phase is migrating"
@@ -212,10 +291,12 @@ cat > "$OC_CFG_DIR/.luci-openclaw-upgrade/status.json" <<'EOF'
 }
 EOF
 
+OC_INSTALL_PATH="$OC_CFG_DIR/base" \
+NODE_BASE="${OC_CFG_NODE_BASE:-$OC_CFG_DIR/base/openclaw/node}" \
 OPENCLAW_STATE_DIR="$OC_CFG_DIR/data/.openclaw" \
 CONFIG_FILE="$CFG_FILE" \
 OC_DATA="$OC_CFG_DIR/data" \
-sh "$OC_CONFIG_SCRIPT" --set "gateway.port" "28888" || true
+sh "$OC_CONFIG_SANDBOX" --set "gateway.port" "28888" || true
 grep -q '28888' "$CFG_FILE" || fail "json_set must succeed when phase is idle"
 
 # ── 8. Node.js musl ARM64 下载镜像源优先级契约 ──
@@ -265,7 +346,7 @@ EOF
 chmod 755 "$MOCK_CLI_BIN"
 chmod -R 755 "$TMP_DIR/gw-mock"
 
-OPENCLAW_CLI="$MOCK_CLI_BIN" sh "$STATE_SCRIPT" gateway-verify "mock-token" "$MOCK_GW_STATE" >/dev/null 2>&1 \
+OC_GLOBAL="$TMP_DIR/gw-mock/global" OC_DATA="$TMP_DIR/gw-mock/data" OPENCLAW_CLI="$MOCK_CLI_BIN" sh "$STATE_SCRIPT" gateway-verify "mock-token" "$MOCK_GW_STATE" >/dev/null 2>&1 \
 	|| fail "gateway-verify must succeed when health reports {\"ok\": true}"
 
 # 验证带空格的 "ok" : true 输出
@@ -280,7 +361,7 @@ EOF
 chmod 755 "$MOCK_CLI_BIN"
 chmod -R 755 "$TMP_DIR/gw-mock"
 
-OPENCLAW_CLI="$MOCK_CLI_BIN" sh "$STATE_SCRIPT" gateway-verify "mock-token" "$MOCK_GW_STATE" >/dev/null 2>&1 \
+OC_GLOBAL="$TMP_DIR/gw-mock/global" OC_DATA="$TMP_DIR/gw-mock/data" OPENCLAW_CLI="$MOCK_CLI_BIN" sh "$STATE_SCRIPT" gateway-verify "mock-token" "$MOCK_GW_STATE" >/dev/null 2>&1 \
 	|| fail "gateway-verify must succeed when health reports { \"ok\" : true }"
 
 # ── 10. CLI 路径探测 /opt/openclaw/global/bin/openclaw 兜底 ──

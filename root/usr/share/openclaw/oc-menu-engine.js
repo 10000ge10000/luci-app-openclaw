@@ -397,6 +397,15 @@ async function select(options = {}) {
           selected = 0;
           filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
         }
+      } else if (showSearch && (key.name === 'paste' || (!key.name && /^[\x20-\x7e]+$/.test(key.sequence)))) {
+        // 多个字符合并到达 (快速输入、Web 终端网络延迟导致按键合并、粘贴):
+        // 旧实现整段丢弃，表现为搜索框「吞字」
+        const text = String(key.paste || key.sequence).replace(/[^\x20-\x7e]/g, '');
+        if (text) {
+          searchFilter += text;
+          selected = 0;
+          filteredItems = renderMenu(items, selected, searchFilter, { title, header, footer, showSearch });
+        }
       }
 
       // 直接按键选择 (如果菜单项有 key 属性)
@@ -480,7 +489,9 @@ async function input(options = {}) {
           }
         }
         done = true;
-      } else if ((key.name === 'escape' || key.name === 'q') && allowCancel) {
+      } else if (key.name === 'escape' && allowCancel) {
+        // 文本输入只用 Esc 取消: 'q' 是合法字符 (qwen3.5-plus、含 q 的 Key)，
+        // 旧实现按 q 即取消，手动输入这类内容会被直接中断
         done = true;
         cancelled = true;
       } else if (key.name === 'backspace') {

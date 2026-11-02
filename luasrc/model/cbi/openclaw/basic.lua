@@ -54,21 +54,41 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '<div style="background:#fff;border-radius:12px;padding:24px 28px;max-width:520px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,0.2);">'
 	html[#html+1] = '<h3 style="margin:0 0 16px 0;font-size:16px;color:#333;">📦 选择安装版本</h3>'
 	html[#html+1] = '<div style="display:flex;flex-direction:column;gap:12px;">'
-	-- 稳定版选项
-	local default_tested_ver = luci.sys.exec("sed -n 's/^OC_TESTED_VERSION=\"\\(.*\\)\"/\\1/p' /usr/bin/openclaw-env 2>/dev/null"):gsub("%s+", "")
-	if default_tested_ver == "" then default_tested_ver = "2026.9.1" end
-	html[#html+1] = '<label style="display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border:2px solid #4a90d9;border-radius:8px;cursor:pointer;background:#f0f7ff;" id="oc-opt-stable">'
-	html[#html+1] = '<input type="radio" name="oc-ver-choice" value="stable" checked style="margin-top:2px;">'
-	html[#html+1] = '<div><strong style="color:#333;">✅ 稳定版 (推荐)</strong>'
-	html[#html+1] = '<div style="font-size:12px;color:#666;margin-top:4px;">版本 v' .. default_tested_ver .. ' (已验证版)，已经过完整测试，兼容性良好。</div>'
-	html[#html+1] = '</div></label>'
-	-- 最新版选项
-	html[#html+1] = '<label style="display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border:2px solid #e0e0e0;border-radius:8px;cursor:pointer;background:#fff;" id="oc-opt-latest">'
-	html[#html+1] = '<input type="radio" name="oc-ver-choice" value="latest" style="margin-top:2px;">'
-	html[#html+1] = '<div><strong style="color:#333;">🆕 最新版 (未经验证)</strong>'
-	html[#html+1] = '<div style="font-size:12px;color:#e36209;margin-top:4px;">⚠️ 安装 npm 上的最新发布版本 (未经验证)，可能存在未经验证的兼容性问题。</div>'
-	html[#html+1] = '</div></label>'
+	-- 发布通道选项: 数据来自兼容矩阵 (本插件已验证版本)；上游实际发布版本在「检测升级」时联网查询
+	local compat_channels = { ["extended-stable"] = { verified = "?" }, latest = { verified = "?" } }
+	local default_channel = "extended-stable"
+	do
+		local ok_j, jsonc = pcall(require, "luci.jsonc")
+		local cf = io.open("/usr/share/openclaw/openclaw-compat.json", "r")
+		if ok_j and cf then
+			local data = jsonc.parse(cf:read("*a") or "")
+			if type(data) == "table" and type(data.channels) == "table" then
+				for name, ch in pairs(data.channels) do compat_channels[name] = ch end
+				if type(data.defaultChannel) == "string" then default_channel = data.defaultChannel end
+			end
+		end
+		if cf then cf:close() end
+	end
+	local function esc(s) return (tostring(s or ""):gsub("[<>&\"]", { ["<"] = "&lt;", [">"] = "&gt;", ["&"] = "&amp;", ['"'] = "&quot;" })) end
+	local channel_opts = {
+		{ id = "extended-stable", icon = "✅", title = "长期稳定版 extended-stable (推荐)", desc = "官方长期维护通道，只接收修复，适合路由器长期运行。" },
+		{ id = "latest", icon = "🆕", title = "最新正式版 latest", desc = "官方最新正式发布，功能更新快，变化也更多。" },
+	}
+	for _, opt in ipairs(channel_opts) do
+		local checked = (opt.id == default_channel)
+		html[#html+1] = '<label style="display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border:2px solid ' .. (checked and '#4a90d9' or '#e0e0e0') .. ';border-radius:8px;cursor:pointer;background:' .. (checked and '#f0f7ff' or '#fff') .. ';" id="oc-opt-' .. opt.id .. '">'
+		html[#html+1] = '<input type="radio" name="oc-ver-choice" value="' .. opt.id .. '"' .. (checked and ' checked' or '') .. ' style="margin-top:2px;">'
+		html[#html+1] = '<div><strong style="color:#333;">' .. opt.icon .. ' ' .. opt.title .. '</strong>'
+		html[#html+1] = '<div style="font-size:12px;color:#666;margin-top:4px;">' .. opt.desc .. ' 将安装本插件已验证的 v' .. esc((compat_channels[opt.id] or {}).verified) .. '。</div>'
+		html[#html+1] = '</div></label>'
+	end
 	html[#html+1] = '</div>'
+	-- 高级: 未验证版本与版本锁定
+	html[#html+1] = '<details style="margin-top:12px;font-size:12px;color:#555;"><summary style="cursor:pointer;">高级选项 (版本锁定 / 未验证版本)</summary>'
+	html[#html+1] = '<div style="margin-top:8px;display:flex;flex-direction:column;gap:8px;">'
+	html[#html+1] = '<label style="display:flex;gap:8px;align-items:center;"><span style="min-width:72px;">锁定版本</span><input type="text" id="oc-pin-version" value="" placeholder="留空 = 跟随所选通道，如 2026.9.36" style="flex:1;padding:6px 10px;border:1px solid #d0d7de;border-radius:6px;font-size:12px;"></label>'
+	html[#html+1] = '<label style="display:flex;gap:8px;align-items:flex-start;color:#e36209;"><input type="checkbox" id="oc-allow-unverified" style="margin-top:2px;"><span>允许安装上游已发布、但未经本插件验证的更新版本 (可能存在兼容性问题，出现问题请使用显式回滚)</span></label>'
+	html[#html+1] = '</div></details>'
 	-- 自定义安装路径
 	html[#html+1] = '<div style="margin-top:16px;padding-top:14px;border-top:1px solid #eee;">'
 	html[#html+1] = '<div style="font-weight:600;font-size:13px;color:#333;margin-bottom:8px;">📂 安装路径</div>'
@@ -98,6 +118,8 @@ act.cfgvalue = function(self, section)
 	-- JavaScript
 	html[#html+1] = '<script type="text/javascript">'
 	html[#html+1] = 'console.log("OpenClaw JS loading...");'
+	-- 远程返回的版本号等字符串写入 innerHTML 前统一转义
+	html[#html+1] = 'function ocEscapeHtml(s){return String(s==null?"":s).replace(/[&<>"\']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","\'":"&#39;"}[c];});}'
 
 	-- 版本选择对话框逻辑
 	html[#html+1] = 'var _setupTimer=null;'
@@ -123,7 +145,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'var dlg=document.getElementById("oc-setup-dialog");'
 	html[#html+1] = 'dlg.style.display="flex";'
 	html[#html+1] = 'var radios=document.getElementsByName("oc-ver-choice");'
-	html[#html+1] = 'for(var i=0;i<radios.length;i++){if(radios[i].value==="stable")radios[i].checked=true;}'
+	html[#html+1] = 'for(var i=0;i<radios.length;i++){if(radios[i].value===' .. string.format("%q", default_channel) .. ')radios[i].checked=true;}'
 	html[#html+1] = '}'
 	html[#html+1] = 'function ocCloseSetupDialog(){'
 	html[#html+1] = 'document.getElementById("oc-setup-dialog").style.display="none";'
@@ -188,10 +210,11 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'logEl.textContent+="✅ 系统配置检测通过，开始安装...\\n\\n";'
 	html[#html+1] = 'ocCloseSetupDialog();'
 	html[#html+1] = 'var radios=document.getElementsByName("oc-ver-choice");'
-	html[#html+1] = 'var choice="stable";'
+	html[#html+1] = 'var choice=' .. string.format("%q", default_channel) .. ';'
 	html[#html+1] = 'for(var i=0;i<radios.length;i++){if(radios[i].checked){choice=radios[i].value;break;}}'
-	html[#html+1] = 'var verParam=(choice==="stable")?"stable":"latest";'
-	html[#html+1] = 'ocSetup(verParam,r.memory_mb,r.disk_mb,r.install_path);'
+	html[#html+1] = 'var pinEl=document.getElementById("oc-pin-version");var pin=pinEl?pinEl.value.trim():"";'
+	html[#html+1] = 'var allowEl=document.getElementById("oc-allow-unverified");var allow=(allowEl&&allowEl.checked)?"1":"0";'
+	html[#html+1] = 'ocSetup(choice,r.memory_mb,r.disk_mb,r.install_path,pin,allow);'
 	html[#html+1] = '}catch(e){'
 	html[#html+1] = 'ocCloseSetupDialog();'
 	html[#html+1] = 'btn.disabled=false;btn.textContent="📦 安装运行环境";'
@@ -200,17 +223,17 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}'
 
 	-- 安装运行环境 (带实时日志，支持自定义路径)
-	html[#html+1] = 'function ocSetup(version,mem_mb,disk_mb,install_path){'
+	html[#html+1] = 'function ocSetup(channel,mem_mb,disk_mb,install_path,pin,allow){'
 	html[#html+1] = '_setupOperation="setup";'
 	html[#html+1] = 'var btn=document.getElementById("btn-setup");'
 	html[#html+1] = 'var logEl=document.getElementById("setup-log-content");'
 	html[#html+1] = 'btn.disabled=true;btn.textContent="⏳ 安装中...";'
 	html[#html+1] = 'logEl.textContent+="════════════════════════════════════════\\n";'
-	html[#html+1] = 'logEl.textContent+="📦 安装运行环境 ("+((version==="stable")?"稳定版":"最新版")+")\\n";'
+	html[#html+1] = 'logEl.textContent+="📦 安装运行环境 (通道: "+channel+(pin?"，锁定 v"+pin:"")+(allow==="1"?"，允许未验证版本":"")+")\\n";'
 	html[#html+1] = 'logEl.textContent+="════════════════════════════════════════\\n";'
 	html[#html+1] = 'logEl.textContent+="安装路径: "+install_path+"\\n";'
 	html[#html+1] = 'logEl.textContent+="正在启动安装...\\n";'
-	html[#html+1] = '(new XHR()).post("' .. ctl_url .. '?action=setup&version="+encodeURIComponent(version)+"&install_path="+encodeURIComponent(install_path),{token:ocCsrfToken},function(x){'
+	html[#html+1] = '(new XHR()).post("' .. ctl_url .. '?action=setup&channel="+encodeURIComponent(channel)+"&pin="+encodeURIComponent(pin||"")+"&allow_unverified="+encodeURIComponent(allow||"0")+"&install_path="+encodeURIComponent(install_path),{token:ocCsrfToken},function(x){'
 	html[#html+1] = 'var accepted=ocAcceptedResponse(x);'
 	html[#html+1] = 'if(accepted.ok){ocPollSetupLog();}else{ocSetupRequestRejected(btn,"📦 安装运行环境",accepted.message);}'
 	html[#html+1] = '});'
@@ -403,14 +426,19 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}'
 	-- OpenClaw 核心版本检查
 	html[#html+1] = 'if(r.openclaw_current){'
-	html[#html+1] = 'if(r.openclaw_has_update){msgs.push("<span style=\\""+badgeNew+"\\">🦞 核心有新版</span> v"+r.openclaw_current+" → <span style=\\""+verBadge+"\\">v"+r.openclaw_latest+"</span>");}'
-	html[#html+1] = 'else if(r.openclaw_latest){msgs.push("<span style=\\""+badgeLatest+"\\">🦞 核心已是最新</span> v"+r.openclaw_current);}'
-	html[#html+1] = 'else{msgs.push("<span style=\\""+badgeUnknown+"\\">🦞 核心无法检查</span> v"+r.openclaw_current);}'
+	html[#html+1] = 'var chLabel=r.openclaw_channel?(" ("+ocEscapeHtml(r.openclaw_channel)+" 通道)"):"";'
+	html[#html+1] = 'if(r.openclaw_pinned){msgs.push("<span style=\\""+badgeUnknown+"\\">🔒 核心已锁定</span> v"+ocEscapeHtml(r.openclaw_current)+" (锁定 v"+ocEscapeHtml(r.openclaw_pinned)+"，不提示升级)");}'
+	html[#html+1] = 'else if(r.openclaw_has_update){msgs.push("<span style=\\""+badgeNew+"\\">🦞 核心有已验证新版</span> v"+ocEscapeHtml(r.openclaw_current)+" → <span style=\\""+verBadge+"\\">v"+ocEscapeHtml(r.openclaw_latest)+"</span>"+chLabel);}'
+	html[#html+1] = 'else if(r.openclaw_latest){msgs.push("<span style=\\""+badgeLatest+"\\">🦞 核心已是已验证的最新版</span> v"+ocEscapeHtml(r.openclaw_current)+chLabel);}'
+	html[#html+1] = 'else{msgs.push("<span style=\\""+badgeUnknown+"\\">🦞 核心无法检查</span> v"+ocEscapeHtml(r.openclaw_current));}'
+	html[#html+1] = 'if(r.openclaw_upstream_newer){msgs.push("<span style=\\""+badgeUnknown+"\\">📢 上游已发布</span> v"+ocEscapeHtml(r.openclaw_upstream)+" <span style=\\"color:#e36209;\\">(尚未经本插件验证)</span>");}'
+	html[#html+1] = 'else if(r.openclaw_upstream_error){msgs.push("<span style=\\""+badgeUnknown+"\\">📢 上游版本查询失败</span> 已按本插件已验证版本判断");}'
 	html[#html+1] = '}'
 	html[#html+1] = 'if(msgs.length===0)msgs.push("<span style=\\""+badgeUnknown+"\\">无法获取版本信息</span>");'
 	html[#html+1] = 'el.innerHTML=msgs.join("<br/>");'
 	-- 有任何更新时显示操作面板
-	html[#html+1] = 'if(r.plugin_has_update || r.openclaw_has_update){'
+	html[#html+1] = 'window._coreChannel=r.openclaw_channel||"";'
+	html[#html+1] = 'if(r.plugin_has_update || r.openclaw_has_update || r.openclaw_upstream_newer){'
 	html[#html+1] = 'act.style.display="block";'
 	html[#html+1] = 'window._pluginLatestVer=r.plugin_latest;'
 	html[#html+1] = 'window._coreLatestVer=r.openclaw_latest;'
@@ -423,17 +451,20 @@ act.cfgvalue = function(self, section)
 	-- 操作按钮区: 支持一键升级插件与一键升级核心
 	html[#html+1] = 'var actBtns="<div style=\\"margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;\\">";'
 	html[#html+1] = 'if(r.plugin_has_update){actBtns+="<button class=\\"btn cbi-button cbi-button-apply\\" type=\\"button\\" onclick=\\"ocPluginUpgrade()\\" id=\\"btn-plugin-upgrade\\" style=\\"box-shadow:0 2px 4px rgba(0,0,0,0.1);\\">⬆️ 一键升级插件 (v"+r.plugin_latest+")</button><a href=\\"https://github.com/10000ge10000/luci-app-openclaw/releases/latest\\" target=\\"_blank\\" rel=\\"noopener\\" class=\\"btn cbi-button cbi-button-action\\" style=\\"text-decoration:none;\\">📥 GitHub 下载</a>";}'
-	html[#html+1] = 'if(r.openclaw_has_update){actBtns+="<button class=\\"btn cbi-button cbi-button-apply\\" type=\\"button\\" onclick=\\"ocOpenclawCoreUpgrade()\\" id=\\"btn-core-upgrade\\" style=\\"background:#d97706;border-color:#b45309;color:#fff;box-shadow:0 2px 4px rgba(0,0,0,0.1);\\">⬆️ 一键升级 OpenClaw 核心 (v"+r.openclaw_latest+")</button>";}'
+	html[#html+1] = 'if(r.openclaw_has_update){actBtns+="<button class=\\"btn cbi-button cbi-button-apply\\" type=\\"button\\" onclick=\\"ocOpenclawCoreUpgrade(false)\\" id=\\"btn-core-upgrade\\" style=\\"background:#d97706;border-color:#b45309;color:#fff;box-shadow:0 2px 4px rgba(0,0,0,0.1);\\">⬆️ 升级 OpenClaw 核心到已验证版 (v"+ocEscapeHtml(r.openclaw_latest)+")</button>";}'
+	html[#html+1] = 'if(r.openclaw_upstream_newer&&!r.openclaw_pinned){window._coreUpstreamVer=r.openclaw_upstream;actBtns+="<button class=\\"btn cbi-button\\" type=\\"button\\" onclick=\\"ocOpenclawCoreUpgrade(true)\\" id=\\"btn-core-upgrade-unverified\\" style=\\"border-color:#e36209;color:#e36209;\\">⚠️ 升级到上游 v"+ocEscapeHtml(r.openclaw_upstream)+" (未验证)</button>";}'
 	html[#html+1] = 'actBtns+="</div>";'
 	html[#html+1] = 'act.innerHTML=notesHtml+actBtns;'
 	html[#html+1] = '}'
 	html[#html+1] = '}catch(e){el.innerHTML="<span style=\\"color:red\\">❌ 检测失败</span>";}'
 	html[#html+1] = '});}'
-	html[#html+1] = 'function ocOpenclawCoreUpgrade(){'
+	html[#html+1] = 'function ocOpenclawCoreUpgrade(unverified){'
 	html[#html+1] = '_setupOperation="core";'
-	html[#html+1] = 'var ver=window._coreLatestVer||"2026.9.1";'
-	html[#html+1] = 'if(!confirm("确定要将 OpenClaw 核心升级到 v"+ver+"？\\n\\n升级将执行安全事务：自动全量备份状态、SQLite 数据库预检与配置平滑迁移。"))return;'
-	html[#html+1] = 'var btn=document.getElementById("btn-core-upgrade");'
+	html[#html+1] = 'var ver=unverified?window._coreUpstreamVer:window._coreLatestVer;'
+	html[#html+1] = 'if(!ver){alert("无法获取目标版本，请重新检测升级");return;}'
+	html[#html+1] = 'var warn=unverified?"\\n\\n⚠️ 该版本尚未经本插件验证，可能存在兼容性问题。出现问题时可在升级状态中执行显式回滚。":"";'
+	html[#html+1] = 'if(!confirm("确定要将 OpenClaw 核心升级到 v"+ver+"？\\n\\n升级将执行安全事务：先升级 Node.js 运行时，再自动全量备份状态、SQLite 数据库预检与配置平滑迁移。"+warn))return;'
+	html[#html+1] = 'var btn=document.getElementById(unverified?"btn-core-upgrade-unverified":"btn-core-upgrade");'
 	html[#html+1] = 'var panel=document.getElementById("setup-log-panel");'
 	html[#html+1] = 'var logEl=document.getElementById("setup-log-content");'
 	html[#html+1] = 'var titleEl=document.getElementById("setup-log-title");'
@@ -445,7 +476,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'titleEl.textContent="📋 OpenClaw 核心升级日志";'
 	html[#html+1] = 'statusEl.innerHTML="<span style=\\"color:#7aa2f7;\\">⏳ 核心升级中 (执行状态机事务)...</span>";'
 	html[#html+1] = 'resultEl.style.display="none";'
-	html[#html+1] = '(new XHR()).post("' .. service_ctl_url .. '",{action:"upgrade",version:ver,token:ocCsrfToken},function(x){'
+	html[#html+1] = '(new XHR()).post("' .. service_ctl_url .. '",{action:"upgrade",channel:window._coreChannel||"",allow_unverified:unverified?"1":"0",token:ocCsrfToken},function(x){'
 	html[#html+1] = 'var accepted=ocAcceptedResponse(x);'
 	html[#html+1] = 'if(accepted.ok){ocPollSetupLog();}else{ocSetupRequestRejected(btn,"⬆️ 重试核心升级",accepted.message);}'
 	html[#html+1] = '});'
@@ -575,6 +606,15 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '</div>'
 	html[#html+1] = '<div style="font-size:11px;color:#888;margin-top:6px;">仅配置文件 (~2KB) 包含模型、渠道、插件设置；完整备份含会话历史等状态数据（可能较大）</div>'
 	html[#html+1] = '</div>'
+	-- 上传备份区 (#111): 重装或配置损坏后上传之前下载的备份，再在列表中恢复
+	html[#html+1] = '<div style="border-top:1px solid #eee;padding-top:14px;margin-bottom:16px;">'
+	html[#html+1] = '<div style="font-weight:600;font-size:13px;color:#555;margin-bottom:8px;">📂 上传备份</div>'
+	html[#html+1] = '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">'
+	html[#html+1] = '<input type="file" id="oc-backup-file" accept=".gz,.tgz,application/gzip" style="font-size:12px;max-width:100%;" />'
+	html[#html+1] = '<button class="btn cbi-button cbi-button-action" type="button" onclick="ocUploadBackup()" id="btn-bk-upload" style="font-size:12px;">⬆ 上传</button>'
+	html[#html+1] = '</div>'
+	html[#html+1] = '<div style="font-size:11px;color:#888;margin-top:6px;">支持本插件下载的 *-openclaw-backup.tar.gz（上限 20MB）。上传的备份只会恢复 OpenClaw 状态目录内的文件；备份含 API Key，请妥善保管下载的文件。</div>'
+	html[#html+1] = '</div>'
 	-- 备份列表区（恢复/删除在这里动态渲染）
 	html[#html+1] = '<div style="border-top:1px solid #eee;padding-top:14px;margin-bottom:16px;">'
 	html[#html+1] = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
@@ -627,6 +667,7 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '"<td style=\\"padding:7px 8px;text-align:right;color:#666;white-space:nowrap;\\">"+b.size_str+"</td>"+' -- 大小
 	html[#html+1] = '"<td style=\\"padding:5px 8px;text-align:center;white-space:nowrap;\\">"+'
 	html[#html+1] = '"<button class=\\"btn cbi-button cbi-button-action\\" style=\\"font-size:11px;padding:1px 8px;margin-right:4px;\\" onclick=\\"ocRestoreBackup(\\x27"+b.filename+"\\x27)\\">恢复</button>"+'
+	html[#html+1] = '"<button class=\\"btn cbi-button\\" style=\\"font-size:11px;padding:1px 8px;margin-right:4px;\\" onclick=\\"ocDownloadBackup(\\x27"+b.filename+"\\x27)\\">下载</button>"+'
 	html[#html+1] = '"<button class=\\"btn cbi-button cbi-button-remove\\" style=\\"font-size:11px;padding:1px 8px;\\" onclick=\\"ocDeleteBackup(\\x27"+b.filename+"\\x27)\\">删除</button>"+'
 	html[#html+1] = '"</td></tr>";'
 	html[#html+1] = '}'
@@ -697,6 +738,67 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = '}'
 	html[#html+1] = '}catch(e){resEl.innerHTML="<div style=\\"color:#cf222e;font-size:12px;padding:8px;\\">❌ 删除失败</div>";}'
 	html[#html+1] = '});}'
+
+	-- 备份操作提示 (服务端消息用 textContent 写入，避免注入)
+	html[#html+1] = 'function ocShowBackupMsg(ok,msg){'
+	html[#html+1] = 'var resEl=document.getElementById("oc-backup-result");'
+	html[#html+1] = 'resEl.style.display="block";resEl.innerHTML="";'
+	html[#html+1] = 'var d=document.createElement("div");'
+	html[#html+1] = 'd.style.cssText="font-size:12px;padding:8px;border-radius:6px;"+(ok===true?"border:1px solid #c6e9c9;background:#e6f7e9;color:#1a7f37;":ok===false?"color:#cf222e;":"color:#7aa2f7;");'
+	html[#html+1] = 'd.textContent=(ok===true?"✅ ":ok===false?"❌ ":"")+msg;resEl.appendChild(d);'
+	html[#html+1] = '}'
+
+	-- 下载备份 (#111): 用 POST + CSRF 取回文件，失败时显示服务端 JSON 错误
+	html[#html+1] = 'function ocDownloadBackup(filename){'
+	html[#html+1] = 'var xhr=new XMLHttpRequest();'
+	html[#html+1] = 'xhr.open("POST","' .. backup_url .. '?action=download&file="+encodeURIComponent(filename),true);'
+	html[#html+1] = 'xhr.responseType="blob";'
+	html[#html+1] = 'xhr.setRequestHeader("Content-Type","application/x-www-form-urlencoded");'
+	html[#html+1] = 'xhr.onload=function(){'
+	html[#html+1] = 'var ct=xhr.getResponseHeader("Content-Type")||"";'
+	html[#html+1] = 'if(xhr.status===200&&ct.indexOf("json")<0){'
+	html[#html+1] = 'var u=URL.createObjectURL(xhr.response);var a=document.createElement("a");a.href=u;a.download=filename;document.body.appendChild(a);a.click();'
+	html[#html+1] = 'setTimeout(function(){URL.revokeObjectURL(u);document.body.removeChild(a);},1000);'
+	html[#html+1] = 'ocShowBackupMsg(true,"已开始下载："+filename);'
+	html[#html+1] = '}else{var rd=new FileReader();rd.onload=function(){var m="下载失败";try{m=JSON.parse(rd.result).message||m;}catch(e){}ocShowBackupMsg(false,m);};rd.readAsText(xhr.response);}'
+	html[#html+1] = '};'
+	html[#html+1] = 'xhr.onerror=function(){ocShowBackupMsg(false,"下载失败：网络错误");};'
+	html[#html+1] = 'xhr.send("token="+encodeURIComponent(ocCsrfToken));'
+	html[#html+1] = '}'
+
+	-- 上传备份 (#111): 分块 base64 上传，服务端校验结构后放入备份目录
+	html[#html+1] = 'function ocUploadBackup(){'
+	html[#html+1] = 'var inp=document.getElementById("oc-backup-file");'
+	html[#html+1] = 'if(!inp.files||!inp.files[0]){ocShowBackupMsg(false,"请先选择备份文件");return;}'
+	html[#html+1] = 'var file=inp.files[0];'
+	html[#html+1] = 'if(file.size>20*1024*1024){ocShowBackupMsg(false,"备份文件过大（上限 20MB）");return;}'
+	html[#html+1] = 'var btn=document.getElementById("btn-bk-upload");btn.disabled=true;'
+	html[#html+1] = 'var url="' .. backup_url .. '";'
+	html[#html+1] = 'function fail(m){btn.disabled=false;ocShowBackupMsg(false,m||"上传失败");}'
+	html[#html+1] = 'function parse(x){try{return JSON.parse(x.responseText);}catch(e){return {};}}'
+	html[#html+1] = 'ocShowBackupMsg(null,"⏳ 正在上传...");'
+	html[#html+1] = '(new XHR()).post(url+"?action=upload_begin",{token:ocCsrfToken,size:file.size},function(x){'
+	html[#html+1] = 'var r=parse(x);if(r.status!=="ok")return fail(r.message);'
+	html[#html+1] = 'var id=r.upload_id,chunk=Math.floor((r.chunk_b64||262144)/4)*3,offset=0;'
+	html[#html+1] = 'function finish(){(new XHR()).post(url+"?action=upload_finish",{token:ocCsrfToken,upload_id:id},function(x3){'
+	html[#html+1] = 'var r3=parse(x3);if(r3.status!=="ok")return fail(r3.message);'
+	html[#html+1] = 'btn.disabled=false;inp.value="";ocShowBackupMsg(true,(r3.message||"上传完成")+"，可在下方列表中恢复");ocLoadBackupList();});}'
+	html[#html+1] = 'function next(){'
+	html[#html+1] = 'if(offset>=file.size)return finish();'
+	html[#html+1] = 'var end=Math.min(offset+chunk,file.size);var rd=new FileReader();'
+	html[#html+1] = 'rd.onerror=function(){fail("读取本地文件失败");};'
+	html[#html+1] = 'rd.onload=function(){'
+	html[#html+1] = 'var bytes=new Uint8Array(rd.result),bin="";'
+	html[#html+1] = 'for(var i=0;i<bytes.length;i+=8192){bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+8192));}'
+	html[#html+1] = '(new XHR()).post(url+"?action=upload_chunk",{token:ocCsrfToken,upload_id:id,offset:offset,data:btoa(bin)},function(x2){'
+	html[#html+1] = 'var r2=parse(x2);if(r2.status!=="ok")return fail(r2.message);'
+	html[#html+1] = 'offset=end;ocShowBackupMsg(null,"⏳ 正在上传... "+Math.floor(offset*100/file.size)+"%");next();});'
+	html[#html+1] = '};'
+	html[#html+1] = 'rd.readAsArrayBuffer(file.slice(offset,end));'
+	html[#html+1] = '}'
+	html[#html+1] = 'next();'
+	html[#html+1] = '});'
+	html[#html+1] = '}'
 
 	-- 页面加载时静默检查是否有更新 (仅显示小红点提示)
 	html[#html+1] = '(function(){'

@@ -95,6 +95,12 @@ oc_find_node() {
 }
 
 oc_find_cli() {
+	# OPENCLAW_CLI=none: 显式禁用 CLI 探测，强制走 Node 静态校验 (测试与诊断用)。
+	# 否则下面的 /opt/openclaw 兜底会让测试在装有旧版 OpenClaw 的机器上调用真实 CLI。
+	if [ "${OPENCLAW_CLI:-}" = "none" ]; then
+		printf ''
+		return 0
+	fi
 	if [ -n "${OPENCLAW_CLI:-}" ] && [ -x "$OPENCLAW_CLI" ]; then
 		printf '%s\n' "$OPENCLAW_CLI"
 		return 0
@@ -136,7 +142,9 @@ oc_run_as_user() {
 	[ -d "${data_dir}/.npm" ] && env_prefix="$env_prefix NPM_CONFIG_CACHE=\"${data_dir}/.npm\" npm_config_cache=\"${data_dir}/.npm\""
 	[ -d "${data_dir}/.tmp" ] && env_prefix="$env_prefix TMPDIR=\"${data_dir}/.tmp\""
 
-	local full_cmd="cd \"$data_dir\" && $env_prefix $cmd"
+	# 必须 export: cmd 可能是复合命令 (如 cd xx && cli ...)，前缀赋值只对第一条命令生效，
+	# 后面的 CLI 会带着 root 的 HOME 运行，9.36 起因此拒绝使用临时目录，备份直接失败。
+	local full_cmd="cd \"$data_dir\" && export $env_prefix && $cmd"
 
 	if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && id openclaw >/dev/null 2>&1; then
 		if command -v su >/dev/null 2>&1; then
@@ -155,6 +163,26 @@ oc_run_as_user() {
 	fi
 	sh -c "$full_cmd"
 	return $?
+}
+
+# 按字面规整路径 (不访问文件系统)，判断 $1 是否位于目录 $2 之内
+oc_path_within() {
+	local normalized
+	normalized=$(printf '%s\n' "$1" | awk -F/ '{
+		n = 0
+		for (i = 1; i <= NF; i++) {
+			if ($i == "" || $i == ".") continue
+			if ($i == "..") { if (n > 0) n--; continue }
+			p[++n] = $i
+		}
+		s = ""
+		for (i = 1; i <= n; i++) s = s "/" p[i]
+		print s
+	}')
+	case "$normalized" in
+		"$2"/*) return 0 ;;
+	esac
+	return 1
 }
 
 # ── 1. 备份创建 (backup-create) ──
@@ -270,9 +298,18 @@ do_backup_verify() {
 		local rc=0
 		out=$(oc_run_as_user "$verify_cmd" "$state_dir" 2>&1) || rc=$?
 		if [ "$rc" -ne 0 ]; then
-			echo "$out" >&2
-			log_error "官方 backup verify 验证失败 (退出码: $rc)"
-			return "$rc"
+			case "$out" in
+				*"symbolic link target must be relative"*)
+					# 旧版核心的备份含插件 peerDependency 的绝对软链接，新版 CLI 校验不认。
+					# 回滚时正是新版校验旧备份，这里改由下面的清单校验和恢复时的链接检查把关。
+					log_warn "新版 backup verify 不接受旧备份中的绝对软链接，改用本地校验: $archive_path"
+					;;
+				*)
+					echo "$out" >&2
+					log_error "官方 backup verify 验证失败 (退出码: $rc)"
+					return "$rc"
+					;;
+			esac
 		fi
 	fi
 
@@ -412,15 +449,21 @@ do_restore_state() {
 		local l_target
 		l_target=$(readlink "$l" 2>/dev/null || true)
 		case "$l_target" in
+			"${OC_GLOBAL:-/opt/openclaw/global}/lib/node_modules/openclaw")
+				# plugins install 为插件 peerDependency 创建的链接，只指向 OpenClaw 自身
+				;;
 			/*)
 				bad_link=1
 				log_error "检测到指向绝对路径的越界软链接: $l -> $l_target"
 				break
 				;;
-			*\.\./*|*/\.\.*|*\.\.)
-				bad_link=1
-				log_error "检测到相对路径穿透的越界软链接: $l -> $l_target"
-				break
+			*)
+				# node_modules/.bin 等相对链接含 ..，按所在目录解析后留在解包目录内才算合法
+				if ! oc_path_within "$(dirname "$l")/$l_target" "$staging_dir"; then
+					bad_link=1
+					log_error "检测到相对路径穿透的越界软链接: $l -> $l_target"
+					break
+				fi
 				;;
 		esac
 	done
@@ -483,6 +526,13 @@ do_restore_state() {
 	if [ "$switch_ok" -eq 1 ]; then
 		rm -rf "$staging_dir" 2>/dev/null || true
 		if [ "$had_old_state" -eq 1 ]; then
+			# 2026.9.x 起备份不含 workspace 和 npm 插件目录，归档里没有的不能随旧目录一起删除
+			local kept
+			for kept in workspace npm; do
+				if [ -e "$pre_backup/$kept" ] && [ ! -e "$state_dir/$kept" ]; then
+					mv "$pre_backup/$kept" "$state_dir/$kept" 2>/dev/null || log_warn "未能保留 $kept 目录: $pre_backup/$kept"
+				fi
+			done
 			rm -rf "$pre_backup" 2>/dev/null || true
 		fi
 		if command -v oc_fix_state_permissions >/dev/null 2>&1; then
@@ -593,7 +643,7 @@ do_reconcile_token() {
 # ── 5. Doctor 迁移事务 (doctor-migration) ──
 do_doctor_migration() {
 	local target_state_dir="${1:-}"
-	local target_version="${2:-2026.9.1}"
+	local target_version="${2:-unknown}"
 
 	local state_dir
 	state_dir="$(oc_resolve_state_dir "$target_state_dir")"
@@ -730,6 +780,26 @@ do_plugin_convergence() {
 	return 0
 }
 
+# ── 5.2 微信插件安装 (wechat-install): 以服务用户执行，版本由调用方按兼容矩阵决定 ──
+do_wechat_install() {
+	local target_state_dir="${1:-}"
+	local version="${2:-}"
+	local state_dir
+	state_dir="$(oc_resolve_state_dir "$target_state_dir")"
+	# 版本号会拼进 oc_run_as_user 的命令串，必须严格校验
+	if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+		log_error "微信插件版本无效: $version"
+		return 2
+	fi
+	local cli_bin
+	cli_bin="$(oc_find_cli)"
+	if [ -z "$cli_bin" ]; then
+		log_error "未找到 OpenClaw CLI，无法安装微信插件"
+		return 1
+	fi
+	oc_run_as_user "OPENCLAW_SUPERVISOR_MODE=external OPENCLAW_SERVICE_REPAIR_POLICY=external \"$cli_bin\" plugins install --force --pin '@tencent-weixin/openclaw-weixin@${version}'" "$state_dir"
+}
+
 # ── 6. Gateway 验证 (gateway-verify) ──
 do_gateway_verify() {
 	local gw_token="${1:-}"
@@ -821,7 +891,7 @@ EOF
 }
 
 do_transaction_init() {
-	local target_version="${1:-2026.9.1}"
+	local target_version="${1:-unknown}"
 	local target_state_dir="${2:-}"
 	local state_dir
 	state_dir="$(oc_resolve_state_dir "$target_state_dir")"
@@ -1100,8 +1170,10 @@ do_rollback_explicit() {
 		/etc/init.d/openclaw stop >/dev/null 2>&1 || true
 	fi
 	sleep 2
-	for p in $(pgrep -f "openclaw" 2>/dev/null); do
-		kill "$p" 2>/dev/null || true
+	# 不能用 pgrep -f "openclaw": 本脚本和调用方的路径都含 openclaw，
+	# BusyBox pgrep 不排除祖先进程，会在服务已停时把回滚自身杀掉。
+	for p in $(pgrep -u openclaw 2>/dev/null) $(pgrep -f "openclaw-gateway" 2>/dev/null); do
+		[ "$p" = "$$" ] || kill "$p" 2>/dev/null || true
 	done
 	sleep 1
 
@@ -1172,6 +1244,10 @@ case "${1:-}" in
 		shift
 		do_plugin_convergence "$@"
 		;;
+	wechat-install)
+		shift
+		do_wechat_install "$@"
+		;;
 	reconcile-token|sync-token)
 		shift
 		do_reconcile_token "$@"
@@ -1205,7 +1281,7 @@ case "${1:-}" in
 		return 0 2>/dev/null || exit 0
 		;;
 	*)
-		echo "用法: $0 {backup-create|backup-verify|restore-state|doctor-migration|plugin-convergence|reconcile-token|gateway-verify|status|init-transaction|set-phase|database-preflight|rollback-explicit} [参数...]" >&2
+		echo "用法: $0 {backup-create|backup-verify|restore-state|doctor-migration|plugin-convergence|wechat-install|reconcile-token|gateway-verify|status|init-transaction|set-phase|database-preflight|rollback-explicit} [参数...]" >&2
 		exit 2
 		;;
 esac

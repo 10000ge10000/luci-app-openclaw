@@ -4,6 +4,88 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased]
+
+基于 v2.2.3。默认 OpenClaw 从 `2026.9.1` 升级到 `2026.9.36`，Node.js 从 22 升级到 24，模型配置菜单整体重写。建议版本号 `2.3.0`。
+
+### 升级前请了解
+
+- **Node.js 要求变了。** `2026.9.34` 起 OpenClaw 要求 `>=24.22.1 <25 || >=26.12.1`。升级核心时会先把 Node.js 升到 `24.22.2`，新运行时校验通过后才替换旧目录，失败时原安装不变。`24.22.2` 也满足 `2026.9.1` 的要求，所以只升级插件不升级核心时，现有的 Node 22 + `2026.9.1` 可以继续运行。
+- **默认不再安装未验证版本。** 想用上游最新版，需要在高级选项里明确勾选，或设置 `OC_ALLOW_UNVERIFIED=1`。
+- **核心升级后磁盘占用变大。** `2026.9.36` 解压后约 390MB，`2026.9.1` 约 175MB。
+- **微信插件要求变了。** 旧插件在新核心上能装上，`plugins list` 也显示 `loaded`，渠道却会反复崩溃。升级核心时，如果微信已启用且插件低于该版本的要求，会自动升到 `2.4.10`，结果写在升级报告的 `WECHAT:` 一行。如果这一行是 `failed`，核心升级仍算成功，请到 LuCI 微信页面重新安装插件。
+- **Control UI 改走设备配对。** 上游已退役 `gateway.controlUi.dangerouslyDisableDeviceAuth`，Doctor 会删除它，首次打开控制台需要按正常流程配对设备。
+- **工作区文件会被官方迁移改动。** `TOOLS.md` 合并进 `AGENTS.md`，未改动过的 `HEARTBEAT.md` 模板会被移除，`auth-profiles.json` 和会话文件迁入 SQLite。升级前的备份归档保留在 `data/backups`。
+
+### 新增
+
+- **发布通道与版本锁定**：可在 `extended-stable`（默认）和 `latest` 之间选择，也可以锁定具体版本。「上游已发布」通过 npm dist-tags 实时查询，「本插件已验证」记录在 `openclaw-compat.json`，两者分开显示。上游有未验证的新版本时只提示，不自动安装。registry 不可达时仍可安装已验证版本。
+- **模型配置菜单重写**：分为快速配置、官方 API、订阅套餐与 Coding Plan、聚合平台与自定义 API、本地模型，以及状态查看、默认模型、备用模型、连通性测试、删除凭据的管理功能。交互式菜单和 Shell 菜单共用后端 `oc-providers.js` 与目录 `provider-catalog.json`，按键和文案一致。
+- **连通性测试**：发真实请求确认账号能否调用，并区分认证失败、限流、余额不足、超时等状态。Gateway 运行时走 `models.probe`，不中断服务。能查到模型不代表账号有权调用，菜单里有明确说明。
+- **模型发现回落**：依次尝试实时列表、`--refresh`、本地缓存。精选模型和手动输入始终可用，并显示真实的失败原因。
+- **预放置安装（[#113](https://github.com/10000ge10000/luci-app-openclaw/issues/113)）**：部分厂商闭源内核的固件在大量快速写盘时会被看门狗复位，在线安装因此反复失败。README 新增「预放置安装」说明：在电脑上准备好 Node.js 和 OpenClaw，限速拷贝到位后执行 `openclaw-env setup`。此时 `setup` 只创建系统用户、校验运行时并初始化，不下载、不解压。这是绕过方案，不能修复内核层面的复位。
+- **备份下载、上传与恢复（[#111](https://github.com/10000ge10000/luci-app-openclaw/issues/111)）**：备份列表每项新增「下载」按钮，对话框新增「上传备份」。上传采用分块方式，上限 20MB，上传后可在列表中直接恢复。
+
+### 修复
+
+- **旧配置导致 Gateway 拒绝启动**：`2026.9.35` 起配置校验会拒绝未知字段，而插件历史上每次启动都写入已退役的 `gateway.controlUi.allowInsecureAuth`。现在不再写入，新增 `oc-config-fixups.js` 在 Doctor 和 Gateway 之前删除它。
+- **Discord Token 可能丢失**：插件一直写 `channels.discord.botToken`，上游字段是 `token`，新版 Doctor 会删除未知键。现在写入正确字段，存量配置自动迁移且保留原值。`gateway.logLevel` 同样迁移到 `logging.level`。
+- **凭据写入已退役的文件**：`auth-profiles.json` 已被上游退役，写入会触发 `AUTH_PROFILE_MIGRATION_REQUIRED`。现在只通过官方 CLI 写入 `state/openclaw.sqlite`，重置和恢复出厂也改为逐个登出。
+- **恢复出厂时 onboard 一直静默失败**：使用了不存在的 `--tools-profile` 参数，改为与初始化相同的参数。
+- **设备配对报 `sh: timeout: not found`（[#110](https://github.com/10000ge10000/luci-app-openclaw/issues/110)）**：部分固件的 BusyBox 没有 `timeout` applet。现在优先用系统 `timeout`，缺失时由内置看门狗兜底，不再需要手动安装 `coreutils-timeout`。
+- **Web 控制台显示「拒绝连接」（[#108](https://github.com/10000ge10000/luci-app-openclaw/issues/108)）**：Control UI 固定返回 `X-Frame-Options: DENY`，上游没有关闭它的配置项，2.2.0 起的 iframe 内嵌在任何浏览器里都会被拒绝。改为「在新窗口打开控制台」入口。
+- **启动日志出现 `_ensure_critical_config: not found`（[#108](https://github.com/10000ge10000/luci-app-openclaw/issues/108)）**：这两个函数在定义之前就被调用。移除提前调用后行为不变。
+- **升级时 npm 报 `Class extends value undefined`（[#109](https://github.com/10000ge10000/luci-app-openclaw/issues/109)）**：这是运行时自带的 npm 损坏的表现，旧版只比较 Node 版本号，用户只能卸载重装。现在升级前先自检 npm 并给出修复指引；在已安装的环境里点「安装运行环境」时，若 npm 自检失败，只重新下载 Node.js，OpenClaw 与数据不变。
+- **服务启动或菜单操作可能清空配置**：配置无法解析时（例如多了一个尾随逗号），`_ensure_critical_config`、Token 回写、微信渠道自愈和 Shell 菜单的写入函数都会把默认值写回磁盘，API Key 和渠道配置随之丢失。现在一律解析失败即中止，原文件不变。
+- **部分设备上「创建备份」一直失败**：备份命令缺少 `NODE_ICU_DATA`，接口却仍返回成功。现在补齐环境变量，并以备份文件实际生成为准判断成败。备份列表也能正确显示带时区后缀的文件名时间。
+- **菜单输入问题**：在输入框里键入字母 `q` 会取消输入，粘贴内容时搜索框会丢字符，现已修复。
+- **预放置环境被误拒**：`setup` 的 Node 版本检查改为以已安装包的 `engines` 为准，Node 22 + `2026.9.1` 的预放置安装不会被新的默认下限拦住。
+- **升级后微信渠道崩溃循环**：核心移除 plugin-sdk 子路径后，旧插件的渠道反复退出，升级报告却显示成功。现在按兼容矩阵自动升级插件，默认安装 `2.4.10`。
+- **显式回滚会杀死自己**：回滚用 `pgrep -f "openclaw"` 清理进程，BusyBox 上会匹配到回滚脚本本身，服务已停却没有恢复。现在只清理服务用户的进程和 Gateway。
+- **`2026.9.36` 上备份失败导致无法升级**：环境变量只绑定到了复合命令的第一条，CLI 带着 root 的 `HOME` 运行，`backup create` 报临时目录不安全。
+- **装过 npm 插件的备份恢复不了**：`node_modules/.bin` 的相对软链接被当成路径穿透；新版 `backup verify` 也拒绝旧备份里插件 peerDependency 的绝对链接。现在按解析结果判断，其它越界链接仍然拒绝。
+- **恢复备份会删除工作区**：`2026.9.x` 的备份不含 `workspace` 和 `npm`，整目录替换时它们会被一起删除。现在归档里没有的这两个目录会保留。
+- **交互式菜单退出后卡住**：打印「再见」后进程不结束，Web 终端停在那里。
+- **配置备份无限累积**：`.ipk` 每次安装都在 `/etc/config` 留一份含 Token 的 `openclaw.<时间戳>.bak`，从不清理。现在只保留最近 5 份，其它名称的备份不受影响。
+
+### 安全加固
+
+- **API Key 不进命令行参数**：通过环境变量或标准输入交给官方 CLI，不出现在进程列表里。后端输出会过滤掉 Key，上游意外回显时同样隐藏。状态页不显示上游的掩码标签。
+- **安装包完整性校验**：已验证版本的 tarball 必须与兼容矩阵记录的 sha512 一致，镜像源返回的文件被篡改或损坏时安装失败。未验证版本的生命周期脚本必须与已验证版本相同。
+- **备份恢复不再解压到根目录**：旧版会把归档里 `payload/posix/` 下的所有路径解压到 `/`。现在只解压状态目录子树。上传的归档不能包含状态目录之外的路径、符号链接、硬链接或设备文件。
+- **备份文件名白名单**：只允许字母、数字和 `._+-`，所有命令参数统一做 shell 转义。指定的备份不存在时直接报错，不再静默恢复「最新的那一份」。
+- **外部插件需确认**：需要官方 Provider 插件时先询问用户，且只允许安装 `@openclaw/*-provider`。
+
+### 移除
+
+- **「一万AI分享 粉丝专享 API」**：对应的公益站点已停止运营，菜单入口、固定地址和相关模型预设全部删除。已有配置里的 `yiwanai` provider 和 Key 不会被自动删除，需要停用时请切换默认模型，再在菜单 `9` 中删除。
+- **`model-presets.json`**：由 `provider-catalog.json` 取代。
+
+### 构建与测试
+
+- **发布流水线的 arm64 musl Node 改为转发 unofficial-builds**：Alpine apk 的 Node 补丁版本经常与目标不一致（查询时 v3.23 与 edge 为 `24.22.1`），原来的精确版本模式会让发布失败。现在下载上游构建，校验 `SHASUMS256.txt`，在 ARM64 容器内运行验证后原样发布。
+- **打包清单补全**：`.ipk`、`.run` 和 feeds/SDK 三条路径都安装新增的文件，`test_packaging_parity.sh` 同时覆盖 `.json` 文件。
+- **新增测试**：Provider 后端（用替身 CLI 覆盖 Key 传递、认证失败、默认模型保留、自定义 Provider 冲突、模型发现回落、连通性测试）、Provider 目录与两套菜单一致性、旧配置迁移、发布通道选择。`test_openclaw_upgrade_state.sh` 不再调用机器上真实安装的 OpenClaw（新增 `OPENCLAW_CLI=none`）。
+
+### 已知限制
+
+- OAuth 与设备码登录（GitHub Copilot、OpenAI Codex、MiniMax OAuth）只透传官方流程，没有用真实账号验证过。
+- 硅基流动中国站的官方文档在核实时无法访问（502），接入参数来自国际站文档与兼容接口约定。
+- [#113](https://github.com/10000ge10000/luci-app-openclaw/issues/113) 的整机复位来自固件内核，插件无法修复，只能用预放置安装绕过。新版本组合尚未在这类设备上验证。
+- [#110](https://github.com/10000ge10000/luci-app-openclaw/issues/110) 中提到的「配对二维码」建议未包含在本次更新里。
+- 微信消息收发未验证。真机上渠道能启动，但测试账号被服务端判定 token 失效，需要重新扫码后才能确认；此时 LuCI 仍显示已登录。`2026.10.9` 只在 macOS 上验证过插件 `2.4.10` 能加载，没有登录账号。
+- 回滚没有在真机上端到端执行。恢复逻辑用真实备份在隔离目录验证过，完整流程只跑过替身环境。升级成功后代码备份会被清理，此时回滚只恢复状态，不恢复旧版核心。
+
+### 社区贡献与致谢
+
+本次更新的问题和方案来自这些反馈，感谢：
+
+- [@KotobaWakusei](https://github.com/KotobaWakusei)：在 [#113](https://github.com/10000ge10000/luci-app-openclaw/issues/113) 提供了 vendor 内核设备上安装触发复位的完整排查数据，以及可行的预放置方案，README 的预放置说明以此为基础。
+- [@qwedsazxcce](https://github.com/qwedsazxcce)：在 [#110](https://github.com/10000ge10000/luci-app-openclaw/issues/110) 报告设备配对错误，并确认缺少 `timeout` 是原因。
+- [@pbclaodentm](https://github.com/pbclaodentm)：在 [#108](https://github.com/10000ge10000/luci-app-openclaw/issues/108) 持续反馈 Web 控制台和全新部署的问题，并提供了安装日志。
+- [@LittleRabbit2023](https://github.com/LittleRabbit2023)：在 [#109](https://github.com/10000ge10000/luci-app-openclaw/issues/109) 报告升级时的 npm 报错。
+- [@keyboydg](https://github.com/keyboydg)：在 [#111](https://github.com/10000ge10000/luci-app-openclaw/issues/111) 提出备份下载与上传恢复的需求。
+
 ## [2.2.3] - 2026-09-11
 
 本次发布适配 LuCI 深色/暗黑主题，修复状态面板、控制台、高级设置与微信插件页面在深色模式下浅色硬编码导致的背景不可见、对比度不足问题。

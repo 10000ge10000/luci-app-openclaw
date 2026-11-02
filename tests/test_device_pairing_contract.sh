@@ -83,7 +83,12 @@ grep -Fq "oc_devices.evaluate_approval" "$CONTROLLER" || fail "controller must v
 grep -Fq "http.write(json.stringify(response))" "$CONTROLLER" || fail "controller must preserve JSON array markers"
 grep -Fq "pending = oc_devices.json_array" "$CONTROLLER" || fail "controller must encode empty pending lists as arrays"
 grep -Fq "OPENCLAW_SUPERVISOR_MODE=external" "$CONTROLLER" || fail "devices CLI must use external supervisor mode"
-grep -Fq "timeout 20" "$CONTROLLER" || fail "devices CLI must have a timeout"
+grep -Fq "_oc_timeout 20" "$CONTROLLER" || fail "devices CLI must have a timeout"
+# #110: BusyBox 未编译 timeout applet 时不能直接调用 timeout，必须走可移植兜底
+grep -Fq 'if command -v timeout >/dev/null 2>&1; then timeout' "$CONTROLLER" || fail "devices CLI timeout must fall back when timeout(1) is missing"
+if grep -nE '"timeout [0-9]+ ' "$CONTROLLER"; then
+	fail "controller must not call bare timeout(1); use _oc_timeout (#110)"
+fi
 if grep -Fq 'out:lower():match("approved")' "$CONTROLLER"; then
 	fail "approval output text must never override a non-zero exit status"
 fi

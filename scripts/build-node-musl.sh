@@ -4,13 +4,17 @@
 # 在 Alpine ARM64 Docker 容器内运行
 # 
 # 环境变量: 
-#   NODE_VER (目标版本号，如 22.23.2)
-#   BUILD_MODE (apk) - 仅支持 apk 模式，严格产出请求版本
+#   NODE_VER (目标版本号，如 24.22.2)
+#   BUILD_MODE (unofficial | apk) - 两种模式都严格产出请求版本
 #   /output (输出目录)
 #
 # 打包契约:
-#   1. apk 模式: 使用 Alpine apk 安装 nodejs，必须精确产出 NODE_VER，禁止版本不符改名
-#   2. 禁止 cross 模式使用 glibc 替换 ELF interpreter 冒充 musl
+#   1. unofficial 模式 (Node 24+ 默认): 转发 unofficial-builds.nodejs.org 官方社区构建的
+#      linux-arm64-musl 原始 tarball，按同目录 SHASUMS256.txt 校验后原样发布，不改动内容。
+#      Alpine apk 的 nodejs 补丁版本经常与目标版本不一致 (2026-11-01: v3.23/edge 为 24.22.1)，
+#      不能用于精确版本。
+#   2. apk 模式 (仅 V1 旧版): 使用 Alpine apk 安装 nodejs，必须精确产出 NODE_VER，禁止版本不符改名
+#   3. 禁止 cross 模式使用 glibc 替换 ELF interpreter 冒充 musl
 #   使用 patchelf 修改 node 二进制的 ELF interpreter 和 rpath，
 #   使其直接使用打包的 musl 链接器和共享库，无需 LD_LIBRARY_PATH。
 #   这样 process.execPath 返回正确的 node 路径，子进程 fork 也能正常工作。
@@ -18,7 +22,7 @@
 # ============================================================================
 set -e
 
-BUILD_MODE="${BUILD_MODE:-apk}"
+BUILD_MODE="${BUILD_MODE:-unofficial}"
 
 echo "=== Node.js ARM64 musl Build ==="
 echo "  Target version: v${NODE_VER}"
@@ -92,6 +96,51 @@ build_apk() {
 	# 返回包名供后续使用
 	echo "PKG_NAME=${PKG_NAME}" >> /tmp/build_env
 	echo "PKG_DIR=${PKG_DIR}" >> /tmp/build_env
+}
+
+# ── unofficial 模式: 转发官方社区 musl 构建 ──
+# 产物与 unofficial-builds 上的文件逐字节一致，.sha256 边车与上游 SHASUMS256.txt 相同；
+# 在 arm64 容器内实际运行一次，确认版本、架构与 Unicode 正则能力。
+build_unofficial() {
+	echo ""
+	echo "=== Fetching unofficial-builds linux-arm64-musl ==="
+	apk add --no-cache curl xz libstdc++ >/dev/null
+
+	MIRROR="${NODE_MUSL_MIRROR:-https://unofficial-builds.nodejs.org/download/release}"
+	PKG_NAME="node-v${NODE_VER}-linux-arm64-musl"
+	TARBALL="${PKG_NAME}.tar.xz"
+	WORK=/tmp/unofficial
+	rm -rf "$WORK" && mkdir -p "$WORK"
+
+	curl -fsSL --retry 3 -o "$WORK/SHASUMS256.txt" "${MIRROR}/v${NODE_VER}/SHASUMS256.txt"
+	EXPECTED=$(awk -v f="$TARBALL" '$2 == f {print $1}' "$WORK/SHASUMS256.txt")
+	if [ -z "$EXPECTED" ]; then
+		echo "ERROR: ${TARBALL} not listed in upstream SHASUMS256.txt" >&2
+		exit 1
+	fi
+	curl -fsSL --retry 3 -o "$WORK/$TARBALL" "${MIRROR}/v${NODE_VER}/${TARBALL}"
+	ACTUAL=$(sha256sum "$WORK/$TARBALL" | awk '{print $1}')
+	if [ "$ACTUAL" != "$EXPECTED" ]; then
+		echo "ERROR: SHA256 mismatch for ${TARBALL} (actual ${ACTUAL}, expected ${EXPECTED})" >&2
+		exit 1
+	fi
+	echo "  SHA256 OK: ${EXPECTED}"
+
+	tar xJf "$WORK/$TARBALL" -C "$WORK"
+	NODE="$WORK/${PKG_NAME}/bin/node"
+	GOT=$("$NODE" --version)
+	if [ "$GOT" != "v${NODE_VER}" ]; then
+		echo "ERROR: extracted node reports ${GOT}, expected v${NODE_VER}" >&2
+		exit 1
+	fi
+	"$NODE" -e "if(process.arch!=='arm64'||process.platform!=='linux')throw new Error('Mismatched architecture: '+process.arch)"
+	"$NODE" -e "new RegExp('\\\\p{Extended_Pictographic}','u')"
+	"$NODE" "$WORK/${PKG_NAME}/lib/node_modules/npm/bin/npm-cli.js" --version
+
+	cp "$WORK/$TARBALL" "/output/$TARBALL"
+	(cd /output && sha256sum "$TARBALL" > "${TARBALL}.sha256")
+	ls -lh "/output/$TARBALL"
+	echo "=== Done: ${TARBALL} (upstream unofficial-builds, unmodified) ==="
 }
 
 # ── 禁止使用 glibc 二进制仅替换 ELF interpreter 冒充 musl ──
@@ -170,6 +219,10 @@ NPXWRAPPER
 rm -f /tmp/build_env
 
 case "$BUILD_MODE" in
+	unofficial)
+		build_unofficial
+		exit 0
+		;;
 	apk)
 		build_apk
 		;;

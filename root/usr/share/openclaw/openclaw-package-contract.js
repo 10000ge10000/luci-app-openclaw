@@ -4,21 +4,20 @@
  *
  * OpenClaw 与 Node.js 运行时及包清单不可变契约校验工具。
  *
- * 契约规范:
- * 1. OpenClaw @ 2026.9.1 默认清单白名单校验:
- *    - name = "openclaw"
- *    - version = "2026.9.1"
- *    - bin = "openclaw.mjs"
- *    - preinstall = "node scripts/preinstall-package-manager-warning.mjs"
- *    - postinstall = "node scripts/postinstall-bundled-plugins.mjs"
- *    - optionalDependencies 中若存在 sqlite-vec 则必须为 "0.1.9" (不限定只有该项)
- *    - engines.node = ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"
- * 2. 运行时校验: 针对完整 engines.node 规则做精确比对，失败关闭 (fail-closed)。
- * 3. 自定义/latest 版本策略: 不套用 2026.9.1 白名单；存在 lifecycle 时 fail-closed；
- *    无 lifecycle 时校验包名、bin、实际解析版本及 engines，并标记为未验证。
+ * 契约规范 (数据来自同目录 openclaw-compat.json，可用 OC_COMPAT_FILE 覆盖):
+ * 1. 已验证版本 (compat.versions 中列出): 逐项精确校验
+ *    - name = "openclaw"，bin 只允许 { openclaw: "openclaw.mjs" }
+ *    - preinstall / postinstall 与 compat.lifecycle 完全一致，不允许额外 lifecycle
+ *    - optionalDependencies.sqlite-vec 与矩阵记录一致
+ *    - engines.node 与矩阵记录完全一致
+ *    - tarball sha512 integrity 与矩阵记录一致 (validate-integrity)
+ * 2. 未验证版本 (上游已发布但不在矩阵中): 默认拒绝。
+ *    仅当调用方显式允许 (OC_ALLOW_UNVERIFIED=1) 时放行，且 lifecycle 只能是
+ *    与已验证版本完全相同的 preinstall/postinstall 命令，engines 必须被当前 Node 满足。
+ * 3. 运行时校验: 针对完整 engines.node 规则做精确比对，失败关闭 (fail-closed)。
  * 4. 退出码约定:
  *    - 0: 验证成功或帮助
- *    - 1: 契约不满足 / 运行时不匹配 / 脚本缺失
+ *    - 1: 契约不满足 / 运行时不匹配 / 脚本缺失 / 未验证版本被拒绝
  *    - 2: CLI 用法或输入格式错误 (多余参数、非法/前后缀 semver、空或不支持 range、非对象 JSON 等)
  */
 
@@ -26,17 +25,51 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const EXPECTED_NAME = 'openclaw';
-const EXPECTED_VERSION = '2026.9.1';
 const EXPECTED_BIN = 'openclaw.mjs';
-const EXPECTED_PREINSTALL = 'node scripts/preinstall-package-manager-warning.mjs';
-const EXPECTED_POSTINSTALL = 'node scripts/postinstall-bundled-plugins.mjs';
-const EXPECTED_PREINSTALL_FILE = 'scripts/preinstall-package-manager-warning.mjs';
-const EXPECTED_POSTINSTALL_FILE = 'scripts/postinstall-bundled-plugins.mjs';
-const EXPECTED_SQLITE_VEC_VERSION = '0.1.9';
-const DEFAULT_NODE_ENGINES = '>=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0';
+const INSTALL_LIFECYCLE_KEYS = new Set(['install', 'preinstall', 'postinstall', 'prepare', 'prepack', 'postpack']);
+const CHANNEL_NAMES = ['extended-stable', 'latest'];
+
+function compatFilePath() {
+  return process.env.OC_COMPAT_FILE || path.join(__dirname, 'openclaw-compat.json');
+}
+
+/**
+ * 读取兼容矩阵。缺失或损坏时抛错，由调用方失败关闭。
+ */
+function loadCompat(file) {
+  const p = file || compatFilePath();
+  const raw = fs.readFileSync(p, 'utf8');
+  const data = JSON.parse(raw);
+  if (!data || typeof data !== 'object' || !data.versions || !data.channels || !data.lifecycle) {
+    throw new Error(`兼容矩阵结构无效: ${p}`);
+  }
+  return data;
+}
+
+let compatCache = null;
+function compat() {
+  if (!compatCache) compatCache = loadCompat();
+  return compatCache;
+}
+
+function safeCompat() {
+  try { return compat(); } catch { return null; }
+}
+
+const C0 = safeCompat();
+const LIFECYCLE = (C0 && C0.lifecycle) || {};
+const EXPECTED_PREINSTALL = LIFECYCLE.preinstall || 'node scripts/preinstall-package-manager-warning.mjs';
+const EXPECTED_POSTINSTALL = LIFECYCLE.postinstall || 'node scripts/postinstall-bundled-plugins.mjs';
+const EXPECTED_PREINSTALL_FILE = LIFECYCLE.preinstallFile || 'scripts/preinstall-package-manager-warning.mjs';
+const EXPECTED_POSTINSTALL_FILE = LIFECYCLE.postinstallFile || 'scripts/postinstall-bundled-plugins.mjs';
+// 兼容旧接口: EXPECTED_VERSION / DEFAULT_NODE_ENGINES 指向默认通道的已验证版本
+const EXPECTED_VERSION = C0 ? C0.channels[C0.defaultChannel].verified : '';
+const DEFAULT_NODE_ENGINES = (C0 && C0.versions[EXPECTED_VERSION] && C0.versions[EXPECTED_VERSION].engines) || '';
+const EXPECTED_SQLITE_VEC_VERSION = (C0 && C0.versions[EXPECTED_VERSION] && C0.versions[EXPECTED_VERSION].sqliteVec) || '';
 
 /**
  * 严格语义化版本号解析 (严格禁止前后缀、非数字以及多余段)
@@ -122,10 +155,6 @@ function evaluateNodeEngines(verStr, rangeStr) {
   }
 
   const clauses = spec.split('||');
-  if (clauses.length === 0) {
-    return { validRange: false, satisfied: false, error: 'engines.node 范围格式非法' };
-  }
-
   for (const clause of clauses) {
     const comps = clause.trim().split(/\s+/).filter(Boolean);
     if (comps.length === 0) {
@@ -140,14 +169,7 @@ function evaluateNodeEngines(verStr, rangeStr) {
 
   for (const clause of clauses) {
     const comps = clause.trim().split(/\s+/).filter(Boolean);
-    let allSatisfied = true;
-    for (const comp of comps) {
-      if (!satisfiesComparator(ver, comp)) {
-        allSatisfied = false;
-        break;
-      }
-    }
-    if (allSatisfied) {
+    if (comps.every((comp) => satisfiesComparator(ver, comp))) {
       return { validRange: true, satisfied: true };
     }
   }
@@ -163,13 +185,45 @@ function satisfiesNodeEngines(verStr, rangeStr) {
   return res.validRange && res.satisfied;
 }
 
+function typeName(v) {
+  if (Array.isArray(v)) return 'array';
+  if (v === null) return 'null';
+  return typeof v;
+}
+
+function isPlainObject(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * 把调用方传入的目标解析成精确版本:
+ *   - 精确 semver: 原样返回
+ *   - "stable": 默认通道的已验证版本 (历史别名)
+ *   - 通道名: 该通道的已验证版本
+ *   - "latest" 历史上表示 npm latest 标签，这里同样解析为 latest 通道的已验证版本
+ */
+function resolveTargetAlias(target, data) {
+  const t = String(target || '').trim();
+  if (parseStrictSemver(t)) return t.replace(/^v/, '');
+  if (!data) return null;
+  if (t === 'stable' || t === '') return data.channels[data.defaultChannel].verified;
+  if (data.channels[t]) return data.channels[t].verified;
+  return null;
+}
+
+function allowUnverifiedFromEnv() {
+  return process.env.OC_ALLOW_UNVERIFIED === '1';
+}
+
 /**
  * 校验 package.json 清单
  * @param {object|string} pkgOrPath
- * @param {string} targetVersion
- * @returns {{ valid: boolean, isUsageError?: boolean, vettedScripts?: string[], error?: string, warning?: string, unverified?: boolean }}
+ * @param {string} targetVersion  精确版本或别名 (stable / extended-stable / latest)
+ * @param {string} [nodeVersion]  未验证版本做 engines 校验时使用的 Node 版本，默认当前进程
+ * @param {{ allowUnverified?: boolean }} [opts]
+ * @returns {{ valid: boolean, isUsageError?: boolean, vettedScripts?: string[], error?: string, warning?: string, unverified?: boolean, verified?: boolean }}
  */
-function validateManifest(pkgOrPath, targetVersion, nodeVersion) {
+function validateManifest(pkgOrPath, targetVersion, nodeVersion, opts = {}) {
   let pkg;
   let pkgDir = null;
 
@@ -178,8 +232,7 @@ function validateManifest(pkgOrPath, targetVersion, nodeVersion) {
       return { valid: false, isUsageError: true, error: `文件不存在: ${pkgOrPath}` };
     }
     try {
-      const raw = fs.readFileSync(pkgOrPath, 'utf8');
-      pkg = JSON.parse(raw);
+      pkg = JSON.parse(fs.readFileSync(pkgOrPath, 'utf8'));
     } catch (e) {
       return { valid: false, isUsageError: true, error: `无法读取或解析 package.json (${pkgOrPath}): ${e.message}` };
     }
@@ -188,220 +241,191 @@ function validateManifest(pkgOrPath, targetVersion, nodeVersion) {
     pkg = pkgOrPath;
   }
 
-  if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) {
+  if (!isPlainObject(pkg)) {
     return { valid: false, isUsageError: true, error: 'package.json 内容为空或不是有效的非数组 JSON 对象' };
   }
-
   if (typeof targetVersion !== 'string' || !targetVersion.trim()) {
     return { valid: false, isUsageError: true, error: '缺少或非法的 target-version 参数' };
   }
 
-  const targetVerTrimmed = targetVersion.trim();
-  const isPinned2026_9_1 = (targetVerTrimmed === '2026.9.1' || targetVerTrimmed === 'stable');
+  let data;
+  try {
+    data = compat();
+  } catch (e) {
+    return { valid: false, error: `兼容矩阵不可用，失败关闭: ${e.message}` };
+  }
 
-  if (isPinned2026_9_1) {
-    // ── 针对 2026.9.1 进行精确不可变清单校验 ──
-    // name 校验: 存在、类型为 string、值精确等于 openclaw
-    if (pkg.name === undefined) {
-      return { valid: false, error: 'package.json 缺少 name 字段' };
-    }
-    if (typeof pkg.name !== 'string') {
-      return { valid: false, error: `name 字段类型错误: 期望 string, 实际 ${typeof pkg.name}` };
-    }
-    if (pkg.name !== EXPECTED_NAME) {
-      return { valid: false, error: `包名漂移: 期望 "${EXPECTED_NAME}", 实际 "${pkg.name}"` };
-    }
+  const targetExact = resolveTargetAlias(targetVersion, data);
+  if (!targetExact) {
+    return { valid: false, isUsageError: true, error: `无法解析目标版本: "${targetVersion}"` };
+  }
 
-    // version 校验: 存在、类型为 string、值精确等于 2026.9.1
-    if (pkg.version === undefined) {
-      return { valid: false, error: 'package.json 缺少 version 字段' };
-    }
-    if (typeof pkg.version !== 'string') {
-      return { valid: false, error: `version 字段类型错误: 期望 string, 实际 ${typeof pkg.version}` };
-    }
-    if (pkg.version !== EXPECTED_VERSION) {
-      return { valid: false, error: `版本号漂移: 期望 "${EXPECTED_VERSION}", 实际 "${pkg.version}"` };
-    }
+  // ── 公共字段: 包名、bin、版本号 ──
+  if (pkg.name === undefined) return { valid: false, error: 'package.json 缺少 name 字段' };
+  if (typeof pkg.name !== 'string') return { valid: false, error: `name 字段类型错误: 期望 string, 实际 ${typeof pkg.name}` };
+  if (pkg.name !== EXPECTED_NAME) return { valid: false, error: `包名漂移: 期望 "${EXPECTED_NAME}", 实际 "${pkg.name}"` };
 
-    // bin 校验: 必须为对象，bin.openclaw 必须存在且为 EXPECTED_BIN
-    if (pkg.bin === undefined) {
-      return { valid: false, error: 'package.json 缺少 bin 对象' };
-    }
-    if (typeof pkg.bin !== 'object' || pkg.bin === null || Array.isArray(pkg.bin)) {
-      return { valid: false, error: `bin 字段类型错误: 期望 object, 实际 ${Array.isArray(pkg.bin) ? 'array' : (pkg.bin === null ? 'null' : typeof pkg.bin)}` };
-    }
-    if (pkg.bin.openclaw === undefined) {
-      return { valid: false, error: 'package.json 缺少 bin.openclaw 字段' };
-    }
-    if (typeof pkg.bin.openclaw !== 'string') {
-      return { valid: false, error: `bin.openclaw 字段类型错误: 期望 string, 实际 ${typeof pkg.bin.openclaw}` };
-    }
-    if (pkg.bin.openclaw !== EXPECTED_BIN) {
-      return { valid: false, error: `bin 入口漂移: 期望 "${EXPECTED_BIN}", 实际 "${pkg.bin.openclaw}"` };
-    }
-    const binKeys = Object.keys(pkg.bin);
-    if (binKeys.length !== 1 || binKeys[0] !== 'openclaw') {
-      return { valid: false, error: `bin 结构漂移: 仅允许定义 openclaw 入口, 实际包含: ${binKeys.join(', ')}` };
-    }
+  if (pkg.bin === undefined) return { valid: false, error: 'package.json 缺少 bin 对象' };
+  if (!isPlainObject(pkg.bin)) return { valid: false, error: `bin 字段类型错误: 期望 object, 实际 ${typeName(pkg.bin)}` };
+  if (pkg.bin.openclaw === undefined) return { valid: false, error: 'package.json 缺少 bin.openclaw 字段' };
+  if (typeof pkg.bin.openclaw !== 'string') return { valid: false, error: `bin.openclaw 字段类型错误: 期望 string, 实际 ${typeof pkg.bin.openclaw}` };
+  if (pkg.bin.openclaw !== EXPECTED_BIN) return { valid: false, error: `bin 入口漂移: 期望 "${EXPECTED_BIN}", 实际 "${pkg.bin.openclaw}"` };
+  const binKeys = Object.keys(pkg.bin);
+  if (binKeys.length !== 1 || binKeys[0] !== 'openclaw') {
+    return { valid: false, error: `bin 结构漂移: 仅允许定义 openclaw 入口, 实际包含: ${binKeys.join(', ')}` };
+  }
 
-    // scripts 校验: 必须为对象，preinstall 与 postinstall 必须精确匹配
-    if (pkg.scripts === undefined) {
-      return { valid: false, error: 'package.json 缺少 scripts 对象' };
-    }
-    if (typeof pkg.scripts !== 'object' || pkg.scripts === null || Array.isArray(pkg.scripts)) {
-      return { valid: false, error: `scripts 字段类型错误: 期望 object, 实际 ${Array.isArray(pkg.scripts) ? 'array' : (pkg.scripts === null ? 'null' : typeof pkg.scripts)}` };
-    }
-    if (pkg.scripts.preinstall === undefined) {
-      return { valid: false, error: 'package.json 缺少 preinstall 脚本' };
-    }
-    if (typeof pkg.scripts.preinstall !== 'string') {
-      return { valid: false, error: `preinstall 脚本类型错误: 期望 string, 实际 ${typeof pkg.scripts.preinstall}` };
-    }
-    if (pkg.scripts.preinstall !== EXPECTED_PREINSTALL) {
-      return { valid: false, error: `preinstall 脚本漂移: 期望 "${EXPECTED_PREINSTALL}", 实际 "${pkg.scripts.preinstall}"` };
-    }
+  if (pkg.version === undefined) return { valid: false, error: 'package.json 缺少 version 字段' };
+  if (typeof pkg.version !== 'string') return { valid: false, error: `version 字段类型错误: 期望 string, 实际 ${typeof pkg.version}` };
+  if (!parseStrictSemver(pkg.version)) return { valid: false, error: `package.json 版本号非法或包含前后缀: "${pkg.version}"` };
+  if (pkg.version !== targetExact) {
+    return { valid: false, error: `版本号漂移: 期望 "${targetExact}", 实际 "${pkg.version}"` };
+  }
 
-    if (pkg.scripts.postinstall === undefined) {
-      return { valid: false, error: 'package.json 缺少 postinstall 脚本' };
+  // ── scripts: 只允许与已验证版本完全相同的 preinstall/postinstall ──
+  const scripts = pkg.scripts === undefined ? {} : pkg.scripts;
+  if (!isPlainObject(scripts)) {
+    return { valid: false, error: `scripts 字段类型错误: 期望 object, 实际 ${typeName(scripts)}` };
+  }
+  for (const k of Object.keys(scripts)) {
+    const val = scripts[k];
+    if (typeof val !== 'string' || !val.trim()) {
+      return { valid: false, error: `scripts.${k} 脚本值为空或类型非法` };
     }
-    if (typeof pkg.scripts.postinstall !== 'string') {
-      return { valid: false, error: `postinstall 脚本类型错误: 期望 string, 实际 ${typeof pkg.scripts.postinstall}` };
+    if (INSTALL_LIFECYCLE_KEYS.has(k) && k !== 'preinstall' && k !== 'postinstall') {
+      return { valid: false, error: `存在未知或额外 lifecycle 脚本漂移: ${k}="${val}"` };
     }
-    if (pkg.scripts.postinstall !== EXPECTED_POSTINSTALL) {
-      return { valid: false, error: `postinstall 脚本漂移: 期望 "${EXPECTED_POSTINSTALL}", 实际 "${pkg.scripts.postinstall}"` };
-    }
+  }
+  if (scripts.preinstall !== undefined && scripts.preinstall !== EXPECTED_PREINSTALL) {
+    return { valid: false, error: `preinstall 脚本漂移: 期望 "${EXPECTED_PREINSTALL}", 实际 "${scripts.preinstall}"` };
+  }
+  if (scripts.postinstall !== undefined && scripts.postinstall !== EXPECTED_POSTINSTALL) {
+    return { valid: false, error: `postinstall 脚本漂移: 期望 "${EXPECTED_POSTINSTALL}", 实际 "${scripts.postinstall}"` };
+  }
+  const vetted = [];
+  if (scripts.preinstall !== undefined) vetted.push(EXPECTED_PREINSTALL_FILE);
+  if (scripts.postinstall !== undefined) vetted.push(EXPECTED_POSTINSTALL_FILE);
 
-    const knownLifecycle = new Set(['preinstall', 'postinstall']);
-    const INSTALL_LIFECYCLE_KEYS = new Set([
-      'install', 'preinstall', 'postinstall',
-      'prepare', 'prepack', 'postpack'
-    ]);
-    for (const k of Object.keys(pkg.scripts)) {
-      const isLifecycle = INSTALL_LIFECYCLE_KEYS.has(k);
-      if (isLifecycle && !knownLifecycle.has(k)) {
-        return { valid: false, error: `存在未知或额外 lifecycle 脚本漂移: ${k}="${pkg.scripts[k]}"` };
+  // 真实解压目录中必须存在要执行的脚本文件
+  if (pkgDir && fs.existsSync(path.join(pkgDir, 'scripts'))) {
+    for (const rel of vetted) {
+      const full = path.join(pkgDir, rel);
+      if (!fs.existsSync(full)) {
+        return { valid: false, error: `白名单 ${rel.includes('preinstall') ? 'preinstall' : 'postinstall'} 脚本文件不存在: ${full}` };
       }
-      const val = pkg.scripts[k];
-      if (typeof val !== 'string' || !val.trim()) {
-        return { valid: false, error: `scripts.${k} 脚本值为空或类型非法` };
+    }
+  }
+
+  const entry = data.versions[pkg.version];
+  if (entry) {
+    // ── 已验证版本: 必须与矩阵逐项一致 ──
+    if (scripts.preinstall === undefined) return { valid: false, error: 'package.json 缺少 preinstall 脚本' };
+    if (scripts.postinstall === undefined) return { valid: false, error: 'package.json 缺少 postinstall 脚本' };
+
+    if (entry.sqliteVec) {
+      if (!isPlainObject(pkg.optionalDependencies)) {
+        return { valid: false, error: `optionalDependencies 字段类型错误: 期望 object, 实际 ${typeName(pkg.optionalDependencies)}` };
+      }
+      if (pkg.optionalDependencies['sqlite-vec'] !== entry.sqliteVec) {
+        return { valid: false, error: `sqlite-vec 版本漂移: 期望 "${entry.sqliteVec}", 实际 "${pkg.optionalDependencies['sqlite-vec']}"` };
       }
     }
 
-    // optionalDependencies 校验 (必须存在对象且包含 sqlite-vec="0.1.9")
-    if (pkg.optionalDependencies === undefined) {
-      return { valid: false, error: 'package.json 缺少 optionalDependencies 对象' };
+    if (!isPlainObject(pkg.engines)) {
+      return { valid: false, error: `engines 字段类型错误: 期望 object, 实际 ${typeName(pkg.engines)}` };
     }
-    if (typeof pkg.optionalDependencies !== 'object' || pkg.optionalDependencies === null || Array.isArray(pkg.optionalDependencies)) {
-      return { valid: false, error: `optionalDependencies 字段类型错误: 期望 object, 实际 ${Array.isArray(pkg.optionalDependencies) ? 'array' : (pkg.optionalDependencies === null ? 'null' : typeof pkg.optionalDependencies)}` };
-    }
-    if (pkg.optionalDependencies['sqlite-vec'] === undefined) {
-      return { valid: false, error: 'package.json 缺少 optionalDependencies.sqlite-vec 字段' };
-    }
-    if (typeof pkg.optionalDependencies['sqlite-vec'] !== 'string') {
-      return { valid: false, error: `sqlite-vec 字段类型错误: 期望 string, 实际 ${typeof pkg.optionalDependencies['sqlite-vec']}` };
-    }
-    if (pkg.optionalDependencies['sqlite-vec'] !== EXPECTED_SQLITE_VEC_VERSION) {
-      return { valid: false, error: `sqlite-vec 版本漂移: 期望 "${EXPECTED_SQLITE_VEC_VERSION}", 实际 "${pkg.optionalDependencies['sqlite-vec']}"` };
+    if (pkg.engines.node !== entry.engines) {
+      return { valid: false, error: `engines.node 漂移: 期望 "${entry.engines}", 实际 "${pkg.engines.node}"` };
     }
 
-    // engines.node 校验
-    if (pkg.engines === undefined) {
-      return { valid: false, error: 'package.json 缺少 engines 对象' };
-    }
-    if (typeof pkg.engines !== 'object' || pkg.engines === null || Array.isArray(pkg.engines)) {
-      return { valid: false, error: `engines 字段类型错误: 期望 object, 实际 ${Array.isArray(pkg.engines) ? 'array' : (pkg.engines === null ? 'null' : typeof pkg.engines)}` };
-    }
-    if (pkg.engines.node === undefined) {
-      return { valid: false, error: 'package.json 缺少 engines.node 定义' };
-    }
-    if (typeof pkg.engines.node !== 'string') {
-      return { valid: false, error: `engines.node 字段类型错误: 期望 string, 实际 ${typeof pkg.engines.node}` };
-    }
-    if (pkg.engines.node !== DEFAULT_NODE_ENGINES) {
-      return { valid: false, error: `engines.node 漂移: 期望 "${DEFAULT_NODE_ENGINES}", 实际 "${pkg.engines.node}"` };
-    }
+    return { valid: true, verified: true, vettedScripts: vetted };
+  }
 
-    // 如果所在目录存在 scripts 目录 (真实已解压安装包)，则校验两脚本文件真实存在
-    if (pkgDir && fs.existsSync(path.join(pkgDir, 'scripts'))) {
-      const preinstallFile = path.join(pkgDir, EXPECTED_PREINSTALL_FILE);
-      const postinstallFile = path.join(pkgDir, EXPECTED_POSTINSTALL_FILE);
-      if (!fs.existsSync(preinstallFile)) {
-        return { valid: false, error: `白名单 preinstall 脚本文件不存在: ${preinstallFile}` };
-      }
-      if (!fs.existsSync(postinstallFile)) {
-        return { valid: false, error: `白名单 postinstall 脚本文件不存在: ${postinstallFile}` };
-      }
-    }
-
+  // ── 未验证版本 ──
+  const allow = opts.allowUnverified !== undefined ? !!opts.allowUnverified : allowUnverifiedFromEnv();
+  if (!allow) {
     return {
-      valid: true,
-      vettedScripts: [EXPECTED_PREINSTALL_FILE, EXPECTED_POSTINSTALL_FILE]
-    };
-  } else {
-    // ── latest 或自定义版本: 不套用 2026.9.1 白名单 ──
-    if (pkg.name !== EXPECTED_NAME) {
-      return { valid: false, error: `包名不匹配: 期望 "${EXPECTED_NAME}", 实际 "${pkg.name}"` };
-    }
-
-    let binTarget = '';
-    if (typeof pkg.bin === 'string') {
-      binTarget = pkg.bin;
-    } else if (pkg.bin && typeof pkg.bin === 'object' && !Array.isArray(pkg.bin)) {
-      binTarget = pkg.bin.openclaw || pkg.bin[EXPECTED_NAME] || '';
-    }
-    if (!binTarget || !binTarget.endsWith('openclaw.mjs')) {
-      return { valid: false, error: `bin 入口漂移或无效: "${binTarget}"` };
-    }
-
-    if (typeof pkg.version !== 'string') {
-      return { valid: false, error: 'package.json 缺少或非法 version 字段' };
-    }
-    const parsedVer = parseStrictSemver(pkg.version);
-    if (!parsedVer) {
-      return { valid: false, error: `package.json 版本号非法或包含前后缀: "${pkg.version}"` };
-    }
-    if (targetVerTrimmed !== 'latest' && targetVerTrimmed !== pkg.version) {
-      return { valid: false, error: `实际版本 (${pkg.version}) 与请求版本 (${targetVerTrimmed}) 不一致` };
-    }
-
-    const engineSpec = (pkg.engines && pkg.engines.node) || '';
-    if (!engineSpec || typeof engineSpec !== 'string') {
-      return { valid: false, error: 'package.json 缺少 engines.node 定义' };
-    }
-    const currentNodeVer = (nodeVersion ? String(nodeVersion).replace(/^v/, '') : (process.versions.node || (process.version ? process.version.replace(/^v/, '') : '')));
-    const evalRes = evaluateNodeEngines(currentNodeVer, engineSpec);
-    if (!evalRes.validRange) {
-      return { valid: false, error: `engines.node 语法非法: ${evalRes.error}` };
-    }
-    if (!evalRes.satisfied) {
-      return { valid: false, error: `当前 Node.js 运行时 v${currentNodeVer} 不满足 engines.node 契约: "${engineSpec}"` };
-    }
-
-    const scripts = (pkg.scripts && typeof pkg.scripts === 'object' && !Array.isArray(pkg.scripts)) ? pkg.scripts : {};
-    const INSTALL_LIFECYCLE_KEYS = new Set([
-      'install', 'preinstall', 'postinstall',
-      'prepare', 'prepack', 'postpack'
-    ]);
-    const detectedLifecycles = [];
-    for (const k of Object.keys(scripts)) {
-      if (INSTALL_LIFECYCLE_KEYS.has(k)) {
-        detectedLifecycles.push(k);
-      }
-    }
-    if (detectedLifecycles.length > 0) {
-      return {
-        valid: false,
-        error: `拒绝执行未验证版本的 lifecycle 脚本 (${detectedLifecycles.join(', ')}). 自定义/latest 版本不得套用 2026.9.1 白名单 (fail-closed)`
-      };
-    }
-
-    return {
-      valid: true,
-      vettedScripts: [],
-      unverified: true,
-      warning: `当前安装版本为自定义/latest (${pkg.version || targetVerTrimmed})，未套用 2026.9.1 白名单，已阻断所有 lifecycle 脚本并标记为未验证安装`
+      valid: false,
+      error: `OpenClaw ${pkg.version} 未经本插件验证 (不在兼容矩阵中)。如确需安装，请在界面勾选「允许安装未验证版本」后重试`
     };
   }
+  const engineSpec = isPlainObject(pkg.engines) ? pkg.engines.node : '';
+  if (!engineSpec || typeof engineSpec !== 'string') {
+    return { valid: false, error: 'package.json 缺少 engines.node 定义' };
+  }
+  const currentNodeVer = nodeVersion ? String(nodeVersion).replace(/^v/, '') : process.versions.node;
+  const evalRes = evaluateNodeEngines(currentNodeVer, engineSpec);
+  if (!evalRes.validRange) return { valid: false, error: `engines.node 语法非法: ${evalRes.error}` };
+  if (!evalRes.satisfied) {
+    return { valid: false, error: `当前 Node.js 运行时 v${currentNodeVer} 不满足 engines.node 契约: "${engineSpec}"` };
+  }
+  return {
+    valid: true,
+    verified: false,
+    unverified: true,
+    vettedScripts: vetted,
+    warning: `OpenClaw ${pkg.version} 未经本插件验证，已按用户明确选择继续安装；lifecycle 命令与已验证版本一致`
+  };
+}
+
+/**
+ * 计算 tarball 的 npm 风格 sha512 integrity
+ */
+function computeIntegrity(file) {
+  const hash = crypto.createHash('sha512');
+  hash.update(fs.readFileSync(file));
+  return `sha512-${hash.digest('base64')}`;
+}
+
+/**
+ * 已验证版本: tarball integrity 必须与矩阵一致；未验证版本由 npm 依据 registry 元数据校验，这里返回 skipped。
+ */
+function validateIntegrity(tarball, version) {
+  if (!fs.existsSync(tarball)) {
+    return { valid: false, isUsageError: true, error: `tarball 不存在: ${tarball}` };
+  }
+  let data;
+  try {
+    data = compat();
+  } catch (e) {
+    return { valid: false, error: `兼容矩阵不可用，失败关闭: ${e.message}` };
+  }
+  const entry = data.versions[String(version || '').replace(/^v/, '')];
+  if (!entry) return { valid: true, skipped: true };
+  if (!entry.integrity) return { valid: false, error: `兼容矩阵缺少 ${version} 的 integrity 记录` };
+  const actual = computeIntegrity(tarball);
+  if (actual !== entry.integrity) {
+    return { valid: false, error: `tarball integrity 不匹配: 期望 ${entry.integrity}, 实际 ${actual}` };
+  }
+  return { valid: true };
+}
+
+/**
+ * 解析安装/升级目标。
+ * @param {{ channel?: string, pin?: string, upstream?: string, allowUnverified?: boolean }} req
+ * @returns {{ ok: boolean, version?: string, channel?: string, verified?: boolean, upstream?: string, newerUpstream?: boolean, error?: string }}
+ */
+function resolveInstallTarget(req, data) {
+  const d = data || compat();
+  const pin = String(req.pin || '').trim().replace(/^v/, '');
+  if (pin) {
+    if (!parseStrictSemver(pin)) return { ok: false, error: `锁定版本格式非法: "${req.pin}"` };
+    const verified = !!d.versions[pin];
+    if (!verified && !req.allowUnverified) {
+      return { ok: false, error: `锁定版本 ${pin} 未经本插件验证，需显式允许安装未验证版本` };
+    }
+    return { ok: true, version: pin, channel: verified ? d.versions[pin].channel : 'pinned', verified };
+  }
+  let channel = String(req.channel || '').trim();
+  if (channel === 'stable' || channel === '') channel = d.defaultChannel;
+  if (!d.channels[channel]) return { ok: false, error: `未知发布通道: "${req.channel}"` };
+  const verifiedVer = d.channels[channel].verified;
+  const upstream = parseStrictSemver(String(req.upstream || '')) ? String(req.upstream).replace(/^v/, '') : '';
+  const newerUpstream = !!(upstream && compareSemver(parseStrictSemver(upstream), parseStrictSemver(verifiedVer)) > 0);
+  if (newerUpstream && req.allowUnverified) {
+    return { ok: true, version: upstream, channel, verified: !!d.versions[upstream], upstream, newerUpstream };
+  }
+  return { ok: true, version: verifiedVer, channel, verified: true, upstream, newerUpstream };
 }
 
 /**
@@ -420,11 +444,7 @@ function validateRuntime(nodeBin, spec) {
       return { valid: false, isUsageError: true, error: evalRes.error };
     }
     if (!evalRes.satisfied) {
-      return {
-        valid: false,
-        version: ver,
-        error: `Node.js v${ver} 不满足 engines.node 契约: "${engineSpec}"`
-      };
+      return { valid: false, version: ver, error: `Node.js v${ver} 不满足 engines.node 契约: "${engineSpec}"` };
     }
     return { valid: true, version: ver };
   } catch (e) {
@@ -434,18 +454,11 @@ function validateRuntime(nodeBin, spec) {
 
 /**
  * 获取经过审核的脚本列表并检查文件真实存在
- * @param {string} pkgPath
- * @param {string} targetVersion
- * @returns {{ valid: boolean, isUsageError?: boolean, scripts?: string[], error?: string }}
  */
 function getVettedScripts(pkgPath, targetVersion) {
   const res = validateManifest(pkgPath, targetVersion);
-  if (!res.valid) {
-    return res;
-  }
-  if (!res.vettedScripts || res.vettedScripts.length === 0) {
-    return { valid: true, scripts: [] };
-  }
+  if (!res.valid) return res;
+  if (!res.vettedScripts || res.vettedScripts.length === 0) return { valid: true, scripts: [] };
   const pkgDir = path.dirname(path.resolve(pkgPath));
   for (const s of res.vettedScripts) {
     const fullPath = path.join(pkgDir, s);
@@ -456,7 +469,57 @@ function getVettedScripts(pkgPath, targetVersion) {
   return { valid: true, scripts: res.vettedScripts };
 }
 
+/**
+ * 供 shell / LuCI 读取的矩阵摘要 (不含 integrity 等大字段)
+ */
+function channelSummary(data) {
+  const d = data || compat();
+  const channels = {};
+  for (const name of CHANNEL_NAMES) {
+    const c = d.channels[name];
+    if (!c) continue;
+    const v = d.versions[c.verified] || {};
+    channels[name] = {
+      label: c.label,
+      description: c.description,
+      verified: c.verified,
+      engines: v.engines || '',
+      deviceVerified: !!(v.verification && v.verification.device)
+    };
+  }
+  return { defaultChannel: d.defaultChannel, node: d.node.recommended, channels };
+}
+
+/**
+ * 升级到 coreVersion 时已安装的微信插件要怎么处理:
+ *   ok      已满足该核心的最低要求
+ *   upgrade 低于最低要求 (或版本号无法解析)，需要升级到 pin
+ *   unknown 目标核心不在矩阵内，无从判断
+ */
+function wechatPlan(coreVersion, installedPlugin, data) {
+  const d = data || compat();
+  const pin = (d.wechat && d.wechat.pin) || '';
+  const entry = d.versions[String(coreVersion || '').replace(/^v/, '')];
+  const min = entry && entry.wechat && entry.wechat.minPlugin;
+  if (!min) return { action: 'unknown', pin, min: '' };
+  const cur = parseStrictSemver(installedPlugin);
+  if (cur && compareSemver(cur, parseStrictSemver(min)) >= 0) return { action: 'ok', pin, min };
+  return { action: 'upgrade', pin, min };
+}
+
 // ── CLI 执行入口 ──
+function parseFlags(list) {
+  const out = {};
+  for (let i = 0; i < list.length; i++) {
+    const a = list[i];
+    if (!a.startsWith('--')) continue;
+    const key = a.slice(2);
+    const next = list[i + 1];
+    if (next !== undefined && !next.startsWith('--')) { out[key] = next; i++; } else { out[key] = '1'; }
+  }
+  return out;
+}
+
 if (require.main === module) {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -465,9 +528,14 @@ if (require.main === module) {
     console.log(`用法: node openclaw-package-contract.js <command> [args...]
 命令:
   validate-manifest <package.json-path> <target-version>
+  validate-integrity <tarball> <version>
   validate-node-version <version-string> [engine-spec]
   validate-runtime <node-binary-path> [engine-spec]
   get-vetted-scripts <package.json-path> <target-version>
+  resolve-target [--channel <name>] [--pin <version>] [--upstream <version>] [--allow-unverified]
+  channels                   输出通道与已验证版本摘要 (JSON)
+  engines <version>          输出已验证版本的 engines.node (未验证时退出码 1)
+  wechat-plan <version> [installed]  微信插件处理方式，输出 "<ok|upgrade|unknown> <pin> <min>"
 `);
     process.exit(0);
   }
@@ -482,17 +550,27 @@ if (require.main === module) {
       console.error('用法错误: validate-manifest 需要恰好 2 个参数: <package.json-path> <target-version>');
       process.exit(2);
     }
-    const pkgPath = args[1];
-    const targetVer = args[2];
-    const res = validateManifest(pkgPath, targetVer);
+    const res = validateManifest(args[1], args[2]);
     if (!res.valid) {
       console.error(`[✗] 包清单校验失败: ${res.error}`);
       process.exit(res.isUsageError ? 2 : 1);
     }
-    if (res.warning) {
-      console.warn(`[!] ${res.warning}`);
+    if (res.warning) console.warn(`[!] ${res.warning}`);
+    console.log(res.verified ? '[✓] 包清单契约校验通过 (已验证版本)' : '[✓] 包清单契约校验通过');
+    process.exit(0);
+  }
+
+  if (command === 'validate-integrity') {
+    if (args.length !== 3) {
+      console.error('用法错误: validate-integrity 需要恰好 2 个参数: <tarball> <version>');
+      process.exit(2);
     }
-    console.log('[✓] 包清单契约校验通过');
+    const res = validateIntegrity(args[1], args[2]);
+    if (!res.valid) {
+      console.error(`[✗] ${res.error}`);
+      process.exit(res.isUsageError ? 2 : 1);
+    }
+    console.log(res.skipped ? '[!] 未验证版本: integrity 由 npm 依据 registry 元数据校验' : '[✓] tarball integrity 与兼容矩阵一致');
     process.exit(0);
   }
 
@@ -501,18 +579,16 @@ if (require.main === module) {
       console.error('用法错误: validate-node-version 需要 1 或 2 个参数: <version-string> [engine-spec]');
       process.exit(2);
     }
-    const ver = args[1];
-    const spec = args[2];
-    const evalRes = evaluateNodeEngines(ver, spec);
+    const evalRes = evaluateNodeEngines(args[1], args[2]);
     if (!evalRes.validRange) {
       console.error(`[✗] 输入格式错误: ${evalRes.error}`);
       process.exit(2);
     }
     if (!evalRes.satisfied) {
-      console.error(`[✗] Node.js 版本 v${ver} 不满足契约: "${spec || DEFAULT_NODE_ENGINES}"`);
+      console.error(`[✗] Node.js 版本 v${args[1]} 不满足契约: "${args[2] || DEFAULT_NODE_ENGINES}"`);
       process.exit(1);
     }
-    console.log(`[✓] Node.js 版本 v${ver} 满足契约`);
+    console.log(`[✓] Node.js 版本 v${args[1]} 满足契约`);
     process.exit(0);
   }
 
@@ -521,14 +597,12 @@ if (require.main === module) {
       console.error('用法错误: validate-runtime 需要 1 或 2 个参数: <node-binary-path> [engine-spec]');
       process.exit(2);
     }
-    const nodeBin = args[1];
-    const engineSpec = args[2];
-    const res = validateRuntime(nodeBin, engineSpec);
+    const res = validateRuntime(args[1], args[2]);
     if (!res.valid) {
       console.error(`[✗] 运行时校验失败: ${res.error}`);
       process.exit(res.isUsageError ? 2 : 1);
     }
-    console.log(`[✓] Node.js 运行时 v${res.version} 满足契约 (${engineSpec || DEFAULT_NODE_ENGINES})`);
+    console.log(`[✓] Node.js 运行时 v${res.version} 满足契约 (${args[2] || DEFAULT_NODE_ENGINES})`);
     process.exit(0);
   }
 
@@ -537,19 +611,63 @@ if (require.main === module) {
       console.error('用法错误: get-vetted-scripts 需要恰好 2 个参数: <package.json-path> <target-version>');
       process.exit(2);
     }
-    const pkgPath = args[1];
-    const targetVer = args[2];
-    const res = getVettedScripts(pkgPath, targetVer);
+    const res = getVettedScripts(args[1], args[2]);
     if (!res.valid) {
       console.error(`[✗] ${res.error}`);
       process.exit(res.isUsageError ? 2 : 1);
     }
-    if (res.scripts && res.scripts.length > 0) {
-      for (const s of res.scripts) {
-        console.log(s);
-      }
-    }
+    for (const s of res.scripts || []) console.log(s);
     process.exit(0);
+  }
+
+  if (command === 'resolve-target') {
+    const f = parseFlags(args.slice(1));
+    let res;
+    try {
+      res = resolveInstallTarget({ channel: f.channel, pin: f.pin, upstream: f.upstream, allowUnverified: f['allow-unverified'] === '1' });
+    } catch (e) {
+      res = { ok: false, error: `兼容矩阵不可用: ${e.message}` };
+    }
+    if (!res.ok) {
+      console.error(`[✗] ${res.error}`);
+      process.exit(1);
+    }
+    // 机器可读: version channel verified newerUpstream upstream
+    console.log([res.version, res.channel, res.verified ? 'verified' : 'unverified', res.newerUpstream ? 'newer' : 'same', res.upstream || '-'].join(' '));
+    process.exit(0);
+  }
+
+  if (command === 'channels') {
+    try {
+      console.log(JSON.stringify(channelSummary()));
+      process.exit(0);
+    } catch (e) {
+      console.error(`[✗] 兼容矩阵不可用: ${e.message}`);
+      process.exit(1);
+    }
+  }
+
+  if (command === 'engines') {
+    try {
+      const entry = compat().versions[String(args[1] || '').replace(/^v/, '')];
+      if (!entry) process.exit(1);
+      console.log(entry.engines);
+      process.exit(0);
+    } catch (e) {
+      console.error(`[✗] 兼容矩阵不可用: ${e.message}`);
+      process.exit(2);
+    }
+  }
+
+  if (command === 'wechat-plan') {
+    try {
+      const plan = wechatPlan(args[1], args[2]);
+      console.log([plan.action, plan.pin || '-', plan.min || '-'].join(' '));
+      process.exit(0);
+    } catch (e) {
+      console.error(`[✗] 兼容矩阵不可用: ${e.message}`);
+      process.exit(2);
+    }
   }
 
   console.error(`未知命令: ${command}`);
@@ -566,12 +684,20 @@ module.exports = {
   EXPECTED_POSTINSTALL_FILE,
   EXPECTED_SQLITE_VEC_VERSION,
   DEFAULT_NODE_ENGINES,
+  CHANNEL_NAMES,
+  wechatPlan,
+  loadCompat,
   parseStrictSemver,
   compareSemver,
   parseComparator,
   evaluateNodeEngines,
   satisfiesNodeEngines,
+  resolveTargetAlias,
+  resolveInstallTarget,
   validateManifest,
+  validateIntegrity,
+  computeIntegrity,
   validateRuntime,
-  getVettedScripts
+  getVettedScripts,
+  channelSummary
 };

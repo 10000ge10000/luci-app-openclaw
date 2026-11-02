@@ -95,29 +95,6 @@ oc_prepare_openclaw_workdirs() {
 	[ -d "$npm_dir" ] && chown -R openclaw:openclaw "$npm_dir" 2>/dev/null || true
 }
 
-oc_patch_control_ui_security_headers() {
-	local global_dir="${1:-${OC_GLOBAL:-/opt/openclaw/global}}"
-	local dist_dir=""
-	for d in "${global_dir}/lib/node_modules/openclaw/dist" "${global_dir}/node_modules/openclaw/dist" "/opt/openclaw/global/lib/node_modules/openclaw/dist" "/opt/openclaw/node/lib/node_modules/openclaw/dist"; do
-		if [ -d "$d" ]; then
-			dist_dir="$d"
-			break
-		fi
-	done
-	[ -n "$dist_dir" ] || return 0
-	# 允许 LuCI 界面以 iframe 内嵌官方 Web 控制台 (Control UI / WebChat)
-	# 移除 X-Frame-Options: DENY 并将 frame-ancestors 放宽
-	for f in "$dist_dir"/control-ui-*.js; do
-		[ -f "$f" ] || continue
-		if grep -q 'res.setHeader("X-Frame-Options", "DENY");' "$f" 2>/dev/null; then
-			sed -i 's/res.setHeader("X-Frame-Options", "DENY");//g' "$f" 2>/dev/null || true
-		fi
-		if grep -q '"frame-ancestors '\''none'\''"' "$f" 2>/dev/null; then
-			sed -i "s/\"frame-ancestors 'none'\"/\"frame-ancestors *\"/g" "$f" 2>/dev/null || true
-		fi
-	done
-}
-
 if [ "${OPENCLAW_PERMISSIONS_SOURCED:-0}" = "1" ]; then
 	return 0
 fi
@@ -135,12 +112,8 @@ case "${1:-fix-state}" in
 		shift || true
 		oc_prepare_openclaw_workdirs "${1:-}"
 		;;
-	patch-control-ui)
-		shift || true
-		oc_patch_control_ui_security_headers "${1:-}"
-		;;
 	*)
-		echo "Usage: $0 {fix-state [state_dir]|fix-npm-projects [state_dir]|prepare-workdirs [data_dir]|patch-control-ui [global_dir]}" >&2
+		echo "Usage: $0 {fix-state [state_dir]|fix-npm-projects [state_dir]|prepare-workdirs [data_dir]}" >&2
 		exit 2
 		;;
 esac

@@ -6,23 +6,32 @@
 #   openclaw-env check     — 检查环境状态
 #   openclaw-env upgrade   — 升级 OpenClaw 到最新版
 #   openclaw-env node      — 仅下载/更新 Node.js
+#   openclaw-env versions  — 输出发布通道、上游版本与已验证版本 (JSON)
 # 环境变量:
-#   OC_VERSION  — 指定 OpenClaw 版本 (如 2026.9.1)，不设置则安装已测试稳定版
+#   OC_CHANNEL          — 发布通道: extended-stable (默认) / latest
+#   OC_VERSION          — 锁定精确版本 (如 2026.9.36)；历史值 stable/latest 分别映射到对应通道
+#   OC_ALLOW_UNVERIFIED — 1 = 允许安装上游已发布但未经本插件验证的版本
+# 通道与已验证版本记录在 /usr/share/openclaw/openclaw-compat.json
 # ============================================================================
 set -e
 
 # ── Node.js 版本策略 ──
-# 推荐版本: 用于 OpenClaw v2026.9.1+ (要求 >= 22.22.3，使用 musl 预编译包)
-NODE_VERSION_V2="22.23.2"
+# 24.22.2 (24 LTS) 同时满足 OpenClaw 2026.3.x ~ 2026.10.x 全部 engines.node，
+# 因此升级时先换 Node、回滚到旧版 OpenClaw 时也无需降级 Node。
+NODE_VERSION_V2="24.22.2"
 # 默认使用 V2 版本 (可通过 NODE_VERSION 环境变量覆盖)
 NODE_VERSION="${NODE_VERSION:-${NODE_VERSION_V2}}"
-# 经过验证的 OpenClaw 稳定版本 (更新此值需同步测试)
-OC_TESTED_VERSION="2026.9.1"
-# OpenClaw 2026.9.x package.json engines.node 的最低要求。
-# 如果未来上游提高要求，安装成功后还会从 package.json 再做一次强校验。
-OC_NODE_MIN_VERSION="${OC_NODE_MIN_VERSION:-22.22.3}"
+# 默认通道 (extended-stable) 的已验证版本，需与 openclaw-compat.json 保持一致 (测试会校验)
+OC_TESTED_VERSION="2026.9.36"
+# 已验证版本 engines.node 的最低要求。
+# 安装成功后还会从 package.json 再做一次强校验。
+OC_NODE_MIN_VERSION="${OC_NODE_MIN_VERSION:-24.22.1}"
+# 支持底线: 兼容矩阵内最低版本 (2026.9.1) 的要求，已安装包的 engines 不能把要求拉低到它以下
+OC_NODE_FLOOR_VERSION="22.22.3"
 # 用户可通过 OC_VERSION 环境变量覆盖安装版本
 OC_VERSION="${OC_VERSION:-}"
+OC_CHANNEL="${OC_CHANNEL:-$(uci -q get openclaw.main.channel 2>/dev/null || true)}"
+OC_ALLOW_UNVERIFIED="${OC_ALLOW_UNVERIFIED:-0}"
 
 _script_dir="$(CDPATH= cd -- "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
 if [ -r /usr/libexec/openclaw-paths.sh ]; then
@@ -114,6 +123,9 @@ if [ ! -f "$OC_PACKAGE_CONTRACT" ]; then
 		OC_PACKAGE_CONTRACT="./root/usr/share/openclaw/openclaw-package-contract.js"
 	fi
 fi
+
+OC_COMPAT_FILE="$(dirname "$OC_PACKAGE_CONTRACT")/openclaw-compat.json"
+export OC_COMPAT_FILE OC_ALLOW_UNVERIFIED
 
 export PATH="${NODE_BASE}/bin:${OC_GLOBAL}/bin:$PATH"
 export NODE_ICU_DATA="${NODE_BASE}/share/icu"
@@ -247,11 +259,16 @@ try{
 }
 
 assert_node_runtime() {
+	# 已安装 OpenClaw 时以它自己的 engines 为准 (后面还有完整范围校验)，
+	# 否则存量或预放置的 Node 22 + OpenClaw 2026.9.1 会被新版默认下限误拒 (#113)；
+	# 但不能低于支持底线，防止异常包用宽松的 engines 绕过版本检查。
+	# OC_NODE_MIN_VERSION 只在尚未安装 OpenClaw 时生效。
 	local required="$OC_NODE_MIN_VERSION"
 	local from_pkg
 	from_pkg=$(detect_oc_node_requirement 2>/dev/null || true)
-	if [ -n "$from_pkg" ] && command -v oc_node_version_ge >/dev/null 2>&1; then
-		if oc_node_version_ge "$from_pkg" "$required"; then
+	if [ -n "$from_pkg" ]; then
+		required="$OC_NODE_FLOOR_VERSION"
+		if command -v oc_node_version_ge >/dev/null 2>&1 && oc_node_version_ge "$from_pkg" "$OC_NODE_FLOOR_VERSION"; then
 			required="$from_pkg"
 		fi
 	fi
@@ -270,7 +287,7 @@ assert_node_runtime() {
 		exit 1
 	fi
 
-	local engine_spec=">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"
+	local engine_spec=">=24.22.1 <25 || >=26.12.1"
 	local oc_entry pkg_json
 	oc_entry=$(find_oc_entry 2>/dev/null || true)
 	if [ -n "$oc_entry" ]; then
@@ -407,6 +424,154 @@ verify_node_tarball() {
 	return 1
 }
 
+# npm 自检 (#109)
+# Node.js 运行时目录中的 npm 文件不完整时 (解压中断、磁盘写满、被部分覆盖)，
+# npm 会以 "Class extends value undefined is not a constructor or null" 之类的
+# 内部错误退出。仅凭 node --version 无法发现这种损坏。
+NPM_SELFCHECK_OUTPUT=""
+npm_selfcheck() {
+	NPM_SELFCHECK_OUTPUT=""
+	if [ ! -x "$NPM_BIN" ]; then
+		NPM_SELFCHECK_OUTPUT="npm 可执行文件不存在: $NPM_BIN"
+		return 1
+	fi
+	local out rc=0
+	out=$("$NPM_BIN" --version 2>&1) || rc=$?
+	if [ "$rc" -eq 0 ]; then
+		case "$out" in
+			[0-9]*) return 0 ;;
+		esac
+	fi
+	NPM_SELFCHECK_OUTPUT=$(printf '%s\n' "$out" | tail -n 5)
+	return 1
+}
+
+npm_runtime_broken_hint() {
+	log_error "Node.js 运行时自带的 npm 无法运行，通常是运行时文件损坏或不完整:"
+	printf '%s\n' "$NPM_SELFCHECK_OUTPUT" | sed 's/^/      /'
+	log_error "修复方法: 在 LuCI → 服务 → OpenClaw 点击「安装运行环境」，会重新下载 Node.js 运行时；配置与数据不受影响"
+	log_error "命令行等价操作: openclaw-env setup"
+}
+
+# ── 发布通道与目标版本解析 ──
+# 上游已发布版本来自 npm dist-tags (走用户配置的 npm registry，可使用镜像)；
+# 本插件已验证版本来自 openclaw-compat.json。两者分开记录，默认只安装已验证版本，
+# 上游出现更新版本时只提示，不会自动升级到未验证版本。
+OC_UPSTREAM_TAGS_JSON=""
+fetch_upstream_disttags() {
+	OC_UPSTREAM_TAGS_JSON=""
+	[ -x "$NPM_BIN" ] || return 1
+	local out
+	out=$("$NPM_BIN" view openclaw dist-tags --json --fetch-timeout=20000 --fetch-retries=1 2>/dev/null) || return 1
+	case "$out" in
+		*"{"*) OC_UPSTREAM_TAGS_JSON="$out"; return 0 ;;
+	esac
+	return 1
+}
+
+upstream_disttag() {
+	local tag="$1"
+	[ -n "$OC_UPSTREAM_TAGS_JSON" ] || fetch_upstream_disttags || return 1
+	printf '%s' "$OC_UPSTREAM_TAGS_JSON" | "$NODE_BIN" -e "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{try{const v=JSON.parse(s)[process.argv[1]];if(typeof v==='string'&&/^\d+\.\d+\.\d+$/.test(v))process.stdout.write(v)}catch(e){}})" "$tag"
+}
+
+compat_default_channel() {
+	"$NODE_BIN" -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).defaultChannel)}catch(e){process.exit(1)}" "$OC_COMPAT_FILE" 2>/dev/null
+}
+
+# 结果写入 OC_TARGET_VER / OC_TARGET_CHANNEL / OC_TARGET_VERIFIED (verified|unverified)
+#          OC_TARGET_NEWER (newer|same) / OC_TARGET_UPSTREAM
+resolve_target_version() {
+	local channel="$OC_CHANNEL" pin="" allow=""
+	case "$OC_VERSION" in
+		""|stable) ;;
+		latest|extended-stable) channel="$OC_VERSION" ;;
+		*) pin="$OC_VERSION" ;;
+	esac
+	[ -n "$pin" ] || pin="$(uci -q get openclaw.main.pin_version 2>/dev/null || true)"
+	[ "$OC_ALLOW_UNVERIFIED" = "1" ] && allow="--allow-unverified"
+
+	local upstream=""
+	if [ -z "$pin" ]; then
+		local ch="$channel"
+		[ -n "$ch" ] && [ "$ch" != "stable" ] || ch=$(compat_default_channel || true)
+		upstream=$(upstream_disttag "$ch" 2>/dev/null || true)
+		[ -n "$upstream" ] || log_warn "无法查询上游 ${ch} 通道版本 (npm registry 不可达)，按已验证版本安装"
+	fi
+
+	local out
+	out=$("$NODE_BIN" "$OC_PACKAGE_CONTRACT" resolve-target ${channel:+--channel "$channel"} ${pin:+--pin "$pin"} ${upstream:+--upstream "$upstream"} $allow) || return 1
+	# shellcheck disable=SC2086
+	set -- $out
+	OC_TARGET_VER="$1"
+	OC_TARGET_CHANNEL="$2"
+	OC_TARGET_VERIFIED="$3"
+	OC_TARGET_NEWER="$4"
+	OC_TARGET_UPSTREAM="$5"
+	[ "$OC_TARGET_UPSTREAM" = "-" ] && OC_TARGET_UPSTREAM=""
+	return 0
+}
+
+print_target_summary() {
+	if [ "$OC_TARGET_VERIFIED" = "verified" ]; then
+		log_info "目标版本: v${OC_TARGET_VER} (${OC_TARGET_CHANNEL}，本插件已验证)"
+	else
+		log_warn "目标版本: v${OC_TARGET_VER} (${OC_TARGET_CHANNEL}，未经本插件验证，按用户明确选择安装)"
+	fi
+	if [ "$OC_TARGET_NEWER" = "newer" ] && [ "$OC_TARGET_VERIFIED" = "verified" ]; then
+		log_warn "上游 ${OC_TARGET_CHANNEL} 通道已发布 v${OC_TARGET_UPSTREAM}，尚未经本插件验证，本次仍安装已验证版本"
+	fi
+}
+
+# 正在使用的微信插件版本；未安装或未启用时输出为空
+wechat_installed_version() {
+	local state="${OC_DATA}/.openclaw" pkg
+	[ -f "$state/openclaw.json" ] && [ -x "$NODE_BIN" ] || return 0
+	"$NODE_BIN" -e "
+const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));
+const on=(c.channels&&c.channels['openclaw-weixin']&&c.channels['openclaw-weixin'].enabled===true)||
+	(c.plugins&&c.plugins.entries&&c.plugins.entries['openclaw-weixin']&&c.plugins.entries['openclaw-weixin'].enabled===true);
+process.exit(on?0:1);" "$state/openclaw.json" >/dev/null 2>&1 || return 0
+	pkg=$(find "$state/npm/projects" "$state/extensions/openclaw-weixin" -type f \
+		\( -path '*/@tencent-weixin/openclaw-weixin/package.json' -o -path '*/extensions/openclaw-weixin/package.json' \) 2>/dev/null | head -n 1)
+	[ -n "$pkg" ] || return 0
+	"$NODE_BIN" -p "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).version" "$pkg" 2>/dev/null || true
+}
+
+# 机器可读的版本信息，供 LuCI 展示「上游已发布」与「本插件已验证」
+do_versions() {
+	local installed="" entry
+	entry=$(find_oc_entry 2>/dev/null || true)
+	if [ -n "$entry" ] && [ -f "$(dirname "$entry")/package.json" ] && [ -x "$NODE_BIN" ]; then
+		installed=$("$NODE_BIN" -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).version)}catch(e){}" "$(dirname "$entry")/package.json" 2>/dev/null || true)
+	fi
+	if [ ! -x "$NODE_BIN" ] || [ ! -f "$OC_PACKAGE_CONTRACT" ]; then
+		printf '{"installed":"%s","node":"","nodeRecommended":"%s","channels":{},"upstreamOk":false}\n' "$installed" "$NODE_VERSION"
+		return 0
+	fi
+	local tags=""
+	[ "${1:-}" = "--offline" ] || { fetch_upstream_disttags && tags="$OC_UPSTREAM_TAGS_JSON"; }
+	OC_V_INSTALLED="$installed" OC_V_TAGS="$tags" OC_V_CHANNEL="$OC_CHANNEL" \
+	OC_V_PIN="$(uci -q get openclaw.main.pin_version 2>/dev/null || true)" \
+	OC_V_NODE="$("$NODE_BIN" --version 2>/dev/null | sed 's/^v//')" \
+	"$NODE_BIN" -e "
+const c=require(process.argv[1]);
+const s=c.channelSummary();
+let tags={};try{tags=JSON.parse(process.env.OC_V_TAGS||'{}')}catch(e){}
+const out={installed:process.env.OC_V_INSTALLED||'',node:process.env.OC_V_NODE||'',nodeRecommended:s.node,
+  defaultChannel:s.defaultChannel,channel:process.env.OC_V_CHANNEL||s.defaultChannel,pin:process.env.OC_V_PIN||'',
+  upstreamOk:!!process.env.OC_V_TAGS,channels:{}};
+for(const [n,ch] of Object.entries(s.channels)){
+  const up=typeof tags[n]==='string'?tags[n]:'';
+  const pu=c.parseStrictSemver(up),pv=c.parseStrictSemver(ch.verified);
+  out.channels[n]=Object.assign({},ch,{upstream:up,upstreamNewer:!!(pu&&pv&&c.compareSemver(pu,pv)>0)});
+}
+const iv=c.parseStrictSemver(out.installed);
+out.installedVerified=!!(iv&&c.loadCompat().versions[out.installed]);
+process.stdout.write(JSON.stringify(out)+'\n');
+" "$OC_PACKAGE_CONTRACT"
+}
+
 download_node() {
 	local node_ver="$1"
 	local node_arch
@@ -414,21 +579,27 @@ download_node() {
 	local libc_type
 	libc_type=$(detect_libc)
 
-	# 如果已存在且版本兼容, 跳过
+	# 如果已存在且版本兼容, 跳过 (npm 自检失败时强制重新下载以修复运行时)
 	if [ -x "$NODE_BIN" ]; then
 		local current_ver
 		current_ver=$("$NODE_BIN" --version 2>/dev/null | sed 's/^v//')
+		local version_ok=0
 		if [ "$current_ver" = "$node_ver" ]; then
-			log_info "Node.js v${node_ver} 已安装, 跳过下载"
-			assert_node_runtime
-			return 0
+			version_ok=1
+		elif command -v oc_node_version_ge >/dev/null 2>&1 && oc_node_version_ge "$current_ver" "$node_ver"; then
+			version_ok=1
 		fi
-		if command -v oc_node_version_ge >/dev/null 2>&1 && oc_node_version_ge "$current_ver" "$node_ver"; then
-			log_info "Node.js v${current_ver} 已安装 (>= v${node_ver}), 跳过下载"
-			assert_node_runtime
-			return 0
+		if [ "$version_ok" -eq 1 ]; then
+			if npm_selfcheck; then
+				log_info "Node.js v${current_ver} 已安装 (>= v${node_ver}), 跳过下载"
+				assert_node_runtime
+				return 0
+			fi
+			log_warn "Node.js v${current_ver} 已安装，但 npm 自检失败，将重新下载运行时修复:"
+			printf '%s\n' "$NPM_SELFCHECK_OUTPUT" | sed 's/^/      /'
+		else
+			log_warn "当前 Node.js v${current_ver}, 将更新到 v${node_ver}"
 		fi
-		log_warn "当前 Node.js v${current_ver}, 将更新到 v${node_ver}"
 	fi
 
 	# ── 构建下载 URL 列表 (musl 资产名精确固定) ──
@@ -631,27 +802,37 @@ validate_openclaw_manifest() {
 		return 1
 	fi
 
+	# 已验证版本按兼容矩阵逐项校验 (含 lifecycle 脚本文件存在性)；
+	# 未验证版本仅在 OC_ALLOW_UNVERIFIED=1 时放行 (零执行静态预检)
 	echo "  正在校验 OpenClaw 包清单不可变契约 (静态预检)..."
 	if ! "$NODE_BIN" "$OC_PACKAGE_CONTRACT" validate-manifest "$pkg_json" "$target_ver"; then
 		log_error "OpenClaw 包清单契约静态校验失败"
 		return 1
 	fi
 
-	# 仅对锁定稳定版 2026.9.1 静态校验脚本文件物理存在性 (零执行预检)
-	if [ "$target_ver" = "2026.9.1" ] || [ -z "$target_ver" ] || [ "$target_ver" = "stable" ]; then
-		local preinstall_script="${pkg_dir}/scripts/preinstall-package-manager-warning.mjs"
-		local postinstall_script="${pkg_dir}/scripts/postinstall-bundled-plugins.mjs"
+	return 0
+}
 
-		if [ ! -f "$preinstall_script" ]; then
-			log_error "白名单 preinstall 脚本文件不存在: $preinstall_script"
-			return 1
-		fi
-		if [ ! -f "$postinstall_script" ]; then
-			log_error "白名单 postinstall 脚本文件不存在: $postinstall_script"
-			return 1
-		fi
+# 修正插件历史写入、新版 OpenClaw 不再接受的配置字段 (解析失败时不写入，返回非零)
+run_config_fixups() {
+	local cfg="$1"
+	local fixups="$(dirname "$OC_PACKAGE_CONTRACT")/oc-config-fixups.js"
+	[ -f "$cfg" ] || return 0
+	[ -f "$fixups" ] && [ -x "$NODE_BIN" ] || return 0
+	local out rc=0
+	out=$("$NODE_BIN" "$fixups" "$cfg" 2>&1) || rc=$?
+	[ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/  /'
+	chown openclaw:openclaw "$cfg" 2>/dev/null || true
+	return "$rc"
+}
+
+# 已验证版本: tarball sha512 必须与兼容矩阵一致，防止镜像源或缓存被篡改
+validate_openclaw_tarball() {
+	local tarball="$1" target_ver="$2"
+	if ! "$NODE_BIN" "$OC_PACKAGE_CONTRACT" validate-integrity "$tarball" "$target_ver"; then
+		log_error "OpenClaw 安装包完整性校验失败，可能是镜像源返回了被篡改或损坏的文件"
+		return 1
 	fi
-
 	return 0
 }
 
@@ -686,37 +867,32 @@ execute_openclaw_lifecycle() {
 		fi
 	fi
 
-	# 仅对锁定稳定版 2026.9.1 显式执行两个必要 lifecycle (受控环境: cwd=pkg_dir, npm_config_ignore_scripts=true)
-	if [ "$target_ver" = "2026.9.1" ] || [ -z "$target_ver" ] || [ "$target_ver" = "stable" ]; then
-		local preinstall_script="${pkg_dir}/scripts/preinstall-package-manager-warning.mjs"
-		local postinstall_script="${pkg_dir}/scripts/postinstall-bundled-plugins.mjs"
-
-		if [ ! -f "$preinstall_script" ]; then
-			log_error "白名单 preinstall 脚本文件不存在: $preinstall_script"
+	# 只执行契约批准的 lifecycle 脚本 (受控环境: cwd=pkg_dir, npm_config_ignore_scripts=true)。
+	# 脚本列表来自兼容矩阵；未验证版本的命令也必须与已验证版本逐字一致，否则上一步已失败关闭。
+	local vetted
+	if ! vetted=$("$NODE_BIN" "$OC_PACKAGE_CONTRACT" get-vetted-scripts "$pkg_json" "$target_ver"); then
+		log_error "无法获取经审核的 lifecycle 脚本列表"
+		return 1
+	fi
+	local script
+	for script in $vetted; do
+		case "$script" in
+			scripts/*.mjs) ;;
+			*) log_error "拒绝执行非白名单路径的脚本: $script"; return 1 ;;
+		esac
+		if [ ! -f "${pkg_dir}/${script}" ]; then
+			log_error "白名单 lifecycle 脚本文件不存在: ${pkg_dir}/${script}"
 			return 1
 		fi
-		if [ ! -f "$postinstall_script" ]; then
-			log_error "白名单 postinstall 脚本文件不存在: $postinstall_script"
+		log_info "显式执行已校验的 OpenClaw lifecycle 脚本: ${script} (锁定 npm_config_ignore_scripts=true)"
+		if ! ( cd "$pkg_dir" && npm_config_ignore_scripts=true "$NODE_BIN" "$script" ); then
+			log_error "OpenClaw lifecycle 脚本执行失败 (${script}，退出码非零)"
 			return 1
 		fi
-
-		log_info "显式执行已校验的 OpenClaw preinstall 脚本 (受控环境)..."
-		if ! ( cd "$pkg_dir" && npm_config_ignore_scripts=true "$NODE_BIN" scripts/preinstall-package-manager-warning.mjs ); then
-			log_error "OpenClaw preinstall 脚本执行失败 (退出码非零)"
-			return 1
-		fi
-
-		log_info "显式执行已校验的 OpenClaw postinstall 脚本 (锁定 npm_config_ignore_scripts=true)..."
-		if ! ( cd "$pkg_dir" && npm_config_ignore_scripts=true "$NODE_BIN" scripts/postinstall-bundled-plugins.mjs ); then
-			log_error "OpenClaw postinstall 脚本执行失败 (退出码非零)"
-			return 1
-		fi
-		log_info "OpenClaw 已校验 lifecycle 脚本执行完成"
-	else
-		# latest/自定义版本不复用 2026.9.1 白名单: 存在 lifecycle 已在 validate-manifest 中 fail-closed；
-		# 无 lifecycle 时明确标记未验证，不能宣称完成受支持安装，严禁执行脚本
-		log_warn "当前安装版本为自定义/未验证版本 (${target_ver})，已严格阻断所有未验证的 lifecycle 脚本"
-		log_warn "该版本未列入已验证兼容测试矩阵，不属于受支持的稳定配置"
+	done
+	log_info "OpenClaw 已校验 lifecycle 脚本执行完成"
+	if [ "${OC_TARGET_VERIFIED:-verified}" != "verified" ]; then
+		log_warn "当前安装版本 (${target_ver}) 未列入本插件已验证兼容矩阵，不属于受支持的稳定配置"
 	fi
 	return 0
 }
@@ -725,22 +901,14 @@ install_openclaw() {
 	echo ""
 	echo "=== 安装 OpenClaw ==="
 
-	# 确定安装版本
-	local target_ver=""
-	local oc_pkg="openclaw"
-	if [ -z "$OC_VERSION" ] || [ "$OC_VERSION" = "stable" ]; then
-		target_ver="${OC_TESTED_VERSION}"
-		oc_pkg="openclaw@${OC_TESTED_VERSION}"
-		log_info "默认稳定版: v${OC_TESTED_VERSION}"
-	elif [ "$OC_VERSION" = "latest" ]; then
-		target_ver="latest"
-		oc_pkg="openclaw@latest"
-		log_info "安装 npm latest 稳定标签版本"
-	else
-		target_ver="${OC_VERSION}"
-		oc_pkg="openclaw@${OC_VERSION}"
-		log_info "指定版本: v${OC_VERSION}"
+	# 确定安装版本: 通道 / 锁定版本 → 精确版本 (默认只装本插件已验证的版本)
+	if ! resolve_target_version; then
+		log_error "无法确定安装目标版本，安装终止"
+		exit 1
 	fi
+	print_target_summary
+	local target_ver="$OC_TARGET_VER"
+	local oc_pkg="openclaw@${OC_TARGET_VER}"
 
 	# 检查 git 是否可用 (openclaw 部分依赖可能使用 git:// 协议)
 	if ! command -v git >/dev/null 2>&1; then
@@ -784,6 +952,7 @@ install_openclaw() {
 	if [ "$pack_rc" -ne 0 ]; then
 		cat "$pack_log" 2>/dev/null || true
 		log_error "npm pack 下载失败 (退出码: ${pack_rc})"
+		npm_selfcheck || npm_runtime_broken_hint
 		rm -rf "$stage_dir" 2>/dev/null || true
 		OC_STAGE_DIR=""
 		exit "$pack_rc"
@@ -793,6 +962,12 @@ install_openclaw() {
 	tarball=$(ls "$stage_dir"/*.tgz 2>/dev/null | head -1)
 	if [ -z "$tarball" ] || [ ! -f "$tarball" ]; then
 		log_error "npm pack 未生成有效 tarball 产物"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		exit 1
+	fi
+
+	if ! validate_openclaw_tarball "$tarball" "$target_ver"; then
 		rm -rf "$stage_dir" 2>/dev/null || true
 		OC_STAGE_DIR=""
 		exit 1
@@ -967,12 +1142,29 @@ init_openclaw() {
 	oc_entry=$(find_oc_entry)
 
 	if [ -n "$oc_entry" ]; then
-		HOME="$OC_DATA" \
-		OPENCLAW_HOME="$OC_DATA" \
-		OPENCLAW_STATE_DIR="${OC_DATA}/.openclaw" \
-		OPENCLAW_CONFIG_PATH="${OC_DATA}/.openclaw/openclaw.json" \
-		"$NODE_BIN" "$oc_entry" onboard --non-interactive --accept-risk --tools-profile coding 2>/dev/null || true
-		log_info "初始化完成"
+		# 历史版本传了不存在的 --tools-profile 且缺少 NODE_ICU_DATA，onboard 实际从未成功，
+		# 配置一直由 init.d 首次启动补全。这里改用上游支持的参数完成工作区与 Gateway 初始化:
+		#   - 显式 --gateway-bind lan/--gateway-port，避免 onboard 默认的 loopback 被 init.d 当作用户设置保留
+		#   - 跳过守护进程/健康检查/渠道/技能等交互步骤，模型与渠道由插件菜单配置
+		# onboard 失败不影响安装: init.d 启动时仍会补全关键字段，Gateway 在最小配置下也能启动 (已实测)。
+		local gw_port
+		gw_port=$(uci -q get openclaw.main.port 2>/dev/null || echo "18789")
+		case "$gw_port" in ''|*[!0-9]*) gw_port=18789 ;; esac
+		if HOME="$OC_DATA" \
+			OPENCLAW_HOME="$OC_DATA" \
+			OPENCLAW_STATE_DIR="${OC_DATA}/.openclaw" \
+			OPENCLAW_CONFIG_PATH="${OC_DATA}/.openclaw/openclaw.json" \
+			NODE_ICU_DATA="${NODE_BASE}/share/icu" \
+			OPENCLAW_SUPERVISOR_MODE=external \
+			OPENCLAW_SERVICE_REPAIR_POLICY=external \
+			"$NODE_BIN" "$oc_entry" onboard --non-interactive --accept-risk --mode local \
+				--auth-choice skip --gateway-bind lan --gateway-port "$gw_port" \
+				--skip-daemon --skip-health --skip-channels --skip-skills --skip-search --skip-hooks \
+				>/dev/null 2>&1; then
+			log_info "初始化完成"
+		else
+			log_warn "OpenClaw onboard 未完成，首次启动服务时将由插件补全基础配置"
+		fi
 	fi
 
 	# 设置文件权限
@@ -986,7 +1178,35 @@ do_setup() {
 
 	# 检查是否已安装
 	if [ -x "$NODE_BIN" ] && [ -n "$(find_oc_entry)" ]; then
+		# 已安装但 npm 损坏 (#109): 只重新下载 Node.js 运行时，OpenClaw 与数据保持不变。
+		# 不启用 OC_SETUP_CLEANUP，失败时不清理已有安装；download_node 仅在新运行时解压校验通过后才替换旧目录。
+		# 仅在 npm 存在但无法运行时修复: 手工预放置的安装 (#113) 可能没有 npm，
+		# 此时自动下载 Node.js 恰好会触发这类设备要避免的大量快速写入。
+		if [ -e "$NPM_BIN" ] && ! npm_selfcheck; then
+			echo "=== 修复 Node.js 运行时 ==="
+			log_warn "检测到 npm 无法运行，将重新下载 Node.js 运行时 (OpenClaw 程序与数据保持不变):"
+			printf '%s\n' "$NPM_SELFCHECK_OUTPUT" | sed 's/^/      /'
+			download_node "$node_ver" || exit 1
+			if npm_selfcheck; then
+				log_info "Node.js 运行时修复完成，可以重新执行升级"
+				exit 0
+			fi
+			npm_runtime_broken_hint
+			exit 1
+		fi
 		install_openclaw_cli_wrapper || true
+		# 预放置安装 (#113): 程序文件由用户限速拷贝到位但从未初始化 (无 openclaw.json)。
+		# 补齐系统用户、运行时契约校验与初始化，不触发任何下载或解压。
+		if [ ! -f "$OC_DATA/.openclaw/openclaw.json" ]; then
+			echo "=== 初始化预放置的 OpenClaw 运行环境 ==="
+			ensure_openclaw_user
+			assert_node_runtime
+			init_openclaw
+			echo ""
+			log_info "预放置安装已完成初始化 (未下载或解压任何文件)"
+			log_info "请在 LuCI → 服务 → OpenClaw 中启用并启动服务，首次启动时会生成 openclaw.json"
+			exit 0
+		fi
 		local oc_ver=""
 		local oc_entry="$(find_oc_entry)"
 		local oc_pkg_dir="$(dirname "$oc_entry")"
@@ -1013,11 +1233,12 @@ do_setup() {
 	echo ""
 	echo "  架构:       $(uname -m)"
 	echo "  Node 版本:  v${node_ver}"
-	if [ -n "$OC_VERSION" ]; then
-		echo "  OpenClaw:   v${OC_VERSION} (稳定版)"
-	else
-		echo "  OpenClaw:   v${OC_TESTED_VERSION} (默认稳定版)"
-	fi
+	case "$OC_VERSION" in
+		""|stable|latest|extended-stable)
+			echo "  OpenClaw:   发布通道 ${OC_VERSION:-${OC_CHANNEL:-默认}} (安装本插件已验证版本)" ;;
+		*)
+			echo "  OpenClaw:   锁定版本 v${OC_VERSION}" ;;
+	esac
 	echo "  安装路径:   ${OC_INSTALL_PATH}"
 	echo "  数据路径:   ${OC_DATA}"
 	echo ""
@@ -1104,6 +1325,7 @@ upgrade_openclaw() {
 	local rep_backup="skipped"
 	local rep_doctor="skipped"
 	local rep_gateway="skipped"
+	local rep_wechat="not-enabled"
 	local rep_rollback="none"
 	local rep_verified=""
 
@@ -1126,6 +1348,7 @@ upgrade_openclaw() {
 		echo "BACKUP: ${rep_backup}"
 		echo "DOCTOR: ${rep_doctor}"
 		echo "GATEWAY: ${rep_gateway}"
+		echo "WECHAT: ${rep_wechat}"
 		echo "ROLLBACK: ${rep_rollback}"
 		echo "VERIFIED: ${rep_verified}"
 		echo "============================================================"
@@ -1139,6 +1362,13 @@ upgrade_openclaw() {
 	fi
 	if [ ! -x "$NPM_BIN" ]; then
 		log_error "npm 可执行文件不可用 ($NPM_BIN)，无法升级 OpenClaw"
+		print_upgrade_report
+		exit 1
+	fi
+	# 升级前先确认 npm 可运行，避免在 npm pack 阶段才以内部错误失败 (#109)
+	if ! npm_selfcheck; then
+		npm_runtime_broken_hint
+		record_verified_cmd "npm-selfcheck" 1
 		print_upgrade_report
 		exit 1
 	fi
@@ -1166,16 +1396,28 @@ upgrade_openclaw() {
 
 	echo "=== 正在升级 OpenClaw ==="
 	echo ""
-	local target_ver="${OC_TESTED_VERSION}"
-	local target_pkg="openclaw@${OC_TESTED_VERSION}"
-	if [ "$OC_VERSION" = "latest" ]; then
-		target_ver="latest"
-		target_pkg="openclaw@latest"
-	elif [ -n "$OC_VERSION" ] && [ "$OC_VERSION" != "stable" ]; then
-		target_ver="${OC_VERSION}"
-		target_pkg="openclaw@${OC_VERSION}"
+	if ! resolve_target_version; then
+		log_error "无法确定升级目标版本，升级终止 (原有安装保持不变)"
+		record_verified_cmd "resolve-target" 1
+		print_upgrade_report
+		exit 1
 	fi
-	echo "目标版本: ${target_pkg#openclaw@}"
+	print_target_summary
+	local target_ver="$OC_TARGET_VER"
+	local target_pkg="openclaw@${OC_TARGET_VER}"
+	echo "目标版本: ${target_ver}"
+
+	# 先把 Node.js 升级到推荐版本 (2026.9.34+ 要求 >= 24.22.1)。
+	# 推荐的 24.x 同时满足旧版 OpenClaw 的 engines，后续步骤失败或显式回滚时旧版本仍可运行；
+	# download_node 只在新运行时完整解压并通过校验后才替换旧目录。
+	local node_rc=0
+	download_node "$NODE_VERSION" || node_rc=$?
+	record_verified_cmd "node-runtime" "$node_rc"
+	if [ "$node_rc" -ne 0 ]; then
+		log_error "Node.js 运行时升级失败，OpenClaw 升级终止 (原有安装保持不变)"
+		print_upgrade_report
+		exit 1
+	fi
 
 	local stage_dir
 	stage_dir=$(mktemp -d /tmp/openclaw-stage-XXXXXX 2>/dev/null || mktemp -d 2>/dev/null || echo "/tmp/openclaw-stage-$$-${RANDOM:-0}")
@@ -1194,6 +1436,7 @@ upgrade_openclaw() {
 	if [ "$pack_rc" -ne 0 ]; then
 		cat "$pack_log" 2>/dev/null || true
 		log_error "npm pack 升级下载失败 (退出码: ${pack_rc})"
+		npm_selfcheck || npm_runtime_broken_hint
 		rm -rf "$stage_dir" 2>/dev/null || true
 		OC_STAGE_DIR=""
 		rep_result="failed"
@@ -1205,6 +1448,17 @@ upgrade_openclaw() {
 	tarball=$(ls "$stage_dir"/*.tgz 2>/dev/null | head -1)
 	if [ -z "$tarball" ] || [ ! -f "$tarball" ]; then
 		log_error "npm pack 未生成有效 tarball 产物"
+		rm -rf "$stage_dir" 2>/dev/null || true
+		OC_STAGE_DIR=""
+		rep_result="failed"
+		print_upgrade_report
+		exit 1
+	fi
+
+	local integrity_rc=0
+	validate_openclaw_tarball "$tarball" "$target_ver" || integrity_rc=1
+	record_verified_cmd "tarball-integrity" "$integrity_rc"
+	if [ "$integrity_rc" -ne 0 ]; then
 		rm -rf "$stage_dir" 2>/dev/null || true
 		OC_STAGE_DIR=""
 		rep_result="failed"
@@ -1479,17 +1733,23 @@ upgrade_openclaw() {
 		exit 1
 	fi
 
-	# ── 迁移开始阶段: 任何失败必须保留 2026.9.1 与失败状态，进入 recovery 状态 ──
+	# ── 迁移开始阶段: 任何失败必须保留新代码、备份与失败状态，进入 recovery 状态 ──
 	# 严禁在迁移开始后将旧代码放回已迁移状态，完整回滚必须显式执行
 	if [ "$state_managed" -eq 1 ]; then
 		"$state_helper" set-phase migrating "$state_dir" 0 "" "$bk_archive" 2>/dev/null || true
+
+		# 0. Doctor 之前修正插件历史写入的不兼容字段 (Discord botToken → token 等)；
+		#    新版 Doctor 会删除未知键，不先迁移就会丢失用户的 Token。解析失败时不写入。
+		local fix_rc=0
+		run_config_fixups "$CONFIG_FILE" || fix_rc=$?
+		record_verified_cmd "config-fixups" "$fix_rc"
 
 		# 1. 幂等 Doctor migration、配置验证及 Token 对账
 		local doc_rc=0
 		"$state_helper" doctor-migration "$state_dir" "$target_ver" >/dev/null 2>&1 || doc_rc=$?
 		record_verified_cmd "doctor" "$doc_rc"
 		if [ "$doc_rc" -ne 0 ]; then
-			log_error "Doctor migration 失败，系统已进入 recovery 恢复模式 (保留 2026.9.1 及状态，需显式回滚)..."
+			log_error "Doctor migration 失败，系统已进入 recovery 恢复模式 (保留新版本代码、备份与状态，需显式回滚)..."
 			rep_doctor="failed (exit=${doc_rc})"
 
 			"$state_helper" set-phase recovery "$state_dir" "$doc_rc" "Doctor migration failed" "$bk_archive" 2>/dev/null || true
@@ -1497,7 +1757,7 @@ upgrade_openclaw() {
 			rm -rf "$stage_dir" 2>/dev/null || true
 			OC_STAGE_DIR=""
 			rep_result="failed"
-			rep_rollback="recovery_required (manual explicit rollback needed; new state & 2026.9.1 preserved)"
+			rep_rollback="recovery_required (manual explicit rollback needed; new code, state & backup preserved)"
 			print_upgrade_report
 			exit "$doc_rc"
 		fi
@@ -1508,6 +1768,38 @@ upgrade_openclaw() {
 		local plug_rc=0
 		"$state_helper" plugin-convergence "$state_dir" >/dev/null 2>&1 || plug_rc=$?
 		record_verified_cmd "plugin-convergence" "$plug_rc"
+
+		# 微信插件版本收敛: 核心移除 plugin-sdk 子路径后旧插件的渠道会崩溃循环，
+		# 而 plugins list 仍显示 loaded，所以按矩阵判断。网络失败不回滚核心，在报告里写明。
+		local wx_cur wx_plan wx_action wx_pin wx_min wx_new
+		wx_cur=$(wechat_installed_version)
+		if [ -n "$wx_cur" ]; then
+			wx_plan=$("$NODE_BIN" "$OC_PACKAGE_CONTRACT" wechat-plan "$target_ver" "$wx_cur" 2>/dev/null || echo "unknown - -")
+			wx_action=${wx_plan%% *}
+			wx_min=${wx_plan##* }
+			wx_pin=${wx_plan#* }
+			wx_pin=${wx_pin%% *}
+			case "$wx_action" in
+				ok) rep_wechat="ok (${wx_cur})" ;;
+				upgrade)
+					log_info "微信插件 ${wx_cur} 低于 OpenClaw ${target_ver} 要求的 ${wx_min}，升级到 ${wx_pin}..."
+					local wx_rc=0
+					"$state_helper" wechat-install "$state_dir" "$wx_pin" >/tmp/openclaw-wechat-upgrade.log 2>&1 || wx_rc=$?
+					record_verified_cmd "wechat-plugin" "$wx_rc"
+					wx_new=$(wechat_installed_version)
+					if [ "$wx_rc" -eq 0 ] && [ "$wx_new" = "$wx_pin" ]; then
+						rep_wechat="updated (${wx_cur} -> ${wx_new})"
+					else
+						rep_wechat="failed (${wx_new:-unknown}, need ${wx_min}; see /tmp/openclaw-wechat-upgrade.log)"
+						log_error "微信插件升级失败，微信渠道可能无法运行。可在 LuCI 微信页面重新安装，日志: /tmp/openclaw-wechat-upgrade.log"
+					fi
+					;;
+				*)
+					rep_wechat="unknown (${wx_cur}, core ${target_ver} not in compat matrix)"
+					log_warn "OpenClaw ${target_ver} 未经本插件验证，无法确认微信插件 ${wx_cur} 是否兼容"
+					;;
+			esac
+		fi
 
 		# 3. 启动 Gateway
 		local gw_start_rc=0
@@ -1538,7 +1830,7 @@ upgrade_openclaw() {
 			rm -rf "$stage_dir" 2>/dev/null || true
 			OC_STAGE_DIR=""
 			rep_result="failed"
-			rep_rollback="recovery_required (manual explicit rollback needed; new state & 2026.9.1 preserved)"
+			rep_rollback="recovery_required (manual explicit rollback needed; new code, state & backup preserved)"
 			print_upgrade_report
 			exit "$gw_health_rc"
 		fi
@@ -1599,7 +1891,7 @@ do_upgrade() {
 do_factory_reset() {
 	local config_dir="${OC_DATA}/.openclaw"
 	local config_file="${config_dir}/openclaw.json"
-	local auth_file="${config_dir}/agents/main/agent/auth-profiles.json"
+	local providers_js="/usr/share/openclaw/oc-providers.js"
 
 	log_info "恢复出厂设置..."
 
@@ -1617,16 +1909,28 @@ do_factory_reset() {
 		log_info "备份已保存: backups/openclaw_${backup_ts}.json"
 	fi
 
-	# 3. 重置配置
+	# 3. 清除认证信息: 凭据保存在上游认证库 (state/openclaw.sqlite)，通过官方 logout 逐条注销。
+	#    旧实现清空的 auth-profiles.json 已在 2026.9.x 退役，实际凭据从未被清除。
+	#    必须在重置配置之前执行，否则自定义 provider 等上下文已丢失。
+	if [ -x "$NODE_BIN" ] && [ -f "$providers_js" ]; then
+		local _pid
+		for _pid in $(NODE_BIN="$NODE_BIN" NODE_BASE="$NODE_BASE" OC_GLOBAL="$OC_GLOBAL" OC_DATA="$OC_DATA" \
+			OPENCLAW_STATE_DIR="$config_dir" OPENCLAW_CONFIG_PATH="$config_file" \
+			"$NODE_BIN" "$providers_js" status 2>/dev/null | awk -F '\t' '$1=="PROFILE" { print $2 }'); do
+			if NODE_BIN="$NODE_BIN" NODE_BASE="$NODE_BASE" OC_GLOBAL="$OC_GLOBAL" OC_DATA="$OC_DATA" \
+				OPENCLAW_STATE_DIR="$config_dir" OPENCLAW_CONFIG_PATH="$config_file" \
+				"$NODE_BIN" "$providers_js" remove-auth "$_pid" 2>/dev/null | grep -q '^OK'; then
+				log_info "已注销凭据: $_pid"
+			else
+				log_warn "凭据注销失败: $_pid"
+			fi
+		done
+	fi
+
+	# 4. 重置配置
 	rm -f "$config_file" "${config_file}.bak" 2>/dev/null || true
 	echo '{}' > "$config_file"
 	chown openclaw:openclaw "$config_file" 2>/dev/null || true
-
-	# 4. 重置认证信息
-	if [ -f "$auth_file" ]; then
-		echo '{"version":1,"profiles":{},"usageStats":{}}' > "$auth_file"
-		chown openclaw:openclaw "$auth_file" 2>/dev/null || true
-	fi
 
 	# 5. 重新初始化
 	if [ -x "$NODE_BIN" ]; then
@@ -1634,7 +1938,13 @@ do_factory_reset() {
 		oc_entry=$(find "$OC_GLOBAL" -name "openclaw.mjs" -path "*/openclaw/openclaw.mjs" 2>/dev/null | head -1)
 		if [ -n "$oc_entry" ]; then
 			log_info "重新初始化..."
-			OPENCLAW_HOME="$OC_DATA" "$NODE_BIN" "$oc_entry" onboard --non-interactive --accept-risk --tools-profile coding >/dev/null 2>&1 || true
+			# 参数与 init_openclaw 一致 (历史上的 --tools-profile 不是合法参数，onboard 一直静默失败)
+			HOME="$OC_DATA" OPENCLAW_HOME="$OC_DATA" OPENCLAW_STATE_DIR="$config_dir" OPENCLAW_CONFIG_PATH="$config_file" \
+				NODE_ICU_DATA="${NODE_BASE}/share/icu" OPENCLAW_SUPERVISOR_MODE=external OPENCLAW_SERVICE_REPAIR_POLICY=external \
+				"$NODE_BIN" "$oc_entry" onboard --non-interactive --accept-risk --mode local \
+				--auth-choice skip --gateway-bind lan --gateway-port 18789 \
+				--skip-daemon --skip-health --skip-channels --skip-skills --skip-search --skip-hooks >/dev/null 2>&1 \
+				|| log_warn "onboard 未完成，首次启动服务时将由插件补全基础配置"
 		fi
 	fi
 
@@ -1643,7 +1953,7 @@ do_factory_reset() {
 		local new_token
 		new_token=$(head -c 24 /dev/urandom | hexdump -e '24/1 "%02x"' 2>/dev/null || dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 48)
 		_JS_KEY="gateway.port" _JS_VAL="18789" "$NODE_BIN" -e "const fs=require('fs');let d={};try{d=JSON.parse(fs.readFileSync('${config_file}','utf8'));}catch(e){}const ks=process.env._JS_KEY.split('.');let o=d;for(let i=0;i<ks.length-1;i++){if(!o[ks[i]]||typeof o[ks[i]]!=='object')o[ks[i]]={};o=o[ks[i]];}let v=process.env._JS_VAL;try{v=JSON.parse(v);}catch(e){}o[ks[ks.length-1]]=v;fs.writeFileSync('${config_file}',JSON.stringify(d,null,2));" 2>/dev/null
-		for kv in "gateway.bind=lan" "gateway.mode=local" "gateway.auth.mode=token" "gateway.auth.token=${new_token}" "gateway.controlUi.allowInsecureAuth=true" "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true" "gateway.tailscale.mode=off" "acp.dispatch.enabled=false" "tools.profile=coding"; do
+		for kv in "gateway.bind=lan" "gateway.mode=local" "gateway.auth.mode=token" "gateway.auth.token=${new_token}" "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true" "gateway.tailscale.mode=off" "acp.dispatch.enabled=false" "tools.profile=coding"; do
 			local k="${kv%%=*}" v="${kv#*=}"
 			_JS_KEY="$k" _JS_VAL="$v" "$NODE_BIN" -e "const fs=require('fs');let d={};try{d=JSON.parse(fs.readFileSync('${config_file}','utf8'));}catch(e){}const ks=process.env._JS_KEY.split('.');let o=d;for(let i=0;i<ks.length-1;i++){if(!o[ks[i]]||typeof o[ks[i]]!=='object')o[ks[i]]={};o=o[ks[i]];}let v=process.env._JS_VAL;try{v=JSON.parse(v);}catch(e){}o[ks[ks.length-1]]=v;fs.writeFileSync('${config_file}',JSON.stringify(d,null,2));" 2>/dev/null
 		done
@@ -1792,14 +2102,19 @@ case "${1:-}" in
 	factory-reset)
 		do_factory_reset
 		;;
+	versions)
+		shift
+		do_versions "$@"
+		;;
 	*)
-		echo "用法: openclaw-env {setup|setup-offline|check|upgrade|node|factory-reset}"
+		echo "用法: openclaw-env {setup|setup-offline|check|upgrade|node|versions|factory-reset}"
 		echo ""
 		echo "  setup          — 完整安装 (下载 Node.js + pnpm + OpenClaw)"
 		echo "  setup-offline  — 离线安装 (从本地文件安装，由 .run 安装器调用)"
 		echo "  check          — 检查环境状态"
-		echo "  upgrade        — 升级 OpenClaw 到最新版"
+		echo "  upgrade        — 升级 OpenClaw 到所选通道的已验证版本"
 		echo "  node           — 仅下载/更新 Node.js"
+		echo "  versions       — 输出发布通道、上游版本与已验证版本 (JSON，--offline 不联网)"
 		echo "  factory-reset  — 恢复出厂设置 (清除所有配置)"
 		exit 1
 		;;
