@@ -1022,7 +1022,8 @@ function action_uninstall()
 	sys.exec("for p in " .. port .. " " .. pty_port .. "; do pid=$(netstat -tulnp 2>/dev/null | grep \":$p \" | awk '{print $7}' | cut -d'/' -f1); [ -n \"$pid\" ] && kill -9 \"$pid\" 2>/dev/null; done")
 	sys.exec("ss -tulnp 2>/dev/null | awk '/:" .. port .. " |:" .. pty_port .. " /{print $NF}' | awk -F',' '{print $2}' | awk -F'=' '{print $2}' | xargs -r kill -9 2>/dev/null")
 	sys.exec("pgrep -f 'openclaw-gateway|web-pty.js' 2>/dev/null | xargs -r kill -9 2>/dev/null")
-	sys.exec("pgrep -u openclaw 2>/dev/null | xargs -r kill -9 2>/dev/null")
+	-- BusyBox pgrep 没有 -u，按 /proc 属主枚举服务用户的进程
+	sys.exec("ls -ld /proc/[0-9]* 2>/dev/null | awk '$3 == \"openclaw\" { p = $NF; sub(\".*/\", \"\", p); print p }' | xargs -r kill -9 2>/dev/null")
 
 	-- 禁用开机启动
 	sys.exec("/etc/init.d/openclaw disable 2>/dev/null")
@@ -2011,7 +2012,8 @@ function action_wechat_login()
 
         -- 清理旧状态和可能的残留进程
         sys.exec("kill -9 $(cat /tmp/openclaw-wechat-login.pid 2>/dev/null) 2>/dev/null")
-        sys.exec("pkill -f 'channels login --channel openclaw-weixin' 2>/dev/null")
+        -- BusyBox 固件常没有 pkill。[w] 让正则匹配不到执行这条命令的 sh 自身
+        sys.exec("pgrep -f 'channels login --channel openclaw-[w]eixin' 2>/dev/null | xargs -r kill 2>/dev/null")
         sys.exec("rm -f /tmp/openclaw-wechat-qrcode.txt /tmp/openclaw-wechat-login.pid /tmp/openclaw-wechat-login.exit /tmp/openclaw-wechat-restarted")
 
         local wechat_plugin_dir = find_wechat_plugin_dir(install_path)

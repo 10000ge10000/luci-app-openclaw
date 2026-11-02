@@ -10,6 +10,7 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
+const { StringDecoder } = require('string_decoder');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -187,7 +188,11 @@ class PtySession {
         this.buffer = this.buffer.slice(frame.totalLen);
         if (frame.opcode === 0x01) this._handleMessage(frame.data.toString());
         else if (frame.opcode === 0x02 && this.proc && this.proc.stdin.writable) this.proc.stdin.write(frame.data);
-        else if (frame.opcode === 0x08) { console.log('[oc-config] WS close frame received'); this._cleanup(); }
+        else if (frame.opcode === 0x08) {
+          const closeCode = frame.data.length >= 2 ? frame.data.readUInt16BE(0) : 'none';
+          console.log(`[oc-config] WS close frame received (code=${closeCode})`);
+          this._cleanup();
+        }
         else if (frame.opcode === 0x09) this.socket.write(encodeWSFrame(frame.data, 0x0a));
         else if (frame.opcode === 0x0a) { this._pongReceived = true; }
       }
@@ -246,8 +251,16 @@ class PtySession {
         { stdio: ['pipe', 'pipe', 'pipe'], env, detached: true });
     }
 
-    this.proc.stdout.on('data', (d) => { if (this.alive) { this._spawnFailCount = 0; this.socket.write(encodeWSFrame(d, 0x01)); } });
-    this.proc.stderr.on('data', (d) => { if (this.alive) { this._spawnFailCount = 0; this.socket.write(encodeWSFrame(d, 0x01)); } });
+    // 文本帧必须是合法 UTF-8，否则浏览器按 RFC 6455 以 1007 断开连接，表现为终端反复重连。
+    // BusyBox script 每次最多读 1024 字节，中文字符会被切到两个块里，所以要按完整字符转发。
+    const forwardOutput = (stream) => {
+      const decoder = new StringDecoder('utf8');
+      const send = (text) => { if (text && this.alive) this.socket.write(encodeWSFrame(text, 0x01)); };
+      stream.on('data', (d) => { if (this.alive) { this._spawnFailCount = 0; send(decoder.write(d)); } });
+      stream.on('end', () => send(decoder.end()));
+    };
+    forwardOutput(this.proc.stdout);
+    forwardOutput(this.proc.stderr);
     this.proc.on('close', (code) => {
       if (!this.alive) return;
       // PTY 以 root 运行，子脚本可能创建了 root-owned 的目录
@@ -329,7 +342,8 @@ function handleRequest(req, res) {
 
 // ── WebSocket Upgrade ──
 function handleUpgrade(req, socket, head) {
-  console.log(`[oc-config] WS upgrade: ${req.url} remote=${socket.remoteAddress}:${socket.remotePort}`);
+  // 查询串里有 token，不能写进 syslog
+  console.log(`[oc-config] WS upgrade: ${req.url.split('?')[0]} remote=${socket.remoteAddress}:${socket.remotePort}`);
   if (req.url !== '/ws' && !req.url.startsWith('/ws?')) { socket.destroy(); return; }
 
   // 认证: 验证查询参数或 Cookie 中的 token
